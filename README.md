@@ -215,6 +215,38 @@ terraform plan -var-file=prod.tfvars
 | POST | `/api/v1/classify` | Classify document type |
 | POST | `/api/v1/chat` | AI chat completion |
 
+## Secrets Setup
+
+### Local Development
+
+1. Copy the example environment file:
+```bash
+cp .env.example .env
+```
+
+2. Edit `.env` with your actual credentials (file is gitignored)
+
+### Infrastructure (Terraform)
+
+1. Copy the example tfvars:
+```bash
+cp terraform/terraform.tfvars.example terraform/terraform.tfvars
+```
+
+2. Edit `terraform/terraform.tfvars` with your credentials (file is gitignored)
+
+### Security Notes
+
+| File | Purpose | Git Status |
+|------|---------|------------|
+| `.env` | Local dev secrets | Gitignored |
+| `terraform/terraform.tfvars` | Infrastructure secrets | Gitignored |
+| `terraform/tfplan` | Terraform plan output | Gitignored |
+
+> **Note**: Secrets are passed to ECI containers as environment variables at deploy time. No external secrets manager required for staging.
+
+---
+
 ## Environment Variables
 
 See [.env.example](.env.example) for complete list.
@@ -276,8 +308,11 @@ redis-cli SET ai:forms:enabled "true"
 - mTLS between Go and Python services
 - JWT authentication with refresh token rotation
 - Row-level security for multi-tenancy
-- All secrets via environment variables
+- Secrets in gitignored files (`terraform.tfvars`, `.env`)
+- ECI containers receive secrets as env vars at deploy
 - No PII in logs
+
+See [Final_md/SECURITY.md](Final_md/SECURITY.md) for full security documentation.
 
 ## Contributing
 
