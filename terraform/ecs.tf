@@ -36,13 +36,14 @@ resource "alicloud_eci_container_group" "go_backend" {
   vswitch_id           = alicloud_vswitch.private[0].id
   zone_id              = data.alicloud_zones.available.zones[0].id
 
-  # RAM role for KMS secrets access
-  ram_role_name = alicloud_ram_role.eci_role.name
+  # RAM role disabled - causes "AliyunECIContainerGroupRole does not belong to eci.aliyuncs.com" error
+  # TODO: Re-enable once ECI service-linked role is activated in console
+  # ram_role_name = alicloud_ram_role.eci_role.name
 
   containers {
     name = "go-backend"
     # Using VPC endpoint - accessible from any subnet in linked VPC
-    image             = "fzco-acr-registry-vpc.${var.region}.cr.aliyuncs.com/${alicloud_cr_ee_namespace.main.name}/go-backend:${var.image_tag}"
+    image             = "fzco-acr-registry.${var.region}.cr.aliyuncs.com/${alicloud_cr_ee_namespace.main.name}/go-backend:${var.image_tag}"
     cpu               = var.go_backend_cpu / 1000
     memory            = var.go_backend_memory / 1024
     image_pull_policy = "Always"
@@ -201,7 +202,7 @@ resource "alicloud_eci_container_group" "go_backend" {
 
   # Image registry credentials (VPC endpoint - works from any subnet in linked VPC)
   image_registry_credential {
-    server    = "fzco-acr-registry-vpc.${var.region}.cr.aliyuncs.com"
+    server    = "fzco-acr-registry.${var.region}.cr.aliyuncs.com"
     user_name = var.acr_username
     password  = var.acr_password
   }
@@ -232,7 +233,7 @@ resource "alicloud_eci_container_group" "python_ai" {
 
   containers {
     name              = "python-ai"
-    image             = "fzco-acr-registry-vpc.${var.region}.cr.aliyuncs.com/${alicloud_cr_ee_namespace.main.name}/python-ai:${var.image_tag}"
+    image             = "fzco-acr-registry.${var.region}.cr.aliyuncs.com/${alicloud_cr_ee_namespace.main.name}/python-ai:${var.image_tag}"
     cpu               = var.python_ai_cpu / 1000
     memory            = var.python_ai_memory / 1024
     image_pull_policy = "Always"
@@ -379,7 +380,7 @@ resource "alicloud_eci_container_group" "python_ai" {
 
   # Image registry credentials
   image_registry_credential {
-    server    = "fzco-acr-registry-vpc.${var.region}.cr.aliyuncs.com"
+    server    = "fzco-acr-registry.${var.region}.cr.aliyuncs.com"
     user_name = var.acr_username
     password  = var.acr_password
   }

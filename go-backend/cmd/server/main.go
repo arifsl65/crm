@@ -19,9 +19,11 @@ import (
 	"github.com/rs/zerolog/log"
 
 	"github.com/accountant-crm/go-backend/internal/ai"
+	"github.com/accountant-crm/go-backend/internal/auth"
 	"github.com/accountant-crm/go-backend/internal/cache"
 	"github.com/accountant-crm/go-backend/internal/config"
 	"github.com/accountant-crm/go-backend/internal/database"
+	"github.com/accountant-crm/go-backend/internal/handlers"
 	"github.com/accountant-crm/go-backend/internal/middleware"
 )
 
@@ -65,8 +67,19 @@ func main() {
 	}
 	defer aiClient.Close()
 
+	// Initialize JWT manager
+	jwtManager := auth.NewJWTManager(
+		cfg.JWT.SecretKey,
+		cfg.JWT.AccessTokenExpire,
+		cfg.JWT.RefreshTokenExpire,
+		cfg.JWT.Issuer,
+	)
+
+	// Initialize handlers
+	authHandler := handlers.NewAuthHandler(db, jwtManager)
+
 	// Setup Gin router
-	router := setupRouter(cfg, db, redis, aiClient)
+	router := setupRouter(cfg, db, redis, aiClient, jwtManager, authHandler)
 
 	// Create HTTP server
 	srv := &http.Server{
@@ -127,7 +140,7 @@ func setupLogging(cfg config.AppConfig) {
 }
 
 // setupRouter configures the Gin router with all routes.
-func setupRouter(cfg *config.Config, db *database.Pool, redis *cache.Client, aiClient *ai.Client) *gin.Engine {
+func setupRouter(cfg *config.Config, db *database.Pool, redis *cache.Client, aiClient *ai.Client, jwtManager *auth.JWTManager, authHandler *handlers.AuthHandler) *gin.Engine {
 	// Set Gin mode
 	if cfg.App.Env == "production" {
 		gin.SetMode(gin.ReleaseMode)
@@ -157,32 +170,37 @@ func setupRouter(cfg *config.Config, db *database.Pool, redis *cache.Client, aiC
 	// API v1 routes
 	v1 := router.Group("/api/v1")
 	{
-		// Auth routes (to be implemented)
-		auth := v1.Group("/auth")
+		// Auth routes
+		authRoutes := v1.Group("/auth")
 		{
-			auth.POST("/login", notImplementedHandler())
-			auth.POST("/refresh", notImplementedHandler())
-			auth.POST("/logout", notImplementedHandler())
+			authRoutes.POST("/login", authHandler.Login)
+			authRoutes.POST("/register", authHandler.Register)
+			authRoutes.POST("/refresh", authHandler.Refresh)
+			authRoutes.POST("/logout", middleware.JWTAuth(jwtManager), authHandler.Logout)
 		}
 
+		// Protected routes (require authentication)
+		protected := v1.Group("")
+		protected.Use(middleware.JWTAuth(jwtManager))
+
 		// Tenant routes (to be implemented)
-		tenants := v1.Group("/tenants")
+		tenants := protected.Group("/tenants")
 		{
 			tenants.GET("", notImplementedHandler())
-			tenants.POST("", notImplementedHandler())
+			tenants.POST("", middleware.RequireRole("super_admin"), notImplementedHandler())
 			tenants.GET("/:id", middleware.ValidateUUID("id"), notImplementedHandler())
-			tenants.PATCH("/:id", middleware.ValidateUUID("id"), notImplementedHandler())
-			tenants.DELETE("/:id", middleware.ValidateUUID("id"), notImplementedHandler())
+			tenants.PATCH("/:id", middleware.ValidateUUID("id"), middleware.RequireRole("super_admin", "tenant_admin"), notImplementedHandler())
+			tenants.DELETE("/:id", middleware.ValidateUUID("id"), middleware.RequireRole("super_admin"), notImplementedHandler())
 		}
 
 		// User routes (to be implemented)
-		users := v1.Group("/users")
+		users := protected.Group("/users")
 		{
 			users.GET("", notImplementedHandler())
-			users.POST("", notImplementedHandler())
+			users.POST("", middleware.RequireRole("super_admin", "tenant_admin"), notImplementedHandler())
 			users.GET("/:id", middleware.ValidateUUID("id"), notImplementedHandler())
 			users.PATCH("/:id", middleware.ValidateUUID("id"), notImplementedHandler())
-			users.DELETE("/:id", middleware.ValidateUUID("id"), notImplementedHandler())
+			users.DELETE("/:id", middleware.ValidateUUID("id"), middleware.RequireRole("super_admin", "tenant_admin"), notImplementedHandler())
 		}
 	}
 

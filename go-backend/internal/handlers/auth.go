@@ -1,0 +1,306 @@
+package handlers
+
+import (
+	"context"
+	"errors"
+	"net/http"
+	"strings"
+	"time"
+
+	"github.com/gin-gonic/gin"
+	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5"
+	"github.com/rs/zerolog/log"
+
+	"github.com/accountant-crm/go-backend/internal/auth"
+	"github.com/accountant-crm/go-backend/internal/database"
+)
+
+type AuthHandler struct {
+	db  *database.Pool
+	jwt *auth.JWTManager
+}
+
+func NewAuthHandler(db *database.Pool, jwt *auth.JWTManager) *AuthHandler {
+	return &AuthHandler{db: db, jwt: jwt}
+}
+
+type LoginRequest struct {
+	Email    string `json:"email" binding:"required,email"`
+	Password string `json:"password" binding:"required,min=8"`
+}
+
+type RegisterRequest struct {
+	Email     string `json:"email" binding:"required,email"`
+	Password  string `json:"password" binding:"required,min=8"`
+	FirstName string `json:"first_name" binding:"required"`
+	LastName  string `json:"last_name" binding:"required"`
+	TenantID  string `json:"tenant_id" binding:"required,uuid"`
+}
+
+type AuthResponse struct {
+	AccessToken  string    `json:"access_token"`
+	RefreshToken string    `json:"refresh_token"`
+	ExpiresAt    time.Time `json:"expires_at"`
+	User         UserInfo  `json:"user"`
+}
+
+type UserInfo struct {
+	ID        string `json:"id"`
+	Email     string `json:"email"`
+	FirstName string `json:"first_name"`
+	LastName  string `json:"last_name"`
+	Role      string `json:"role"`
+	TenantID  string `json:"tenant_id"`
+}
+
+type RefreshRequest struct {
+	RefreshToken string `json:"refresh_token" binding:"required"`
+}
+
+func (h *AuthHandler) Login(c *gin.Context) {
+	var req LoginRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{
+			"error":   "validation_error",
+			"message": "Invalid request body",
+		})
+		return
+	}
+
+	ctx := c.Request.Context()
+	user, err := h.getUserByEmail(ctx, req.Email)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			c.JSON(http.StatusUnauthorized, gin.H{
+				"error":   "invalid_credentials",
+				"message": "Invalid email or password",
+			})
+			return
+		}
+		log.Error().Err(err).Str("email", req.Email).Msg("Failed to fetch user")
+		c.JSON(http.StatusInternalServerError, gin.H{
+			"error":   "internal_error",
+			"message": "An error occurred",
+		})
+		return
+	}
+
+	if user.LockedUntil != nil && user.LockedUntil.After(time.Now()) {
+		c.JSON(http.StatusForbidden, gin.H{
+			"error":   "account_locked",
+			"message": "Account is temporarily locked",
+		})
+		return
+	}
+
+	valid, err := auth.VerifyPassword(req.Password, user.PasswordHash)
+	if err != nil || !valid {
+		_ = h.incrementFailedAttempts(ctx, user.ID)
+		c.JSON(http.StatusUnauthorized, gin.H{
+			"error":   "invalid_credentials",
+			"message": "Invalid email or password",
+		})
+		return
+	}
+
+	_ = h.resetFailedAttempts(ctx, user.ID)
+
+	tokenPair, err := h.jwt.GenerateTokenPair(user.ID, user.TenantID, user.Role)
+	if err != nil {
+		log.Error().Err(err).Msg("Failed to generate token pair")
+		c.JSON(http.StatusInternalServerError, gin.H{
+			"error":   "internal_error",
+			"message": "An error occurred",
+		})
+		return
+	}
+
+	c.JSON(http.StatusOK, AuthResponse{
+		AccessToken:  tokenPair.AccessToken,
+		RefreshToken: tokenPair.RefreshToken,
+		ExpiresAt:    tokenPair.ExpiresAt,
+		User: UserInfo{
+			ID:        user.ID.String(),
+			Email:     user.Email,
+			FirstName: user.FirstName,
+			LastName:  user.LastName,
+			Role:      user.Role,
+			TenantID:  user.TenantID.String(),
+		},
+	})
+}
+
+func (h *AuthHandler) Register(c *gin.Context) {
+	var req RegisterRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{
+			"error":   "validation_error",
+			"message": "Invalid request body",
+		})
+		return
+	}
+
+	tenantID, _ := uuid.Parse(req.TenantID)
+	ctx := c.Request.Context()
+
+	exists, err := h.emailExists(ctx, req.Email)
+	if err != nil {
+		log.Error().Err(err).Msg("Failed to check email")
+		c.JSON(http.StatusInternalServerError, gin.H{
+			"error":   "internal_error",
+			"message": "An error occurred",
+		})
+		return
+	}
+	if exists {
+		c.JSON(http.StatusConflict, gin.H{
+			"error":   "email_exists",
+			"message": "Email already registered",
+		})
+		return
+	}
+
+	passwordHash, err := auth.HashPassword(req.Password)
+	if err != nil {
+		log.Error().Err(err).Msg("Failed to hash password")
+		c.JSON(http.StatusInternalServerError, gin.H{
+			"error":   "internal_error",
+			"message": "An error occurred",
+		})
+		return
+	}
+
+	userID := uuid.New()
+	err = h.createUser(ctx, userID, tenantID, req.Email, passwordHash, req.FirstName, req.LastName)
+	if err != nil {
+		log.Error().Err(err).Msg("Failed to create user")
+		c.JSON(http.StatusInternalServerError, gin.H{
+			"error":   "internal_error",
+			"message": "An error occurred",
+		})
+		return
+	}
+
+	tokenPair, err := h.jwt.GenerateTokenPair(userID, tenantID, "staff")
+	if err != nil {
+		log.Error().Err(err).Msg("Failed to generate token pair")
+		c.JSON(http.StatusInternalServerError, gin.H{
+			"error":   "internal_error",
+			"message": "An error occurred",
+		})
+		return
+	}
+
+	c.JSON(http.StatusCreated, AuthResponse{
+		AccessToken:  tokenPair.AccessToken,
+		RefreshToken: tokenPair.RefreshToken,
+		ExpiresAt:    tokenPair.ExpiresAt,
+		User: UserInfo{
+			ID:        userID.String(),
+			Email:     req.Email,
+			FirstName: req.FirstName,
+			LastName:  req.LastName,
+			Role:      "staff",
+			TenantID:  tenantID.String(),
+		},
+	})
+}
+
+func (h *AuthHandler) Refresh(c *gin.Context) {
+	var req RefreshRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{
+			"error":   "validation_error",
+			"message": "Invalid request body",
+		})
+		return
+	}
+
+	tokenPair, err := h.jwt.RefreshAccessToken(req.RefreshToken)
+	if err != nil {
+		c.JSON(http.StatusUnauthorized, gin.H{
+			"error":   "invalid_token",
+			"message": "Invalid or expired refresh token",
+		})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{
+		"access_token":  tokenPair.AccessToken,
+		"refresh_token": tokenPair.RefreshToken,
+		"expires_at":    tokenPair.ExpiresAt,
+	})
+}
+
+func (h *AuthHandler) Logout(c *gin.Context) {
+	c.JSON(http.StatusOK, gin.H{
+		"message": "Logged out successfully",
+	})
+}
+
+type userRecord struct {
+	ID                  uuid.UUID
+	TenantID            uuid.UUID
+	Email               string
+	PasswordHash        string
+	FirstName           string
+	LastName            string
+	Role                string
+	FailedLoginAttempts int
+	LockedUntil         *time.Time
+}
+
+func (h *AuthHandler) getUserByEmail(ctx context.Context, email string) (*userRecord, error) {
+	query := `
+		SELECT id, tenant_id, email, password_hash, first_name, last_name, role,
+		       failed_login_attempts, locked_until
+		FROM users
+		WHERE email = $1 AND deleted_at IS NULL
+	`
+	var user userRecord
+	err := h.db.QueryRow(ctx, query, strings.ToLower(email)).Scan(
+		&user.ID, &user.TenantID, &user.Email, &user.PasswordHash,
+		&user.FirstName, &user.LastName, &user.Role,
+		&user.FailedLoginAttempts, &user.LockedUntil,
+	)
+	return &user, err
+}
+
+func (h *AuthHandler) emailExists(ctx context.Context, email string) (bool, error) {
+	query := `SELECT EXISTS(SELECT 1 FROM users WHERE email = $1 AND deleted_at IS NULL)`
+	var exists bool
+	err := h.db.QueryRow(ctx, query, strings.ToLower(email)).Scan(&exists)
+	return exists, err
+}
+
+func (h *AuthHandler) createUser(ctx context.Context, id, tenantID uuid.UUID, email, passwordHash, firstName, lastName string) error {
+	query := `
+		INSERT INTO users (id, tenant_id, email, password_hash, first_name, last_name, role, created_at, updated_at)
+		VALUES ($1, $2, $3, $4, $5, $6, 'staff', NOW(), NOW())
+	`
+	_, err := h.db.Exec(ctx, query, id, tenantID, strings.ToLower(email), passwordHash, firstName, lastName)
+	return err
+}
+
+func (h *AuthHandler) incrementFailedAttempts(ctx context.Context, userID uuid.UUID) error {
+	query := `
+		UPDATE users
+		SET failed_login_attempts = failed_login_attempts + 1,
+		    locked_until = CASE WHEN failed_login_attempts >= 4 THEN NOW() + INTERVAL '15 minutes' ELSE locked_until END,
+		    updated_at = NOW()
+		WHERE id = $1
+	`
+	_, err := h.db.Exec(ctx, query, userID)
+	return err
+}
+
+func (h *AuthHandler) resetFailedAttempts(ctx context.Context, userID uuid.UUID) error {
+	query := `
+		UPDATE users
+		SET failed_login_attempts = 0, locked_until = NULL, updated_at = NOW()
+		WHERE id = $1
+	`
+	_, err := h.db.Exec(ctx, query, userID)
+	return err
+}
