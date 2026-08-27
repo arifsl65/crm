@@ -9,12 +9,15 @@ Final_md/
 # Environment & Secrets
 # =============================================================================
 .env
-.env.local
-.env.*.local
+.env.*
+!.env.example
 *.pem
 *.key
 *.crt
+*.p12
+*.pfx
 secrets/
+credentials/
 
 # =============================================================================
 # Go
@@ -28,42 +31,66 @@ go-backend/tmp/
 *.test
 *.out
 vendor/
+go.work
+go.work.sum
 
 # =============================================================================
-# Python
+# Python (global patterns)
 # =============================================================================
-python-ai/__pycache__/
-python-ai/*.py[cod]
-python-ai/*$py.class
-python-ai/.pytest_cache/
-python-ai/.mypy_cache/
-python-ai/.ruff_cache/
-python-ai/venv/
-python-ai/.venv/
+__pycache__/
+**/__pycache__/
+*.py[cod]
+*$py.class
+*.pyo
+*.pyd
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.hypothesis/
+venv/
+.venv/
+ENV/
+env/
 *.egg-info/
+*.egg
 dist/
 build/
+.eggs/
+*.manifest
+*.spec
+pip-log.txt
+pip-delete-this-directory.txt
 
 # =============================================================================
 # Node.js / Frontend
 # =============================================================================
-frontend/node_modules/
-frontend/.next/
-frontend/out/
-frontend/.vercel/
-frontend/.turbo/
+node_modules/
+.next/
+out/
+.vercel/
+.turbo/
 *.tsbuildinfo
+.npm/
+.yarn/
+.pnp.*
 
 # =============================================================================
 # Terraform
 # =============================================================================
-terraform/.terraform/
-terraform/*.tfstate
-terraform/*.tfstate.*
-terraform/*.tfplan
-terraform/crash.log
-terraform/.terraform.lock.hcl
-terraform/terraform.tfvars
+.terraform/
+*.tfstate
+*.tfstate.*
+*.tfplan
+tfplan
+crash.log
+crash.*.log
+*.tfvars
+!*.tfvars.example
+.terraform.lock.hcl
+override.tf
+override.tf.json
+*_override.tf
+*_override.tf.json
 
 # =============================================================================
 # IDE & OS
@@ -75,6 +102,11 @@ terraform/terraform.tfvars
 *~
 .DS_Store
 Thumbs.db
+*.bak
+*.orig
+.project
+.classpath
+.settings/
 
 # =============================================================================
 # Logs & Temp
@@ -83,11 +115,33 @@ Thumbs.db
 logs/
 tmp/
 temp/
+*.tmp
+*.temp
 coverage/
 .coverage
 htmlcov/
+.cache/
 
 # =============================================================================
 # Docker
 # =============================================================================
 docker-compose.override.yml
+.docker/
+
+# =============================================================================
+# Testing
+# =============================================================================
+*.cover
+.hypothesis/
+.nox/
+.tox/
+junit.xml
+test-results/
+
+# =============================================================================
+# Misc
+# =============================================================================
+*.bak
+*.backup
+*.old
+.history/
