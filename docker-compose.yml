@@ -1,0 +1,280 @@
+# =============================================================================
+# Accountant CRM - Local Development Stack
+# =============================================================================
+# Usage:
+#   docker-compose up -d          # Start all services
+#   docker-compose logs -f        # View logs
+#   docker-compose down -v        # Stop and remove volumes
+# =============================================================================
+# Fix #34: Removed deprecated 'version' key (Docker Compose V2 doesn't need it)
+# =============================================================================
+
+services:
+  # ---------------------------------------------------------------------------
+  # Go Backend Service
+  # ---------------------------------------------------------------------------
+  go-backend:
+    build:
+      context: ./go-backend
+      dockerfile: Dockerfile
+      target: development
+    container_name: accountant-go-backend
+    ports:
+      - "8080:8080"
+    environment:
+      - APP_ENV=development
+      - GO_PORT=8080
+      - POSTGRES_HOST=postgres
+      - POSTGRES_PORT=5432
+      - POSTGRES_USER=accountant
+      - POSTGRES_PASSWORD=devpassword123
+      - POSTGRES_DB=accountant_crm
+      - POSTGRES_SSLMODE=disable
+      - REDIS_HOST=redis
+      - REDIS_PORT=6379
+      - REDIS_PASSWORD=devredispass  # FIXED: Added password
+      - REDIS_TLS_ENABLED=false
+      # FIXED: Use a longer, more secure dev secret
+      - JWT_SECRET_KEY=dev-jwt-secret-key-32-chars-min-for-hs256-algorithm
+      # Python AI service URL
+      - PYTHON_AI_URL=http://python-ai:8000
+      - PYTHON_AI_TIMEOUT=30s
+    volumes:
+      - ./go-backend:/app
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    networks:
+      - accountant-network
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:8080/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+    # Memory limit for Go compilation (needs ~2-3GB)
+    mem_limit: 3g
+    memswap_limit: 4g
+
+  # ---------------------------------------------------------------------------
+  # Python AI Service
+  # ---------------------------------------------------------------------------
+  python-ai:
+    build:
+      context: ./python-ai
+      dockerfile: Dockerfile
+      target: development
+    container_name: accountant-python-ai
+    ports:
+      - "8000:8000"
+    environment:
+      - APP_ENV=development
+      - PYTHON_PORT=8000
+      - MONGODB_URI=mongodb://mongodb:27017/
+      - MONGODB_DATABASE=accountant_ai
+      - REDIS_HOST=redis
+      - REDIS_PORT=6379
+      - REDIS_PASSWORD=devredispass  # FIXED: Match Go backend
+      - MTLS_ENABLED=false
+      - AI_OCR_ENABLED=true
+      - AI_CHAT_ENABLED=true
+      - AI_FORMS_ENABLED=true
+      - AI_CLASSIFICATION_ENABLED=true
+      - ALIBABA_ACCESS_KEY_ID=local-dev
+      - ALIBABA_ACCESS_KEY_SECRET=local-dev
+      - OSS_ENDPOINT=http://minio:9000
+      - OSS_BUCKET_UPLOADS=uploads
+      # PostgreSQL (shared with Go backend)
+      - POSTGRES_HOST=postgres
+      - POSTGRES_PORT=5432
+      - POSTGRES_USER=accountant
+      - POSTGRES_PASSWORD=devpassword123
+      - POSTGRES_DATABASE=accountant_crm
+      - POSTGRES_SSLMODE=disable
+    volumes:
+      - ./python-ai:/app
+    depends_on:
+      mongodb:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      postgres:
+        condition: service_healthy
+    networks:
+      - accountant-network
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+    # ADDED: Resource limits for development
+    deploy:
+      resources:
+        limits:
+          cpus: '1.0'
+          memory: 1G
+        reservations:
+          cpus: '0.25'
+          memory: 256M
+
+  # ---------------------------------------------------------------------------
+  # Frontend (Next.js Development Server)
+  # ---------------------------------------------------------------------------
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+      target: development
+    container_name: accountant-frontend
+    ports:
+      - "3000:3000"
+    environment:
+      - NODE_ENV=development
+      - NEXT_PUBLIC_API_URL=http://localhost:8080
+      - NEXT_PUBLIC_AI_API_URL=http://localhost:8000
+    volumes:
+      - ./frontend:/app
+      - /app/node_modules
+      - /app/.next
+    networks:
+      - accountant-network
+
+  # ---------------------------------------------------------------------------
+  # PostgreSQL (Local replacement for Neon)
+  # ---------------------------------------------------------------------------
+  postgres:
+    image: postgres:16-alpine
+    container_name: accountant-postgres
+    ports:
+      - "5432:5432"
+    environment:
+      - POSTGRES_USER=accountant
+      - POSTGRES_PASSWORD=devpassword123
+      - POSTGRES_DB=accountant_crm
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+      - ./migrations:/docker-entrypoint-initdb.d
+    networks:
+      - accountant-network
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U accountant -d accountant_crm"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  # ---------------------------------------------------------------------------
+  # MongoDB (Local replacement for Atlas)
+  # ---------------------------------------------------------------------------
+  mongodb:
+    image: mongo:7.0
+    container_name: accountant-mongodb
+    # Port exposed only within Docker network (conflicts with local MongoDB)
+    # ports:
+    #   - "27017:27017"
+    volumes:
+      - mongodb-data:/data/db
+    networks:
+      - accountant-network
+    healthcheck:
+      test: ["CMD", "mongosh", "--eval", "db.adminCommand('ping')"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # ---------------------------------------------------------------------------
+  # Redis (Local replacement for ApsaraDB Redis)
+  # ---------------------------------------------------------------------------
+  redis:
+    image: redis:7-alpine
+    container_name: accountant-redis
+    # FIXED: Added password authentication
+    command: redis-server --requirepass devredispass
+    # Port exposed only within Docker network (conflicts with local Redis)
+    # ports:
+    #   - "6379:6379"
+    volumes:
+      - redis-data:/data
+    networks:
+      - accountant-network
+    healthcheck:
+      test: ["CMD", "redis-cli", "-a", "devredispass", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+
+  # ---------------------------------------------------------------------------
+  # MinIO (Local replacement for Alibaba OSS)
+  # ---------------------------------------------------------------------------
+  minio:
+    image: minio/minio:latest
+    container_name: accountant-minio
+    ports:
+      - "9000:9000"
+      - "9001:9001"
+    environment:
+      - MINIO_ROOT_USER=minioadmin
+      - MINIO_ROOT_PASSWORD=minioadmin
+    command: server /data --console-address ":9001"
+    volumes:
+      - minio-data:/data
+    networks:
+      - accountant-network
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9000/minio/health/live"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+
+  # ---------------------------------------------------------------------------
+  # MinIO Setup (Create buckets on startup)
+  # ---------------------------------------------------------------------------
+  minio-setup:
+    image: minio/mc:latest
+    container_name: accountant-minio-setup
+    depends_on:
+      minio:
+        condition: service_healthy
+    entrypoint: >
+      /bin/sh -c "
+      mc alias set local http://minio:9000 minioadmin minioadmin;
+      mc mb local/uploads --ignore-existing;
+      mc mb local/frontend --ignore-existing;
+      mc anonymous set download local/frontend;
+      exit 0;
+      "
+    networks:
+      - accountant-network
+
+  # ---------------------------------------------------------------------------
+  # Mailhog (Email testing)
+  # ---------------------------------------------------------------------------
+  mailhog:
+    image: mailhog/mailhog:latest
+    container_name: accountant-mailhog
+    ports:
+      - "1025:1025"  # SMTP
+      - "8025:8025"  # Web UI
+    networks:
+      - accountant-network
+
+# =============================================================================
+# Networks
+# =============================================================================
+networks:
+  accountant-network:
+    driver: bridge
+    name: accountant-network
+
+# =============================================================================
+# Volumes
+# =============================================================================
+volumes:
+  postgres-data:
+    name: accountant-postgres-data
+  mongodb-data:
+    name: accountant-mongodb-data
+  redis-data:
+    name: accountant-redis-data
+  minio-data:
+    name: accountant-minio-data

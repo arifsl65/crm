@@ -1,0 +1,47 @@
+# =============================================================================
+# Accountant CRM - Terraform Secrets (EXAMPLE)
+# =============================================================================
+# Copy this file to terraform.tfvars and fill in actual values
+# NEVER commit terraform.tfvars to version control
+# =============================================================================
+
+# -----------------------------------------------------------------------------
+# Alibaba Cloud Credentials
+# -----------------------------------------------------------------------------
+alicloud_access_key = "your-access-key-id"
+alicloud_secret_key = "your-secret-access-key"
+region              = "eu-west-1"  # UK (London)
+
+# -----------------------------------------------------------------------------
+# Neon PostgreSQL
+# -----------------------------------------------------------------------------
+neon_host     = "ep-xxx-xxx-123456.me-central-1.aws.neon.tech"
+neon_user     = "accountant_user"
+neon_password = "your-neon-password"
+neon_database = "accountant_crm"
+
+# -----------------------------------------------------------------------------
+# MongoDB Atlas
+# -----------------------------------------------------------------------------
+mongodb_uri = "mongodb+srv://user:password@cluster.mongodb.net/?retryWrites=true&w=majority"
+
+# -----------------------------------------------------------------------------
+# Container Registry Credentials
+# -----------------------------------------------------------------------------
+acr_username = "your-acr-username"
+acr_password = "your-acr-password"
+
+# -----------------------------------------------------------------------------
+# SSL Certificate
+# -----------------------------------------------------------------------------
+# Option 1: Provide existing certificate ID from Alibaba Cloud SSL service
+ssl_certificate_id = ""
+
+# Option 2: Leave empty and place certificates in terraform/certs/
+# - terraform/certs/server.crt
+# - terraform/certs/server.key
+
+# -----------------------------------------------------------------------------
+# Image Tag (set by CI/CD)
+# -----------------------------------------------------------------------------
+image_tag = "latest"

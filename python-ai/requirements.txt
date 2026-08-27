@@ -1,0 +1,52 @@
+# =============================================================================
+# Python AI Service - Dependencies
+# =============================================================================
+
+# Web Framework
+fastapi==0.110.0
+uvicorn[standard]==0.28.0
+pydantic==2.6.3
+pydantic-settings==2.2.1
+
+# Database
+motor==3.3.2              # Async MongoDB driver
+pymongo==4.6.2            # MongoDB driver (motor dependency)
+asyncpg==0.29.0           # Async PostgreSQL driver
+
+# Cache
+redis==5.0.2              # Redis client
+
+# Alibaba Cloud
+oss2==2.18.4                          # OSS SDK
+alibabacloud-kms20160120==3.0.6       # KMS Secrets Manager SDK
+alibabacloud-credentials==0.3.4       # ECS RAM role credentials
+
+# Security
+python-jose[cryptography]==3.3.0  # JWT
+cryptography==42.0.5      # mTLS certificates
+
+# HTTP Client
+httpx==0.27.0             # Async HTTP client
+
+# AI/ML (optional - uncomment as needed)
+# openai==1.13.3
+# langchain==0.1.11
+# transformers==4.38.2
+
+# Utilities
+python-multipart==0.0.9   # File uploads
+python-dotenv==1.0.1      # Environment variables
+
+# Logging
+structlog==24.1.0         # Structured logging
+
+# Testing
+pytest==8.0.2
+pytest-asyncio==0.23.5
+pytest-cov==4.1.0
+# Note: httpx already listed above (line 27) - used for TestClient
+
+# Development
+black==24.2.0
+ruff==0.3.0
+mypy==1.8.0

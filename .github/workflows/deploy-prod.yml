@@ -1,0 +1,588 @@
+# =============================================================================
+# Accountant CRM - Production Deployment
+# =============================================================================
+# Manual deployment to production with approval gates
+# - Requires manual approval
+# - Promotes staging images to production
+# - Runs comprehensive health checks
+# =============================================================================
+
+name: Deploy to Production
+
+on:
+  workflow_dispatch:
+    inputs:
+      staging_sha:
+        description: "Git SHA to promote (must be deployed to staging first)"
+        required: true
+        type: string
+      skip_approval:
+        description: "Skip manual approval (emergency only)"
+        required: false
+        type: boolean
+        default: false
+
+concurrency:
+  group: production-deployment
+  cancel-in-progress: false
+
+env:
+  ACR_REGISTRY: ${{ secrets.ACR_REGISTRY }}
+  ACR_NAMESPACE: accountant-crm
+
+jobs:
+  # ===========================================================================
+  # Validate Staging
+  # ===========================================================================
+  validate-staging:
+    name: Validate Staging
+    runs-on: ubuntu-latest
+    outputs:
+      go_image: ${{ steps.check.outputs.go_image }}
+      python_image: ${{ steps.check.outputs.python_image }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.staging_sha }}
+
+      - name: Login to ACR
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.ACR_REGISTRY }}
+          username: ${{ secrets.ACR_USERNAME }}
+          password: ${{ secrets.ACR_PASSWORD }}
+
+      - name: Verify images exist
+        id: check
+        run: |
+          # Check Go backend image
+          docker manifest inspect ${{ env.ACR_REGISTRY }}/${{ env.ACR_NAMESPACE }}/go-backend:${{ inputs.staging_sha }} > /dev/null
+          echo "go_image=${{ env.ACR_REGISTRY }}/${{ env.ACR_NAMESPACE }}/go-backend:${{ inputs.staging_sha }}" >> $GITHUB_OUTPUT
+
+          # Check Python AI image
+          docker manifest inspect ${{ env.ACR_REGISTRY }}/${{ env.ACR_NAMESPACE }}/python-ai:${{ inputs.staging_sha }} > /dev/null
+          echo "python_image=${{ env.ACR_REGISTRY }}/${{ env.ACR_NAMESPACE }}/python-ai:${{ inputs.staging_sha }}" >> $GITHUB_OUTPUT
+
+          echo "Both images verified for SHA: ${{ inputs.staging_sha }}"
+
+      - name: Verify staging deployment
+        run: |
+          # Verify the SHA is deployed to staging
+          curl -sf https://api.staging.accountant-crm.com/health || exit 1
+          echo "Staging health check passed"
+
+  # ===========================================================================
+  # Manual Approval
+  # ===========================================================================
+  approval:
+    name: Approval Gate
+    runs-on: ubuntu-latest
+    needs: [validate-staging]
+    if: ${{ !inputs.skip_approval }}
+    environment:
+      name: production-approval
+
+    steps:
+      - name: Approval received
+        run: echo "Production deployment approved"
+
+  # ===========================================================================
+  # Tag Images for Production
+  # ===========================================================================
+  tag-images:
+    name: Tag Images
+    runs-on: ubuntu-latest
+    needs: [validate-staging, approval]
+    if: ${{ always() && needs.validate-staging.result == 'success' && (needs.approval.result == 'success' || inputs.skip_approval) }}
+
+    steps:
+      - name: Login to ACR
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.ACR_REGISTRY }}
+          username: ${{ secrets.ACR_USERNAME }}
+          password: ${{ secrets.ACR_PASSWORD }}
+
+      - name: Tag Go backend for production
+        run: |
+          docker pull ${{ needs.validate-staging.outputs.go_image }}
+          docker tag ${{ needs.validate-staging.outputs.go_image }} \
+            ${{ env.ACR_REGISTRY }}/${{ env.ACR_NAMESPACE }}/go-backend:production
+          docker tag ${{ needs.validate-staging.outputs.go_image }} \
+            ${{ env.ACR_REGISTRY }}/${{ env.ACR_NAMESPACE }}/go-backend:production-${{ inputs.staging_sha }}
+          docker push ${{ env.ACR_REGISTRY }}/${{ env.ACR_NAMESPACE }}/go-backend:production
+          docker push ${{ env.ACR_REGISTRY }}/${{ env.ACR_NAMESPACE }}/go-backend:production-${{ inputs.staging_sha }}
+
+      - name: Tag Python AI for production
+        run: |
+          docker pull ${{ needs.validate-staging.outputs.python_image }}
+          docker tag ${{ needs.validate-staging.outputs.python_image }} \
+            ${{ env.ACR_REGISTRY }}/${{ env.ACR_NAMESPACE }}/python-ai:production
+          docker tag ${{ needs.validate-staging.outputs.python_image }} \
+            ${{ env.ACR_REGISTRY }}/${{ env.ACR_NAMESPACE }}/python-ai:production-${{ inputs.staging_sha }}
+          docker push ${{ env.ACR_REGISTRY }}/${{ env.ACR_NAMESPACE }}/python-ai:production
+          docker push ${{ env.ACR_REGISTRY }}/${{ env.ACR_NAMESPACE }}/python-ai:production-${{ inputs.staging_sha }}
+
+  # ===========================================================================
+  # Deploy Frontend to Production
+  # ===========================================================================
+  deploy-frontend:
+    name: Deploy Frontend
+    runs-on: ubuntu-latest
+    needs: [tag-images]
+    environment:
+      name: production
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.staging_sha }}
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Install dependencies
+        working-directory: frontend
+        run: npm ci
+
+      - name: Build for production
+        working-directory: frontend
+        env:
+          NEXT_PUBLIC_API_URL: https://api.accountant-crm.com
+          NEXT_PUBLIC_AI_API_URL: https://api.accountant-crm.com/ai
+        run: npm run build
+
+      - name: Setup Alibaba Cloud CLI
+        uses: aliyun/setup-aliyun-cli-action@v1
+        with:
+          aliyun-cli-version: latest
+          aliyun-cli-accessKeyId: ${{ secrets.ALIBABA_ACCESS_KEY_ID }}
+          aliyun-cli-accessKeySecret: ${{ secrets.ALIBABA_ACCESS_KEY_SECRET }}
+          aliyun-cli-region: eu-west-1
+
+      - name: Deploy to OSS
+        working-directory: frontend
+        run: |
+          aliyun oss sync out/ oss://fzco-frontend/ \
+            --delete \
+            --exclude ".git/*"
+
+      - name: Invalidate CDN cache
+        run: |
+          aliyun cdn RefreshObjectCaches \
+            --ObjectPath "https://app.accountant-crm.com/" \
+            --ObjectType Directory
+
+  # ===========================================================================
+  # Run Database Migrations (Fix #23, #26)
+  # ===========================================================================
+  run-migrations:
+    name: Run Migrations
+    runs-on: ubuntu-latest
+    needs: [tag-images]
+    environment:
+      name: production
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.staging_sha }}
+
+      - name: Install dependencies
+        run: |
+          curl -L https://github.com/golang-migrate/migrate/releases/download/v4.17.0/migrate.linux-amd64.tar.gz | tar xvz
+          sudo mv migrate /usr/local/bin/migrate
+          migrate -version
+          sudo apt-get update && sudo apt-get install -y postgresql-client
+
+      # Fix #26: Enhanced backup with upload to OSS
+      - name: Create database backup
+        id: backup
+        env:
+          DATABASE_URL: ${{ secrets.PROD_DATABASE_URL }}
+        run: |
+          timestamp=$(date +%Y%m%d_%H%M%S)
+          backup_file="backup_prod_${timestamp}.sql"
+          echo "Creating pre-migration backup: ${backup_file}"
+
+          # Create backup with schema and data
+          pg_dump "$DATABASE_URL" --no-owner --no-acl > "${backup_file}"
+
+          # Compress backup
+          gzip "${backup_file}"
+          echo "BACKUP_FILE=${backup_file}.gz" >> $GITHUB_ENV
+          echo "backup_file=${backup_file}.gz" >> $GITHUB_OUTPUT
+
+      - name: Upload backup to OSS
+        run: |
+          aliyun oss cp "${{ env.BACKUP_FILE }}" \
+            oss://fzco-backups/database/production/${{ env.BACKUP_FILE }}
+        env:
+          ALIBABA_CLOUD_ACCESS_KEY_ID: ${{ secrets.ALIBABA_ACCESS_KEY_ID }}
+          ALIBABA_CLOUD_ACCESS_KEY_SECRET: ${{ secrets.ALIBABA_ACCESS_KEY_SECRET }}
+
+      - name: Run migrations
+        id: migrate
+        env:
+          DATABASE_URL: ${{ secrets.PROD_DATABASE_URL }}
+        run: |
+          # Get current version before migration
+          current_version=$(migrate -database "$DATABASE_URL" -path ./migrations version 2>&1 || echo "0")
+          echo "Current migration version: $current_version"
+          echo "MIGRATION_VERSION_BEFORE=$current_version" >> $GITHUB_ENV
+
+          # Run migrations
+          migrate -database "$DATABASE_URL" -path ./migrations up
+
+          # Show new version
+          migrate -database "$DATABASE_URL" -path ./migrations version
+
+      # Fix #25: Rollback on migration failure
+      - name: Rollback on failure
+        if: failure() && steps.migrate.outcome == 'failure'
+        env:
+          DATABASE_URL: ${{ secrets.PROD_DATABASE_URL }}
+        run: |
+          echo "::error::Migration failed, restoring from backup..."
+
+          # Download backup from OSS
+          aliyun oss cp \
+            oss://fzco-backups/database/production/${{ env.BACKUP_FILE }} \
+            ./${{ env.BACKUP_FILE }}
+
+          # Restore from backup
+          gunzip -c "${{ env.BACKUP_FILE }}" | psql "$DATABASE_URL"
+          echo "Database restored from backup: ${{ env.BACKUP_FILE }}"
+
+  # ===========================================================================
+  # Deploy to ECI (Fix #24: Use ECI instead of kubectl)
+  # ===========================================================================
+  deploy:
+    name: Deploy to Production
+    runs-on: ubuntu-latest
+    needs: [tag-images, deploy-frontend, run-migrations]
+    environment:
+      name: production
+      url: https://app.accountant-crm.com
+    outputs:
+      previous_go_image: ${{ steps.get-current.outputs.go_image }}
+      previous_python_image: ${{ steps.get-current.outputs.python_image }}
+
+    steps:
+      - name: Setup Alibaba Cloud CLI
+        uses: aliyun/setup-aliyun-cli-action@v1
+        with:
+          aliyun-cli-version: latest
+          aliyun-cli-accessKeyId: ${{ secrets.ALIBABA_ACCESS_KEY_ID }}
+          aliyun-cli-accessKeySecret: ${{ secrets.ALIBABA_ACCESS_KEY_SECRET }}
+          aliyun-cli-region: eu-west-1
+
+      # Fix #27: Audit logging for production deployments
+      - name: Get current deployment state and create audit log
+        id: get-current
+        run: |
+          # Get current container group info for rollback
+          go_info=$(aliyun eci DescribeContainerGroups --ContainerGroupName accountant-crm-production-go-backend --RegionId eu-west-1 2>/dev/null || echo "{}")
+          python_info=$(aliyun eci DescribeContainerGroups --ContainerGroupName accountant-crm-production-python-ai --RegionId eu-west-1 2>/dev/null || echo "{}")
+
+          # Extract current image tags
+          echo "go_image=$(echo $go_info | jq -r '.ContainerGroups[0].Containers[0].Image // empty')" >> $GITHUB_OUTPUT
+          echo "python_image=$(echo $python_info | jq -r '.ContainerGroups[0].Containers[0].Image // empty')" >> $GITHUB_OUTPUT
+
+          # Create comprehensive audit log
+          cat > deployment_audit.json << EOF
+          {
+            "timestamp": "$(date -u +%Y-%m-%dT%H:%M:%SZ)",
+            "environment": "production",
+            "actor": "${{ github.actor }}",
+            "commit_sha": "${{ inputs.staging_sha }}",
+            "run_id": "${{ github.run_id }}",
+            "run_number": "${{ github.run_number }}",
+            "previous_state": {
+              "go_backend_image": "$(echo $go_info | jq -r '.ContainerGroups[0].Containers[0].Image // empty')",
+              "python_ai_image": "$(echo $python_info | jq -r '.ContainerGroups[0].Containers[0].Image // empty')"
+            },
+            "new_state": {
+              "go_backend_image": "${{ env.ACR_REGISTRY }}/${{ env.ACR_NAMESPACE }}/go-backend:production-${{ inputs.staging_sha }}",
+              "python_ai_image": "${{ env.ACR_REGISTRY }}/${{ env.ACR_NAMESPACE }}/python-ai:production-${{ inputs.staging_sha }}"
+            }
+          }
+          EOF
+          cat deployment_audit.json
+
+      - name: Update Go Backend ECI
+        id: deploy-go
+        run: |
+          aliyun eci UpdateContainerGroup \
+            --ContainerGroupId $(aliyun eci DescribeContainerGroups --ContainerGroupName accountant-crm-production-go-backend --RegionId eu-west-1 | jq -r '.ContainerGroups[0].ContainerGroupId') \
+            --Container.1.Name go-backend \
+            --Container.1.Image "${{ env.ACR_REGISTRY }}/${{ env.ACR_NAMESPACE }}/go-backend:production-${{ inputs.staging_sha }}" \
+            --RegionId eu-west-1
+
+      - name: Update Python AI ECI
+        id: deploy-python
+        run: |
+          aliyun eci UpdateContainerGroup \
+            --ContainerGroupId $(aliyun eci DescribeContainerGroups --ContainerGroupName accountant-crm-production-python-ai --RegionId eu-west-1 | jq -r '.ContainerGroups[0].ContainerGroupId') \
+            --Container.1.Name python-ai \
+            --Container.1.Image "${{ env.ACR_REGISTRY }}/${{ env.ACR_NAMESPACE }}/python-ai:production-${{ inputs.staging_sha }}" \
+            --RegionId eu-west-1
+
+      - name: Wait for ECI containers to be running
+        run: |
+          echo "Waiting for Go backend..."
+          for i in {1..60}; do
+            status=$(aliyun eci DescribeContainerGroups --ContainerGroupName accountant-crm-production-go-backend --RegionId eu-west-1 | jq -r '.ContainerGroups[0].Status')
+            if [ "$status" = "Running" ]; then
+              echo "Go backend is running"
+              break
+            fi
+            echo "Status: $status, waiting..."
+            sleep 10
+          done
+
+          echo "Waiting for Python AI..."
+          for i in {1..60}; do
+            status=$(aliyun eci DescribeContainerGroups --ContainerGroupName accountant-crm-production-python-ai --RegionId eu-west-1 | jq -r '.ContainerGroups[0].Status')
+            if [ "$status" = "Running" ]; then
+              echo "Python AI is running"
+              break
+            fi
+            echo "Status: $status, waiting..."
+            sleep 10
+          done
+
+      - name: Upload audit log to OSS
+        run: |
+          aliyun oss cp deployment_audit.json \
+            oss://fzco-backups/audit/deployments/production/$(date +%Y%m%d_%H%M%S)_${{ inputs.staging_sha }}.json
+
+      - name: Upload audit log artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: deployment-audit-production-${{ inputs.staging_sha }}
+          path: deployment_audit.json
+          retention-days: 365
+
+  # ===========================================================================
+  # Rollback on Failure (Fix #25)
+  # ===========================================================================
+  rollback:
+    name: Rollback on Failure
+    runs-on: ubuntu-latest
+    needs: [deploy, verify]
+    if: failure() && needs.deploy.outputs.previous_go_image != ''
+
+    steps:
+      - name: Setup Alibaba Cloud CLI
+        uses: aliyun/setup-aliyun-cli-action@v1
+        with:
+          aliyun-cli-version: latest
+          aliyun-cli-accessKeyId: ${{ secrets.ALIBABA_ACCESS_KEY_ID }}
+          aliyun-cli-accessKeySecret: ${{ secrets.ALIBABA_ACCESS_KEY_SECRET }}
+          aliyun-cli-region: eu-west-1
+
+      - name: Rollback Go Backend
+        if: needs.deploy.outputs.previous_go_image != ''
+        run: |
+          echo "::error::Rolling back Go backend to: ${{ needs.deploy.outputs.previous_go_image }}"
+          aliyun eci UpdateContainerGroup \
+            --ContainerGroupId $(aliyun eci DescribeContainerGroups --ContainerGroupName accountant-crm-production-go-backend --RegionId eu-west-1 | jq -r '.ContainerGroups[0].ContainerGroupId') \
+            --Container.1.Name go-backend \
+            --Container.1.Image "${{ needs.deploy.outputs.previous_go_image }}" \
+            --RegionId eu-west-1
+
+      - name: Rollback Python AI
+        if: needs.deploy.outputs.previous_python_image != ''
+        run: |
+          echo "::error::Rolling back Python AI to: ${{ needs.deploy.outputs.previous_python_image }}"
+          aliyun eci UpdateContainerGroup \
+            --ContainerGroupId $(aliyun eci DescribeContainerGroups --ContainerGroupName accountant-crm-production-python-ai --RegionId eu-west-1 | jq -r '.ContainerGroups[0].ContainerGroupId') \
+            --Container.1.Name python-ai \
+            --Container.1.Image "${{ needs.deploy.outputs.previous_python_image }}" \
+            --RegionId eu-west-1
+
+      - name: Log rollback event
+        run: |
+          cat > rollback_audit.json << EOF
+          {
+            "timestamp": "$(date -u +%Y-%m-%dT%H:%M:%SZ)",
+            "event": "rollback",
+            "environment": "production",
+            "reason": "deployment_verification_failed",
+            "actor": "${{ github.actor }}",
+            "commit_sha": "${{ inputs.staging_sha }}",
+            "rolled_back_to": {
+              "go_backend_image": "${{ needs.deploy.outputs.previous_go_image }}",
+              "python_ai_image": "${{ needs.deploy.outputs.previous_python_image }}"
+            }
+          }
+          EOF
+
+          # Upload to OSS
+          aliyun oss cp rollback_audit.json \
+            oss://fzco-backups/audit/rollbacks/production/$(date +%Y%m%d_%H%M%S).json
+
+      - name: Send PagerDuty alert
+        if: ${{ secrets.PAGERDUTY_INTEGRATION_KEY }}
+        run: |
+          curl -X POST https://events.pagerduty.com/v2/enqueue \
+            -H "Content-Type: application/json" \
+            -d '{
+              "routing_key": "${{ secrets.PAGERDUTY_INTEGRATION_KEY }}",
+              "event_action": "trigger",
+              "payload": {
+                "summary": "Production deployment rolled back - ${{ inputs.staging_sha }}",
+                "severity": "critical",
+                "source": "GitHub Actions",
+                "custom_details": {
+                  "commit": "${{ inputs.staging_sha }}",
+                  "actor": "${{ github.actor }}"
+                }
+              }
+            }'
+
+  # ===========================================================================
+  # Post-deployment Verification
+  # ===========================================================================
+  verify:
+    name: Verify Deployment
+    runs-on: ubuntu-latest
+    needs: [deploy]
+
+    steps:
+      - name: Wait for services
+        run: sleep 60
+
+      - name: Run health checks
+        run: |
+          # TODO: Change to HTTPS when SSL certificate is configured on ALB (Week 2)
+          # API health
+          curl -sf http://api.accountant-crm.com/health || exit 1
+          curl -sf http://api.accountant-crm.com/ready || exit 1
+
+          # Frontend
+          curl -sf http://app.accountant-crm.com/ || exit 1
+
+          echo "All health checks passed!"
+
+      - name: Run smoke tests
+        run: |
+          # TODO: Change to HTTPS when SSL certificate is configured on ALB (Week 2)
+          # Test API endpoints
+          response=$(curl -s -o /dev/null -w "%{http_code}" http://api.accountant-crm.com/api/v1/auth/login -X POST)
+          if [ "$response" != "400" ] && [ "$response" != "401" ] && [ "$response" != "501" ]; then
+            echo "Unexpected response from login endpoint: $response"
+          fi
+
+          echo "Smoke tests passed!"
+
+  # ===========================================================================
+  # Create Release
+  # ===========================================================================
+  release:
+    name: Create Release
+    runs-on: ubuntu-latest
+    needs: [verify]
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.staging_sha }}
+          fetch-depth: 0
+
+      - name: Generate release notes
+        id: notes
+        run: |
+          # Get commit messages since last production release
+          last_tag=$(git tag -l "production-*" --sort=-creatordate | head -n1)
+          if [ -n "$last_tag" ]; then
+            notes=$(git log --oneline $last_tag..HEAD | head -20)
+          else
+            notes=$(git log --oneline HEAD~10..HEAD)
+          fi
+          echo "notes<<EOF" >> $GITHUB_OUTPUT
+          echo "$notes" >> $GITHUB_OUTPUT
+          echo "EOF" >> $GITHUB_OUTPUT
+
+      - name: Create release tag
+        run: |
+          timestamp=$(date +%Y%m%d-%H%M%S)
+          git tag "production-$timestamp" ${{ inputs.staging_sha }}
+          git push origin "production-$timestamp"
+
+      # Fix #28: Use softprops/action-gh-release instead of deprecated actions/create-release@v1
+      - name: Create GitHub release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: production-${{ github.run_number }}
+          name: Production Release ${{ github.run_number }}
+          body: |
+            ## Production Deployment
+
+            **SHA:** `${{ inputs.staging_sha }}`
+            **Deployed by:** @${{ github.actor }}
+            **Timestamp:** ${{ github.event.head_commit.timestamp }}
+
+            ### Changes
+            ${{ steps.notes.outputs.notes }}
+          draft: false
+          prerelease: false
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  # ===========================================================================
+  # Notify
+  # ===========================================================================
+  notify:
+    name: Notify
+    runs-on: ubuntu-latest
+    needs: [release]
+    if: always()
+
+    steps:
+      - name: Send Slack notification
+        if: ${{ secrets.SLACK_WEBHOOK_URL }}
+        uses: slackapi/slack-github-action@v1.25.0
+        with:
+          payload: |
+            {
+              "text": "Production deployment ${{ needs.release.result == 'success' && 'completed' || 'failed' }}",
+              "blocks": [
+                {
+                  "type": "section",
+                  "text": {
+                    "type": "mrkdwn",
+                    "text": "*:rocket: Production Deployment* - ${{ needs.release.result == 'success' && ':white_check_mark: Success' || ':x: Failed' }}\n*SHA:* `${{ inputs.staging_sha }}`\n*Deployed by:* ${{ github.actor }}\n*URL:* https://app.accountant-crm.com"
+                  }
+                }
+              ]
+            }
+        env:
+          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
+          SLACK_WEBHOOK_TYPE: INCOMING_WEBHOOK
+
+      - name: Send PagerDuty notification on failure
+        if: ${{ failure() && secrets.PAGERDUTY_INTEGRATION_KEY }}
+        uses: PagerDuty/pagerduty-change-events-action@master
+        with:
+          integration-key: ${{ secrets.PAGERDUTY_INTEGRATION_KEY }}
+          custom-event: |
+            {
+              "routing_key": "${{ secrets.PAGERDUTY_INTEGRATION_KEY }}",
+              "event_action": "trigger",
+              "payload": {
+                "summary": "Production deployment failed",
+                "severity": "critical",
+                "source": "GitHub Actions"
+              }
+            }

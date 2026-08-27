@@ -1,0 +1,98 @@
+# =============================================================================
+# Accountant CRM - Staging Environment Override
+# =============================================================================
+# Usage:
+#   docker-compose -f docker-compose.yml -f docker-compose.staging.yml up -d
+# =============================================================================
+# Fix #34: Removed deprecated 'version' key (Docker Compose V2 doesn't need it)
+# =============================================================================
+
+services:
+  # ---------------------------------------------------------------------------
+  # Go Backend Service (Staging)
+  # ---------------------------------------------------------------------------
+  go-backend:
+    environment:
+      - APP_ENV=staging
+      - APP_DEBUG=false
+      - LOG_LEVEL=info
+      # Database - REQUIRED: Set via environment or .env file
+      - POSTGRES_HOST=${POSTGRES_HOST:?POSTGRES_HOST is required}
+      - POSTGRES_PORT=${POSTGRES_PORT:-5432}
+      - POSTGRES_USER=${POSTGRES_USER:?POSTGRES_USER is required}
+      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required}
+      - POSTGRES_DB=${POSTGRES_DB:-neondb}
+      - POSTGRES_SSLMODE=require
+      # Redis
+      - REDIS_HOST=${REDIS_HOST:?REDIS_HOST is required}
+      - REDIS_PORT=${REDIS_PORT:-6379}
+      - REDIS_PASSWORD=${REDIS_PASSWORD:-}
+      - REDIS_TLS_ENABLED=${REDIS_TLS_ENABLED:-true}
+      # Security - REQUIRED
+      - JWT_SECRET_KEY=${JWT_SECRET_KEY:?JWT_SECRET_KEY is required}
+      # Internal services
+      - PYTHON_AI_URL=http://python-ai:8000
+    volumes: []  # No volume mounts in staging
+
+  # ---------------------------------------------------------------------------
+  # Python AI Service (Staging)
+  # ---------------------------------------------------------------------------
+  python-ai:
+    environment:
+      - APP_ENV=staging
+      - DEBUG=false
+      - LOG_LEVEL=info
+      # MongoDB - REQUIRED: Set via environment or .env file
+      - MONGODB_URI=${MONGODB_URI:?MONGODB_URI is required}
+      - MONGODB_DATABASE=${MONGODB_DATABASE:-accountant_ai}
+      # Redis
+      - REDIS_HOST=${REDIS_HOST:?REDIS_HOST is required}
+      - REDIS_PORT=${REDIS_PORT:-6379}
+      - REDIS_PASSWORD=${REDIS_PASSWORD:-}
+      # mTLS (enable for production-like staging)
+      - MTLS_ENABLED=${MTLS_ENABLED:-false}
+      # Feature flags
+      - AI_OCR_ENABLED=${AI_OCR_ENABLED:-true}
+      - AI_CHAT_ENABLED=${AI_CHAT_ENABLED:-true}
+      - AI_FORMS_ENABLED=${AI_FORMS_ENABLED:-true}
+      - AI_CLASSIFICATION_ENABLED=${AI_CLASSIFICATION_ENABLED:-true}
+      # Alibaba Cloud - REQUIRED
+      - ALIBABA_ACCESS_KEY_ID=${ALIBABA_ACCESS_KEY_ID:?ALIBABA_ACCESS_KEY_ID is required}
+      - ALIBABA_ACCESS_KEY_SECRET=${ALIBABA_ACCESS_KEY_SECRET:?ALIBABA_ACCESS_KEY_SECRET is required}
+      - ALIBABA_REGION=${ALIBABA_REGION:-eu-west-1}
+      - OSS_ENDPOINT=${OSS_ENDPOINT:-https://oss-eu-west-1.aliyuncs.com}
+      - OSS_BUCKET_UPLOADS=${OSS_BUCKET_UPLOADS:-fzco-uploads-stg}
+    volumes: []  # No volume mounts in staging
+
+  # ---------------------------------------------------------------------------
+  # Frontend (Staging)
+  # ---------------------------------------------------------------------------
+  frontend:
+    environment:
+      - NODE_ENV=production
+      - NEXT_PUBLIC_API_URL=https://api.staging.accountant-crm.com
+      - NEXT_PUBLIC_AI_API_URL=https://api.staging.accountant-crm.com/ai
+    volumes: []  # No volume mounts in staging
+
+  # ---------------------------------------------------------------------------
+  # Disable local databases in staging (use cloud services)
+  # ---------------------------------------------------------------------------
+  postgres:
+    profiles:
+      - local-only  # Won't start unless explicitly requested
+
+  mongodb:
+    profiles:
+      - local-only  # Won't start unless explicitly requested
+
+  minio:
+    profiles:
+      - local-only  # Won't start unless explicitly requested
+
+  minio-setup:
+    profiles:
+      - local-only  # Won't start unless explicitly requested
+
+  mailhog:
+    profiles:
+      - local-only  # Won't start unless explicitly requested

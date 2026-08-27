@@ -1,0 +1,410 @@
+# =============================================================================
+# Accountant CRM - Staging Deployment
+# =============================================================================
+# Automatically deploys to staging on push to main
+# - Builds Docker images
+# - Pushes to ACR
+# - Deploys to staging environment
+# =============================================================================
+
+name: Deploy to Staging
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+concurrency:
+  group: staging-deployment
+  cancel-in-progress: false
+
+env:
+  GO_VERSION: "1.22"
+  NODE_VERSION: "20"
+  PYTHON_VERSION: "3.11"
+  ACR_REGISTRY: ${{ secrets.ACR_REGISTRY }}
+  ACR_NAMESPACE: accountant-crm
+
+jobs:
+  # ===========================================================================
+  # Build and Push Go Backend
+  # ===========================================================================
+  build-go-backend:
+    name: Build Go Backend
+    runs-on: ubuntu-latest
+    outputs:
+      image: ${{ steps.build.outputs.image }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Login to ACR
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.ACR_REGISTRY }}
+          username: ${{ secrets.ACR_USERNAME }}
+          password: ${{ secrets.ACR_PASSWORD }}
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build and push
+        id: build
+        uses: docker/build-push-action@v5
+        with:
+          context: go-backend
+          target: production
+          push: true
+          tags: |
+            ${{ env.ACR_REGISTRY }}/${{ env.ACR_NAMESPACE }}/go-backend:${{ github.sha }}
+            ${{ env.ACR_REGISTRY }}/${{ env.ACR_NAMESPACE }}/go-backend:staging
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+          build-args: |
+            VERSION=${{ github.sha }}
+
+      - name: Output image
+        run: echo "image=${{ env.ACR_REGISTRY }}/${{ env.ACR_NAMESPACE }}/go-backend:${{ github.sha }}" >> $GITHUB_OUTPUT
+
+  # ===========================================================================
+  # Build and Push Python AI
+  # ===========================================================================
+  build-python-ai:
+    name: Build Python AI
+    runs-on: ubuntu-latest
+    outputs:
+      image: ${{ steps.build.outputs.image }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Login to ACR
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.ACR_REGISTRY }}
+          username: ${{ secrets.ACR_USERNAME }}
+          password: ${{ secrets.ACR_PASSWORD }}
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build and push
+        id: build
+        uses: docker/build-push-action@v5
+        with:
+          context: python-ai
+          target: production
+          push: true
+          tags: |
+            ${{ env.ACR_REGISTRY }}/${{ env.ACR_NAMESPACE }}/python-ai:${{ github.sha }}
+            ${{ env.ACR_REGISTRY }}/${{ env.ACR_NAMESPACE }}/python-ai:staging
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Output image
+        run: echo "image=${{ env.ACR_REGISTRY }}/${{ env.ACR_NAMESPACE }}/python-ai:${{ github.sha }}" >> $GITHUB_OUTPUT
+
+  # ===========================================================================
+  # Build and Deploy Frontend
+  # ===========================================================================
+  build-frontend:
+    name: Build Frontend
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Install dependencies
+        working-directory: frontend
+        run: npm ci
+
+      - name: Build
+        working-directory: frontend
+        env:
+          NEXT_PUBLIC_API_URL: https://api.staging.accountant-crm.com
+          NEXT_PUBLIC_AI_API_URL: https://api.staging.accountant-crm.com/ai
+        run: npm run build
+
+      - name: Setup Alibaba Cloud CLI
+        uses: aliyun/setup-aliyun-cli-action@v1
+        with:
+          aliyun-cli-version: latest
+          aliyun-cli-accessKeyId: ${{ secrets.ALIBABA_ACCESS_KEY_ID }}
+          aliyun-cli-accessKeySecret: ${{ secrets.ALIBABA_ACCESS_KEY_SECRET }}
+          aliyun-cli-region: eu-west-1
+
+      - name: Deploy to OSS
+        working-directory: frontend
+        run: |
+          aliyun oss sync out/ oss://fzco-frontend-staging/ \
+            --delete \
+            --exclude ".git/*"
+
+      - name: Invalidate CDN cache
+        run: |
+          aliyun cdn RefreshObjectCaches \
+            --ObjectPath "https://staging.accountant-crm.com/" \
+            --ObjectType Directory
+        continue-on-error: true
+
+  # ===========================================================================
+  # Run Database Migrations (Fix #23, #26)
+  # ===========================================================================
+  run-migrations:
+    name: Run Migrations
+    runs-on: ubuntu-latest
+    needs: [build-go-backend]
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install dependencies
+        run: |
+          curl -L https://github.com/golang-migrate/migrate/releases/download/v4.17.0/migrate.linux-amd64.tar.gz | tar xvz
+          sudo mv migrate /usr/local/bin/migrate
+          migrate -version
+          sudo apt-get update && sudo apt-get install -y postgresql-client
+
+      # Fix #26: Backup database before migration
+      - name: Backup database before migration
+        env:
+          DATABASE_URL: ${{ secrets.STAGING_DATABASE_URL }}
+        run: |
+          timestamp=$(date +%Y%m%d_%H%M%S)
+          echo "Creating pre-migration backup: backup_staging_${timestamp}.sql"
+          pg_dump "$DATABASE_URL" --no-owner --no-acl > backup_staging_${timestamp}.sql
+
+          # Store backup filename for potential rollback
+          echo "BACKUP_FILE=backup_staging_${timestamp}.sql" >> $GITHUB_ENV
+
+      - name: Run migrations
+        id: migrate
+        env:
+          DATABASE_URL: ${{ secrets.STAGING_DATABASE_URL }}
+        run: |
+          # Get current version before migration
+          current_version=$(migrate -database "$DATABASE_URL" -path ./migrations version 2>&1 || echo "0")
+          echo "MIGRATION_VERSION_BEFORE=$current_version" >> $GITHUB_ENV
+
+          # Run migrations with version tracking
+          migrate -database "$DATABASE_URL" -path ./migrations up
+
+          # Show current migration version
+          migrate -database "$DATABASE_URL" -path ./migrations version
+
+      # Fix #25: Rollback on migration failure
+      - name: Rollback on failure
+        if: failure() && steps.migrate.outcome == 'failure'
+        env:
+          DATABASE_URL: ${{ secrets.STAGING_DATABASE_URL }}
+        run: |
+          echo "Migration failed, attempting rollback..."
+          if [ -f "${{ env.BACKUP_FILE }}" ]; then
+            psql "$DATABASE_URL" < "${{ env.BACKUP_FILE }}"
+            echo "Database restored from backup"
+          else
+            # Fallback: try to migrate down to previous version
+            migrate -database "$DATABASE_URL" -path ./migrations down 1
+            echo "Rolled back one migration version"
+          fi
+
+  # ===========================================================================
+  # Deploy to ECI (Fix #24: Use ECI instead of kubectl)
+  # ===========================================================================
+  deploy:
+    name: Deploy to Staging
+    runs-on: ubuntu-latest
+    needs: [build-go-backend, build-python-ai, build-frontend, run-migrations]
+    environment:
+      name: staging
+      url: https://staging.accountant-crm.com
+    outputs:
+      previous_go_image: ${{ steps.get-current.outputs.go_image }}
+      previous_python_image: ${{ steps.get-current.outputs.python_image }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Alibaba Cloud CLI
+        uses: aliyun/setup-aliyun-cli-action@v1
+        with:
+          aliyun-cli-version: latest
+          aliyun-cli-accessKeyId: ${{ secrets.ALIBABA_ACCESS_KEY_ID }}
+          aliyun-cli-accessKeySecret: ${{ secrets.ALIBABA_ACCESS_KEY_SECRET }}
+          aliyun-cli-region: eu-west-1
+
+      # Fix #27: Log current deployment state for audit
+      - name: Get current deployment state
+        id: get-current
+        run: |
+          # Get current container group info for rollback
+          go_info=$(aliyun eci DescribeContainerGroups --ContainerGroupName accountant-crm-staging-go-backend --RegionId eu-west-1 2>/dev/null || echo "{}")
+          python_info=$(aliyun eci DescribeContainerGroups --ContainerGroupName accountant-crm-staging-python-ai --RegionId eu-west-1 2>/dev/null || echo "{}")
+
+          # Extract current image tags
+          echo "go_image=$(echo $go_info | jq -r '.ContainerGroups[0].Containers[0].Image // empty')" >> $GITHUB_OUTPUT
+          echo "python_image=$(echo $python_info | jq -r '.ContainerGroups[0].Containers[0].Image // empty')" >> $GITHUB_OUTPUT
+
+          # Log for audit
+          echo "=== DEPLOYMENT AUDIT LOG ===" >> deployment_audit.log
+          echo "Timestamp: $(date -u +%Y-%m-%dT%H:%M:%SZ)" >> deployment_audit.log
+          echo "Actor: ${{ github.actor }}" >> deployment_audit.log
+          echo "Commit: ${{ github.sha }}" >> deployment_audit.log
+          echo "Environment: staging" >> deployment_audit.log
+          echo "Previous Go Image: $(echo $go_info | jq -r '.ContainerGroups[0].Containers[0].Image // empty')" >> deployment_audit.log
+          echo "Previous Python Image: $(echo $python_info | jq -r '.ContainerGroups[0].Containers[0].Image // empty')" >> deployment_audit.log
+
+      - name: Update Go Backend ECI
+        id: deploy-go
+        run: |
+          aliyun eci UpdateContainerGroup \
+            --ContainerGroupId $(aliyun eci DescribeContainerGroups --ContainerGroupName accountant-crm-staging-go-backend --RegionId eu-west-1 | jq -r '.ContainerGroups[0].ContainerGroupId') \
+            --Container.1.Name go-backend \
+            --Container.1.Image "${{ env.ACR_REGISTRY }}/${{ env.ACR_NAMESPACE }}/go-backend:${{ github.sha }}" \
+            --RegionId eu-west-1
+
+      - name: Update Python AI ECI
+        id: deploy-python
+        run: |
+          aliyun eci UpdateContainerGroup \
+            --ContainerGroupId $(aliyun eci DescribeContainerGroups --ContainerGroupName accountant-crm-staging-python-ai --RegionId eu-west-1 | jq -r '.ContainerGroups[0].ContainerGroupId') \
+            --Container.1.Name python-ai \
+            --Container.1.Image "${{ env.ACR_REGISTRY }}/${{ env.ACR_NAMESPACE }}/python-ai:${{ github.sha }}" \
+            --RegionId eu-west-1
+
+      - name: Wait for ECI containers to be running
+        run: |
+          echo "Waiting for Go backend..."
+          for i in {1..30}; do
+            status=$(aliyun eci DescribeContainerGroups --ContainerGroupName accountant-crm-staging-go-backend --RegionId eu-west-1 | jq -r '.ContainerGroups[0].Status')
+            if [ "$status" = "Running" ]; then
+              echo "Go backend is running"
+              break
+            fi
+            echo "Status: $status, waiting..."
+            sleep 10
+          done
+
+          echo "Waiting for Python AI..."
+          for i in {1..30}; do
+            status=$(aliyun eci DescribeContainerGroups --ContainerGroupName accountant-crm-staging-python-ai --RegionId eu-west-1 | jq -r '.ContainerGroups[0].Status')
+            if [ "$status" = "Running" ]; then
+              echo "Python AI is running"
+              break
+            fi
+            echo "Status: $status, waiting..."
+            sleep 10
+          done
+
+      - name: Upload audit log
+        uses: actions/upload-artifact@v4
+        with:
+          name: deployment-audit-${{ github.sha }}
+          path: deployment_audit.log
+          retention-days: 90
+
+  # ===========================================================================
+  # Rollback on Failure (Fix #25)
+  # ===========================================================================
+  rollback:
+    name: Rollback on Failure
+    runs-on: ubuntu-latest
+    needs: [deploy, smoke-tests]
+    if: failure() && needs.deploy.outputs.previous_go_image != ''
+
+    steps:
+      - name: Setup Alibaba Cloud CLI
+        uses: aliyun/setup-aliyun-cli-action@v1
+        with:
+          aliyun-cli-version: latest
+          aliyun-cli-accessKeyId: ${{ secrets.ALIBABA_ACCESS_KEY_ID }}
+          aliyun-cli-accessKeySecret: ${{ secrets.ALIBABA_ACCESS_KEY_SECRET }}
+          aliyun-cli-region: eu-west-1
+
+      - name: Rollback Go Backend
+        if: needs.deploy.outputs.previous_go_image != ''
+        run: |
+          echo "Rolling back Go backend to: ${{ needs.deploy.outputs.previous_go_image }}"
+          aliyun eci UpdateContainerGroup \
+            --ContainerGroupId $(aliyun eci DescribeContainerGroups --ContainerGroupName accountant-crm-staging-go-backend --RegionId eu-west-1 | jq -r '.ContainerGroups[0].ContainerGroupId') \
+            --Container.1.Name go-backend \
+            --Container.1.Image "${{ needs.deploy.outputs.previous_go_image }}" \
+            --RegionId eu-west-1
+
+      - name: Rollback Python AI
+        if: needs.deploy.outputs.previous_python_image != ''
+        run: |
+          echo "Rolling back Python AI to: ${{ needs.deploy.outputs.previous_python_image }}"
+          aliyun eci UpdateContainerGroup \
+            --ContainerGroupId $(aliyun eci DescribeContainerGroups --ContainerGroupName accountant-crm-staging-python-ai --RegionId eu-west-1 | jq -r '.ContainerGroups[0].ContainerGroupId') \
+            --Container.1.Name python-ai \
+            --Container.1.Image "${{ needs.deploy.outputs.previous_python_image }}" \
+            --RegionId eu-west-1
+
+      - name: Notify rollback
+        run: |
+          echo "::warning::Deployment rolled back due to failure"
+
+  # ===========================================================================
+  # Post-deployment Tests
+  # ===========================================================================
+  smoke-tests:
+    name: Smoke Tests
+    runs-on: ubuntu-latest
+    needs: [deploy]
+
+    steps:
+      - name: Run smoke tests
+        run: |
+          # TODO: Change to HTTPS when SSL certificate is configured on ALB (Week 2)
+          # Test health endpoints
+          curl -sf http://api.staging.accountant-crm.com/health || exit 1
+          curl -sf http://api.staging.accountant-crm.com/ready || exit 1
+
+          # Test frontend (OSS with CDN, should have HTTPS)
+          curl -sf http://staging.accountant-crm.com/ || exit 1
+
+          echo "All smoke tests passed!"
+
+  # ===========================================================================
+  # Notify on Completion
+  # ===========================================================================
+  notify:
+    name: Notify
+    runs-on: ubuntu-latest
+    needs: [smoke-tests]
+    if: always()
+
+    steps:
+      - name: Send Slack notification
+        if: ${{ secrets.SLACK_WEBHOOK_URL }}
+        uses: slackapi/slack-github-action@v1.25.0
+        with:
+          payload: |
+            {
+              "text": "Staging deployment ${{ needs.smoke-tests.result == 'success' && 'succeeded' || 'failed' }}",
+              "blocks": [
+                {
+                  "type": "section",
+                  "text": {
+                    "type": "mrkdwn",
+                    "text": "*Staging Deployment* - ${{ needs.smoke-tests.result == 'success' && ':white_check_mark: Success' || ':x: Failed' }}\n*Commit:* `${{ github.sha }}`\n*Author:* ${{ github.actor }}"
+                  }
+                }
+              ]
+            }
+        env:
+          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
+          SLACK_WEBHOOK_TYPE: INCOMING_WEBHOOK
