@@ -65,6 +65,9 @@ data "alicloud_account" "current" {}
 locals {
   name_prefix = "${var.project_name}-${var.environment}"
 
+  # Image tags - python_ai can have separate tag from go_backend
+  python_ai_effective_tag = var.python_ai_image_tag != "" ? var.python_ai_image_tag : var.image_tag
+
   common_tags = {
     Project     = var.project_name
     Environment = var.environment
@@ -75,9 +78,8 @@ locals {
   # Zone selection
   zone_id = data.alicloud_zones.available.zones[0].id
 
-  # Existing CLI-created Redis instance
-  redis_instance_id       = "r-f2zf27b4fcd9ce74"
-  redis_connection_domain = "r-f2zf27b4fcd9ce74.redis.eu-west-1.rds.aliyuncs.com"
+  # Redis instance - now managed by Terraform in accountant VPC
+  # Old CLI-created instance was in different VPC: r-f2zf27b4fcd9ce74
 }
 
 # =============================================================================
@@ -197,6 +199,40 @@ resource "alicloud_snat_entry" "main" {
   snat_table_id     = alicloud_nat_gateway.main[count.index].snat_table_ids
   source_vswitch_id = alicloud_vswitch.private[count.index].id
   snat_ip           = alicloud_eip_address.nat[count.index].ip_address
+}
+
+# =============================================================================
+# Route Table for Private Subnets (CRITICAL: Routes traffic to NAT Gateway)
+# =============================================================================
+# Fix: Without this, private subnets have no route to NAT Gateway and cannot
+# reach the internet (causing ACR image pull timeouts)
+
+resource "alicloud_route_table" "private" {
+  vpc_id           = alicloud_vpc.main.id
+  route_table_name = "${local.name_prefix}-private-rt"
+  description      = "Route table for private subnets - routes to NAT Gateway"
+
+  tags = merge(local.common_tags, {
+    Name = "${local.name_prefix}-private-rt"
+    Type = "private"
+  })
+}
+
+# Attach route table to each private VSwitch
+resource "alicloud_route_table_attachment" "private" {
+  count = length(alicloud_vswitch.private)
+
+  route_table_id = alicloud_route_table.private.id
+  vswitch_id     = alicloud_vswitch.private[count.index].id
+}
+
+# Route all internet-bound traffic (0.0.0.0/0) to the NAT Gateway
+resource "alicloud_route_entry" "private_nat" {
+  route_table_id        = alicloud_route_table.private.id
+  destination_cidrblock = "0.0.0.0/0"
+  nexthop_type          = "NatGateway"
+  nexthop_id            = alicloud_nat_gateway.main[0].id
+  name                  = "${local.name_prefix}-private-to-nat"
 }
 
 # =============================================================================

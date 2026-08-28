@@ -168,7 +168,7 @@ resource "alicloud_cms_alarm" "redis_memory" {
   effective_interval = "00:00-23:59"
 
   dimensions = {
-    instanceId = local.redis_instance_id
+    instanceId = alicloud_kvstore_instance.redis.id
   }
 
   escalations_critical {
@@ -189,7 +189,7 @@ resource "alicloud_cms_alarm" "redis_connections" {
   effective_interval = "00:00-23:59"
 
   dimensions = {
-    instanceId = local.redis_instance_id
+    instanceId = alicloud_kvstore_instance.redis.id
   }
 
   escalations_critical {

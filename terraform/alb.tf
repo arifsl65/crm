@@ -48,7 +48,7 @@ resource "alicloud_alb_server_group" "go_backend" {
   server_group_name = "${local.name_prefix}-go-backend"
   vpc_id            = alicloud_vpc.main.id
   protocol          = "HTTP"
-  server_group_type = "Eci"
+  server_group_type = "Instance"  # Supports ECS, ENI, and ECI
 
   health_check_config {
     health_check_enabled      = true

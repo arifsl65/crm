@@ -128,7 +128,15 @@ func (h *AuthHandler) Login(c *gin.Context) {
 	_ = h.resetFailedAttempts(ctx, user.ID)
 	_ = h.updateLastLogin(ctx, user.ID)
 
-	tokenPair, err := h.jwt.GenerateTokenPair(user.ID, user.TenantID, user.Role)
+	// Use uuid.Nil for super_admin users (NULL tenant_id)
+	tokenTenantID := uuid.Nil
+	tenantIDStr := ""
+	if user.TenantID != nil {
+		tokenTenantID = *user.TenantID
+		tenantIDStr = user.TenantID.String()
+	}
+
+	tokenPair, err := h.jwt.GenerateTokenPair(user.ID, tokenTenantID, user.Role)
 	if err != nil {
 		log.Error().Err(err).Msg("Failed to generate token pair")
 		c.JSON(http.StatusInternalServerError, gin.H{
@@ -147,7 +155,7 @@ func (h *AuthHandler) Login(c *gin.Context) {
 			Email:    user.Email,
 			Name:     user.Name,
 			Role:     user.Role,
-			TenantID: user.TenantID.String(),
+			TenantID: tenantIDStr,
 		},
 	})
 }
@@ -261,7 +269,7 @@ func (h *AuthHandler) Logout(c *gin.Context) {
 
 type userRecord struct {
 	ID                  uuid.UUID
-	TenantID            uuid.UUID
+	TenantID            *uuid.UUID // Nullable for super_admin users
 	Email               string
 	Password            string
 	Name                string

@@ -99,7 +99,7 @@ variable "ecs_max_count" {
 
 # Fix #31: image_tag validation - "latest" is dangerous in production
 variable "image_tag" {
-  description = "Docker image tag to deploy (do not use 'latest' in production)"
+  description = "Docker image tag for Go backend (do not use 'latest' in production)"
   type        = string
   default     = "latest"
 
@@ -109,6 +109,14 @@ variable "image_tag" {
   }
 
   # Note: "latest" is allowed but will trigger a warning via check block in main.tf
+}
+
+variable "python_ai_image_tag" {
+  description = "Docker image tag for Python AI service (defaults to image_tag if not set)"
+  type        = string
+  default     = ""
+
+  # Empty string means use the same as image_tag
 }
 
 variable "acr_username" {

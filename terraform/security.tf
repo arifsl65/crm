@@ -183,83 +183,99 @@ resource "alicloud_security_group_rule" "redis_from_python_ai" {
 # =============================================================================
 # Network ACL for Additional Layer of Security
 # =============================================================================
+# Fix: Migrated from deprecated alicloud_network_acl_entries to inline rules
+# Fix: Added 8080/8000 ingress for ALB health checks and internal communication
 
 resource "alicloud_network_acl" "main" {
   vpc_id           = alicloud_vpc.main.id
   network_acl_name = "${local.name_prefix}-nacl"
+
+  # Ingress rules (inbound traffic)
+  # Rule 1: HTTP
+  ingress_acl_entries {
+    protocol       = "tcp"
+    port           = "80/80"
+    source_cidr_ip = "0.0.0.0/0"
+    entry_type     = "custom"
+    description    = "Allow HTTP"
+    policy         = "accept"
+  }
+
+  # Rule 2: HTTPS
+  ingress_acl_entries {
+    protocol       = "tcp"
+    port           = "443/443"
+    source_cidr_ip = "0.0.0.0/0"
+    entry_type     = "custom"
+    description    = "Allow HTTPS"
+    policy         = "accept"
+  }
+
+  # Rule 3: Go Backend port - ALB health checks and traffic
+  ingress_acl_entries {
+    protocol       = "tcp"
+    port           = "8080/8080"
+    source_cidr_ip = "0.0.0.0/0"
+    entry_type     = "custom"
+    description    = "Allow Go backend port for ALB health checks"
+    policy         = "accept"
+  }
+
+  # Rule 4: Python AI port - Go backend calls
+  ingress_acl_entries {
+    protocol       = "tcp"
+    port           = "8000/8000"
+    source_cidr_ip = var.vpc_cidr
+    entry_type     = "custom"
+    description    = "Allow Python AI port from VPC"
+    policy         = "accept"
+  }
+
+  # Rule 5: Ephemeral ports for return traffic (NACL is stateless)
+  ingress_acl_entries {
+    protocol       = "tcp"
+    port           = "1024/65535"
+    source_cidr_ip = "0.0.0.0/0"
+    entry_type     = "custom"
+    description    = "Allow ephemeral ports for return traffic"
+    policy         = "accept"
+  }
+
+  # Rule 6: DNS responses (UDP)
+  ingress_acl_entries {
+    protocol       = "udp"
+    port           = "53/53"
+    source_cidr_ip = "0.0.0.0/0"
+    entry_type     = "custom"
+    description    = "Allow DNS responses"
+    policy         = "accept"
+  }
+
+  # Egress rules (outbound traffic) - Allow all
+  egress_acl_entries {
+    protocol            = "all"
+    port                = "-1/-1"
+    destination_cidr_ip = "0.0.0.0/0"
+    entry_type          = "custom"
+    description         = "Allow all outbound"
+    policy              = "accept"
+  }
 
   tags = merge(local.common_tags, {
     Name = "${local.name_prefix}-nacl"
   })
 }
 
-# Allow HTTP/HTTPS inbound
-resource "alicloud_network_acl_entries" "inbound" {
-  network_acl_id = alicloud_network_acl.main.id
-
-  ingress {
-    protocol       = "tcp"
-    port           = "80/80"
-    source_cidr_ip = "0.0.0.0/0"
-    entry_type     = "custom"
-    name           = "allow-http"
-    policy         = "accept"
-  }
-
-  ingress {
-    protocol       = "tcp"
-    port           = "443/443"
-    source_cidr_ip = "0.0.0.0/0"
-    entry_type     = "custom"
-    name           = "allow-https"
-    policy         = "accept"
-  }
-
-  ingress {
-    protocol       = "tcp"
-    port           = "1024/65535"
-    source_cidr_ip = "0.0.0.0/0"
-    entry_type     = "custom"
-    name           = "allow-ephemeral"
-    policy         = "accept"
-  }
-}
-
-# Allow all outbound
-resource "alicloud_network_acl_entries" "outbound" {
-  network_acl_id = alicloud_network_acl.main.id
-
-  egress {
-    protocol            = "all"
-    port                = "-1/-1"
-    destination_cidr_ip = "0.0.0.0/0"
-    entry_type          = "custom"
-    name                = "allow-all-outbound"
-    policy              = "accept"
-  }
-}
-
-# Attach NACL to public subnets
-resource "alicloud_network_acl_attachment" "public" {
-  count = length(alicloud_vswitch.public)
-
-  network_acl_id = alicloud_network_acl.main.id
-  resources {
-    resource_id   = alicloud_vswitch.public[count.index].id
-    resource_type = "VSwitch"
-  }
-}
-
-# Fix #21: Attach NACL to private subnets as well
-resource "alicloud_network_acl_attachment" "private" {
-  count = length(alicloud_vswitch.private)
-
-  network_acl_id = alicloud_network_acl.main.id
-  resources {
-    resource_id   = alicloud_vswitch.private[count.index].id
-    resource_type = "VSwitch"
-  }
-}
+# =============================================================================
+# NACL Attachments - Managed outside Terraform
+# =============================================================================
+# Note: NACL attachments exist in the cloud and are working.
+# The alicloud_network_acl_attachment resource doesn't support import,
+# so these are managed outside Terraform. All VSwitches are attached to the NACL.
+#
+# If you need to modify attachments, use the Alibaba Cloud CLI:
+#   aliyun vpc AssociateNetworkAcl --NetworkAclId nacl-xxx --ResourceId vsw-xxx
+#   aliyun vpc UnassociateNetworkAcl --NetworkAclId nacl-xxx --ResourceId vsw-xxx
 
 # =============================================================================
 # WAF (Web Application Firewall) - Optional

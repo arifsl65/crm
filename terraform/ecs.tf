@@ -42,8 +42,9 @@ resource "alicloud_eci_container_group" "go_backend" {
 
   containers {
     name = "go-backend"
-    # Using VPC endpoint - accessible from any subnet in linked VPC
-    image             = "fzco-acr-registry.${var.region}.cr.aliyuncs.com/${alicloud_cr_ee_namespace.main.name}/go-backend:${var.image_tag}"
+    # Using VPC endpoint - private subnet pulls directly without NAT
+    # Fix: Internet endpoint was timing out due to missing NAT route
+    image             = "fzco-acr-registry-vpc.${var.region}.cr.aliyuncs.com/${alicloud_cr_ee_namespace.main.name}/go-backend:${var.image_tag}"
     cpu               = var.go_backend_cpu / 1000
     memory            = var.go_backend_memory / 1024
     image_pull_policy = "Always"
@@ -88,7 +89,7 @@ resource "alicloud_eci_container_group" "go_backend" {
 
     environment_vars {
       key   = "REDIS_HOST"
-      value = local.redis_connection_domain
+      value = alicloud_kvstore_instance.redis.connection_domain
     }
 
     # REDIS_PASSWORD removed - fetched from KMS at runtime
@@ -96,7 +97,7 @@ resource "alicloud_eci_container_group" "go_backend" {
 
     environment_vars {
       key   = "REDIS_TLS_ENABLED"
-      value = "true"
+      value = "false"
     }
 
     # JWT Secret Key for token signing (Fix #1: Critical - app exits without this)
@@ -114,23 +115,25 @@ resource "alicloud_eci_container_group" "go_backend" {
 
     environment_vars {
       key   = "REDIS_PASSWORD"
-      value = var.redis_password
+      value = random_password.redis_password.result
     }
 
-    # Enable KMS-based secret fetching
+    # KMS-based secret fetching disabled until RAM role is configured
+    # Fix: Was causing container crash on startup
     environment_vars {
       key   = "SECRETS_FROM_KMS"
-      value = "true"
+      value = "false"
     }
 
+    # mTLS disabled temporarily - using HTTP until certs are configured
     environment_vars {
       key   = "PYTHON_AI_URL"
-      value = "https://python-ai.fzco.local:8000"
+      value = "http://python-ai.fzco.local:8000"
     }
 
     environment_vars {
       key   = "MTLS_ENABLED"
-      value = "true"
+      value = "false"
     }
 
     # KMS Secret names for runtime fetching (applications should use Alibaba SDK)
@@ -200,9 +203,9 @@ resource "alicloud_eci_container_group" "go_backend" {
     }
   }
 
-  # Image registry credentials (VPC endpoint - works from any subnet in linked VPC)
+  # Image registry credentials (VPC endpoint - pulls directly without internet)
   image_registry_credential {
-    server    = "fzco-acr-registry.${var.region}.cr.aliyuncs.com"
+    server    = "fzco-acr-registry-vpc.${var.region}.cr.aliyuncs.com"
     user_name = var.acr_username
     password  = var.acr_password
   }
@@ -212,6 +215,22 @@ resource "alicloud_eci_container_group" "go_backend" {
     Service = "go-backend"
     Subnet  = "private"
   })
+
+  lifecycle {
+    ignore_changes = [
+      cpu,
+      memory,
+      dns_policy,
+      ephemeral_storage,
+      instance_type,
+      internet_ip,
+      intranet_ip,
+      resource_group_id,
+      spot_price_limit,
+      spot_strategy,
+      status,
+    ]
+  }
 }
 
 # =============================================================================
@@ -233,7 +252,9 @@ resource "alicloud_eci_container_group" "python_ai" {
 
   containers {
     name              = "python-ai"
-    image             = "fzco-acr-registry.${var.region}.cr.aliyuncs.com/${alicloud_cr_ee_namespace.main.name}/python-ai:${var.image_tag}"
+    # Using VPC endpoint - private subnet pulls directly without NAT
+    # Fix: Internet endpoint was timing out due to missing NAT route
+    image             = "fzco-acr-registry-vpc.${var.region}.cr.aliyuncs.com/${alicloud_cr_ee_namespace.main.name}/python-ai:${local.python_ai_effective_tag}"
     cpu               = var.python_ai_cpu / 1000
     memory            = var.python_ai_memory / 1024
     image_pull_policy = "Always"
@@ -261,13 +282,13 @@ resource "alicloud_eci_container_group" "python_ai" {
 
     environment_vars {
       key   = "REDIS_HOST"
-      value = local.redis_connection_domain
+      value = alicloud_kvstore_instance.redis.connection_domain
     }
 
     # Fallback Redis password - direct value until KMS runtime fetching is verified
     environment_vars {
       key   = "REDIS_PASSWORD"
-      value = var.redis_password
+      value = random_password.redis_password.result
     }
 
     # PostgreSQL connection for Python AI (Fix #4: Required for external DB access)
@@ -306,18 +327,38 @@ resource "alicloud_eci_container_group" "python_ai" {
       value = alicloud_oss_bucket.uploads.id
     }
 
+    # Alibaba Cloud credentials - required until RAM role is enabled on ECI
+    # Used by Python SDK for OSS and other Alibaba Cloud services
+    # TODO: For production, create a dedicated access key with limited permissions
+    environment_vars {
+      key   = "ALIBABA_ACCESS_KEY_ID"
+      value = var.alicloud_access_key
+    }
+
+    environment_vars {
+      key   = "ALIBABA_ACCESS_KEY_SECRET"
+      value = var.alicloud_secret_key
+    }
+
+    environment_vars {
+      key   = "ALIBABA_REGION"
+      value = var.region
+    }
+
+    # mTLS disabled temporarily - using HTTP until certs are configured
     environment_vars {
       key   = "MTLS_ENABLED"
-      value = "true"
+      value = "false"
     }
 
-    # Enable KMS-based secret fetching
+    # KMS-based secret fetching disabled until RAM role is configured
+    # Fix: Was causing container crash on startup
     environment_vars {
       key   = "SECRETS_FROM_KMS"
-      value = "true"
+      value = "false"
     }
 
-    # KMS Secret references
+    # KMS Secret references (not used when SECRETS_FROM_KMS=false)
     environment_vars {
       key   = "KMS_MONGODB_URI_SECRET"
       value = "${local.name_prefix}/mongodb-uri"
@@ -378,9 +419,9 @@ resource "alicloud_eci_container_group" "python_ai" {
     }
   }
 
-  # Image registry credentials
+  # Image registry credentials (VPC endpoint - pulls directly without internet)
   image_registry_credential {
-    server    = "fzco-acr-registry.${var.region}.cr.aliyuncs.com"
+    server    = "fzco-acr-registry-vpc.${var.region}.cr.aliyuncs.com"
     user_name = var.acr_username
     password  = var.acr_password
   }
@@ -390,6 +431,22 @@ resource "alicloud_eci_container_group" "python_ai" {
     Service = "python-ai"
     Subnet  = "private"
   })
+
+  lifecycle {
+    ignore_changes = [
+      cpu,
+      memory,
+      dns_policy,
+      ephemeral_storage,
+      instance_type,
+      internet_ip,
+      intranet_ip,
+      resource_group_id,
+      spot_price_limit,
+      spot_strategy,
+      status,
+    ]
+  }
 }
 
 # =============================================================================
@@ -447,6 +504,26 @@ resource "alicloud_security_group_rule" "go_backend_https" {
   description       = "Allow HTTPS outbound (Neon, APIs)"
 }
 
+# Go Backend: Allow outbound PostgreSQL (Neon uses port 5432)
+resource "alicloud_security_group_rule" "go_backend_postgres" {
+  type              = "egress"
+  ip_protocol       = "tcp"
+  port_range        = "5432/5432"
+  security_group_id = alicloud_security_group.go_backend.id
+  cidr_ip           = "0.0.0.0/0"
+  description       = "Allow PostgreSQL outbound (Neon)"
+}
+
+# Go Backend: Allow outbound DNS (UDP 53)
+resource "alicloud_security_group_rule" "go_backend_dns" {
+  type              = "egress"
+  ip_protocol       = "udp"
+  port_range        = "53/53"
+  security_group_id = alicloud_security_group.go_backend.id
+  cidr_ip           = "0.0.0.0/0"
+  description       = "Allow DNS resolution"
+}
+
 # Python AI Security Group (Private)
 resource "alicloud_security_group" "python_ai" {
   name        = "${local.name_prefix}-python-ai-sg"
@@ -486,6 +563,36 @@ resource "alicloud_security_group_rule" "python_ai_https" {
   security_group_id = alicloud_security_group.python_ai.id
   cidr_ip           = "0.0.0.0/0"
   description       = "Allow HTTPS outbound (MongoDB, OpenAI, OSS)"
+}
+
+# Python AI: Allow outbound PostgreSQL (Neon)
+resource "alicloud_security_group_rule" "python_ai_postgres" {
+  type              = "egress"
+  ip_protocol       = "tcp"
+  port_range        = "5432/5432"
+  security_group_id = alicloud_security_group.python_ai.id
+  cidr_ip           = "0.0.0.0/0"
+  description       = "Allow PostgreSQL outbound (Neon)"
+}
+
+# Python AI: Allow outbound MongoDB (Atlas uses 27017)
+resource "alicloud_security_group_rule" "python_ai_mongodb" {
+  type              = "egress"
+  ip_protocol       = "tcp"
+  port_range        = "27017/27017"
+  security_group_id = alicloud_security_group.python_ai.id
+  cidr_ip           = "0.0.0.0/0"
+  description       = "Allow MongoDB outbound (Atlas)"
+}
+
+# Python AI: Allow outbound DNS (UDP 53)
+resource "alicloud_security_group_rule" "python_ai_dns" {
+  type              = "egress"
+  ip_protocol       = "udp"
+  port_range        = "53/53"
+  security_group_id = alicloud_security_group.python_ai.id
+  cidr_ip           = "0.0.0.0/0"
+  description       = "Allow DNS resolution"
 }
 
 # =============================================================================

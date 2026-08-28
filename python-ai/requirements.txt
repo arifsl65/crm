@@ -16,10 +16,10 @@ asyncpg==0.29.0           # Async PostgreSQL driver
 # Cache
 redis==5.0.2              # Redis client
 
-# Alibaba Cloud
+# Alibaba Cloud (minimal - OSS only, KMS added later when needed)
 oss2==2.18.4                          # OSS SDK
-alibabacloud-kms20160120==3.0.6       # KMS Secrets Manager SDK
-alibabacloud-credentials==0.3.4       # ECS RAM role credentials
+# alibabacloud-kms20160120==3.3.0     # KMS - add when SECRETS_FROM_KMS=true
+# alibabacloud-credentials==0.3.4     # ECS RAM role - add when using KMS
 
 # Security
 python-jose[cryptography]==3.3.0  # JWT

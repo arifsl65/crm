@@ -133,11 +133,22 @@ class Settings(BaseSettings):
     redis_tls_enabled: bool = False
 
     # Alibaba Cloud OSS
+    # OSS is optional - set OSS_ENABLED=false to disable, or leave credentials empty
+    oss_enabled: bool = True  # Disabled automatically if credentials are empty
     alibaba_access_key_id: str = ""
     alibaba_access_key_secret: str = ""
     alibaba_region: str = "eu-west-1"  # UK (London)
     oss_endpoint: str = "https://oss-eu-west-1.aliyuncs.com"
     oss_bucket_uploads: str = "fzco-uploads"
+
+    @property
+    def oss_configured(self) -> bool:
+        """Check if OSS credentials are configured and OSS is enabled."""
+        return (
+            self.oss_enabled
+            and bool(self.alibaba_access_key_id)
+            and bool(self.alibaba_access_key_secret)
+        )
 
     # mTLS
     mtls_enabled: bool = False

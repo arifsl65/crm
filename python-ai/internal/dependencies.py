@@ -155,12 +155,14 @@ class AppState:
     # OSS (Object Storage Service)
     # =========================================================================
 
-    async def connect_oss(self) -> oss2.Bucket:
+    async def connect_oss(self) -> Optional[oss2.Bucket]:
         """
         Connect to Alibaba Cloud OSS.
 
         Note: oss2 is synchronous, so we run blocking calls in a thread pool
         to avoid blocking the async event loop.
+
+        Returns None if OSS is not configured.
         """
         import asyncio
 
@@ -168,6 +170,11 @@ class AppState:
             return self.oss_bucket
 
         settings = self.settings
+
+        # Skip OSS if not configured
+        if not settings.oss_configured:
+            logger.info("OSS not configured, skipping connection")
+            return None
 
         # Use V4 signature (V1 is deprecated)
         auth = oss2.AuthV4(
@@ -193,14 +200,21 @@ class AppState:
 
         return self.oss_bucket
 
-    async def oss_health_check(self) -> bool:
+    async def oss_health_check(self) -> Optional[bool]:
         """
         Check OSS health.
 
         Runs the synchronous OSS call in a thread pool to avoid blocking
         the async event loop.
+
+        Returns:
+            True if healthy, False if unhealthy, None if OSS is not configured.
         """
         import asyncio
+
+        # Return None (skip) if OSS is not configured
+        if not self.settings.oss_configured:
+            return None
 
         if self.oss_bucket is None:
             return False
@@ -283,7 +297,9 @@ class AppState:
                 raise
 
         try:
-            await self.connect_oss()
+            result = await self.connect_oss()
+            if result is None:
+                logger.info("OSS skipped (not configured)")
         except Exception as e:
             errors.append(f"OSS: {e}")
             if fail_on_error:

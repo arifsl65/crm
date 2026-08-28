@@ -273,7 +273,11 @@ async def ready(state: AppState = Depends(get_app_state)) -> Dict[str, Any]:
         all_healthy = False
 
     # Check OSS (async to avoid blocking event loop)
-    if await state.oss_health_check():
+    # Returns None if OSS is not configured (skip)
+    oss_status = await state.oss_health_check()
+    if oss_status is None:
+        response["oss"] = "disabled"  # Not configured, don't affect health
+    elif oss_status:
         response["oss"] = "ok"
     else:
         response["oss"] = "error"

@@ -50,8 +50,8 @@ output "oss" {
 output "redis" {
   description = "Redis configuration"
   value = {
-    instance_id       = local.redis_instance_id
-    connection_string = local.redis_connection_domain
+    instance_id       = alicloud_kvstore_instance.redis.id
+    connection_string = alicloud_kvstore_instance.redis.connection_domain
     port              = 6379
   }
   sensitive = true
@@ -116,7 +116,7 @@ output "summary" {
     Endpoints:
     - ALB DNS: ${alicloud_alb_load_balancer.main.dns_name}
     - Frontend: https://${var.oss_frontend_bucket}.${var.region}.aliyuncs.com
-    - Redis: ${local.redis_connection_domain}:6379
+    - Redis: ${alicloud_kvstore_instance.redis.connection_domain}:6379
 
     Pending Activation (Console Required):
     - ACR (Container Registry)

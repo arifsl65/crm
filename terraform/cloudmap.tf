@@ -9,8 +9,6 @@
 
 resource "alicloud_pvtz_zone" "main" {
   zone_name = "fzco.local"
-
-  remark = "Private DNS zone for ${var.project_name} service discovery"
 }
 
 # Associate zone with VPC
@@ -51,7 +49,7 @@ resource "alicloud_pvtz_zone_record" "redis" {
   zone_id = alicloud_pvtz_zone.main.id
   type    = "CNAME"
   rr      = "redis"
-  value   = local.redis_connection_domain
+  value   = alicloud_kvstore_instance.redis.connection_domain
   ttl     = 300
   status  = "ENABLE"
 }

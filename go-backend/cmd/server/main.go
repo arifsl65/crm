@@ -77,9 +77,12 @@ func main() {
 
 	// Initialize handlers
 	authHandler := handlers.NewAuthHandler(db, jwtManager)
+	tenantHandler := handlers.NewTenantHandler(db)
+	userHandler := handlers.NewUserHandler(db)
+	clientHandler := handlers.NewClientHandler(db)
 
 	// Setup Gin router
-	router := setupRouter(cfg, db, redis, aiClient, jwtManager, authHandler)
+	router := setupRouter(cfg, db, redis, aiClient, jwtManager, authHandler, tenantHandler, userHandler, clientHandler)
 
 	// Create HTTP server
 	srv := &http.Server{
@@ -140,7 +143,7 @@ func setupLogging(cfg config.AppConfig) {
 }
 
 // setupRouter configures the Gin router with all routes.
-func setupRouter(cfg *config.Config, db *database.Pool, redis *cache.Client, aiClient *ai.Client, jwtManager *auth.JWTManager, authHandler *handlers.AuthHandler) *gin.Engine {
+func setupRouter(cfg *config.Config, db *database.Pool, redis *cache.Client, aiClient *ai.Client, jwtManager *auth.JWTManager, authHandler *handlers.AuthHandler, tenantHandler *handlers.TenantHandler, userHandler *handlers.UserHandler, clientHandler *handlers.ClientHandler) *gin.Engine {
 	// Set Gin mode
 	if cfg.App.Env == "production" {
 		gin.SetMode(gin.ReleaseMode)
@@ -183,24 +186,34 @@ func setupRouter(cfg *config.Config, db *database.Pool, redis *cache.Client, aiC
 		protected := v1.Group("")
 		protected.Use(middleware.JWTAuth(jwtManager))
 
-		// Tenant routes (to be implemented)
+		// Tenant routes
 		tenants := protected.Group("/tenants")
 		{
-			tenants.GET("", notImplementedHandler())
-			tenants.POST("", middleware.RequireRole("super_admin"), notImplementedHandler())
-			tenants.GET("/:id", middleware.ValidateUUID("id"), notImplementedHandler())
-			tenants.PATCH("/:id", middleware.ValidateUUID("id"), middleware.RequireRole("super_admin", "tenant_admin"), notImplementedHandler())
-			tenants.DELETE("/:id", middleware.ValidateUUID("id"), middleware.RequireRole("super_admin"), notImplementedHandler())
+			tenants.GET("", tenantHandler.List)
+			tenants.POST("", middleware.RequireRole("super_admin"), tenantHandler.Create)
+			tenants.GET("/:id", middleware.ValidateUUID("id"), tenantHandler.Get)
+			tenants.PATCH("/:id", middleware.ValidateUUID("id"), middleware.RequireRole("super_admin", "tenant_admin"), tenantHandler.Update)
+			tenants.DELETE("/:id", middleware.ValidateUUID("id"), middleware.RequireRole("super_admin"), tenantHandler.Delete)
 		}
 
-		// User routes (to be implemented)
+		// User routes
 		users := protected.Group("/users")
 		{
-			users.GET("", notImplementedHandler())
-			users.POST("", middleware.RequireRole("super_admin", "tenant_admin"), notImplementedHandler())
-			users.GET("/:id", middleware.ValidateUUID("id"), notImplementedHandler())
-			users.PATCH("/:id", middleware.ValidateUUID("id"), notImplementedHandler())
-			users.DELETE("/:id", middleware.ValidateUUID("id"), middleware.RequireRole("super_admin", "tenant_admin"), notImplementedHandler())
+			users.GET("", userHandler.List)
+			users.POST("", middleware.RequireRole("super_admin", "tenant_admin"), userHandler.Create)
+			users.GET("/:id", middleware.ValidateUUID("id"), userHandler.Get)
+			users.PATCH("/:id", middleware.ValidateUUID("id"), userHandler.Update)
+			users.DELETE("/:id", middleware.ValidateUUID("id"), middleware.RequireRole("super_admin", "tenant_admin"), userHandler.Delete)
+		}
+
+		// Client routes
+		clients := protected.Group("/clients")
+		{
+			clients.GET("", clientHandler.List)
+			clients.POST("", middleware.RequireRole("super_admin", "tenant_admin", "staff"), clientHandler.Create)
+			clients.GET("/:id", middleware.ValidateUUID("id"), clientHandler.Get)
+			clients.PATCH("/:id", middleware.ValidateUUID("id"), middleware.RequireRole("super_admin", "tenant_admin", "staff"), clientHandler.Update)
+			clients.DELETE("/:id", middleware.ValidateUUID("id"), middleware.RequireRole("super_admin", "tenant_admin"), clientHandler.Delete)
 		}
 	}
 

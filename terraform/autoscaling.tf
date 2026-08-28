@@ -152,7 +152,7 @@ locals {
       max_replicas = var.python_ai_max_replicas
       cpu          = var.python_ai_cpu
       memory       = var.python_ai_memory
-      image        = "fzco-acr-registry-vpc.${var.region}.cr.aliyuncs.com/${alicloud_cr_ee_namespace.main.name}/python-ai:${var.image_tag}"
+      image        = "fzco-acr-registry-vpc.${var.region}.cr.aliyuncs.com/${alicloud_cr_ee_namespace.main.name}/python-ai:${local.python_ai_effective_tag}"
       port         = 8000
     }
   }
