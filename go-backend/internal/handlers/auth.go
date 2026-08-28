@@ -26,16 +26,16 @@ func NewAuthHandler(db *database.Pool, jwt *auth.JWTManager) *AuthHandler {
 }
 
 type LoginRequest struct {
-	Email    string `json:"email" binding:"required,email"`
-	Password string `json:"password" binding:"required,min=8"`
+	Email        string `json:"email" binding:"required,email"`
+	Password     string `json:"password" binding:"required,min=8"`
+	TenantDomain string `json:"tenant_domain"` // Optional: for multi-tenant login resolution
 }
 
 type RegisterRequest struct {
-	Email     string `json:"email" binding:"required,email"`
-	Password  string `json:"password" binding:"required,min=8"`
-	FirstName string `json:"first_name" binding:"required"`
-	LastName  string `json:"last_name" binding:"required"`
-	TenantID  string `json:"tenant_id" binding:"required,uuid"`
+	Email    string `json:"email" binding:"required,email"`
+	Password string `json:"password" binding:"required,min=8"`
+	Name     string `json:"name" binding:"required"`
+	TenantID string `json:"tenant_id" binding:"required,uuid"`
 }
 
 type AuthResponse struct {
@@ -46,12 +46,11 @@ type AuthResponse struct {
 }
 
 type UserInfo struct {
-	ID        string `json:"id"`
-	Email     string `json:"email"`
-	FirstName string `json:"first_name"`
-	LastName  string `json:"last_name"`
-	Role      string `json:"role"`
-	TenantID  string `json:"tenant_id"`
+	ID       string `json:"id"`
+	Email    string `json:"email"`
+	Name     string `json:"name"`
+	Role     string `json:"role"`
+	TenantID string `json:"tenant_id"`
 }
 
 type RefreshRequest struct {
@@ -69,12 +68,34 @@ func (h *AuthHandler) Login(c *gin.Context) {
 	}
 
 	ctx := c.Request.Context()
-	user, err := h.getUserByEmail(ctx, req.Email)
+
+	// Resolve tenant if domain provided
+	var tenantID *uuid.UUID
+	if req.TenantDomain != "" {
+		tid, err := h.getTenantByDomain(ctx, req.TenantDomain)
+		if err != nil {
+			c.JSON(http.StatusUnauthorized, gin.H{
+				"error":   "invalid_credentials",
+				"message": "Invalid email or password",
+			})
+			return
+		}
+		tenantID = &tid
+	}
+
+	user, err := h.getUserByEmail(ctx, req.Email, tenantID)
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			c.JSON(http.StatusUnauthorized, gin.H{
 				"error":   "invalid_credentials",
 				"message": "Invalid email or password",
+			})
+			return
+		}
+		if err.Error() == "multiple_tenants" {
+			c.JSON(http.StatusBadRequest, gin.H{
+				"error":   "tenant_required",
+				"message": "Email exists in multiple tenants. Please specify tenant_domain.",
 			})
 			return
 		}
@@ -94,7 +115,7 @@ func (h *AuthHandler) Login(c *gin.Context) {
 		return
 	}
 
-	valid, err := auth.VerifyPassword(req.Password, user.PasswordHash)
+	valid, err := auth.VerifyPassword(req.Password, user.Password)
 	if err != nil || !valid {
 		_ = h.incrementFailedAttempts(ctx, user.ID)
 		c.JSON(http.StatusUnauthorized, gin.H{
@@ -105,6 +126,7 @@ func (h *AuthHandler) Login(c *gin.Context) {
 	}
 
 	_ = h.resetFailedAttempts(ctx, user.ID)
+	_ = h.updateLastLogin(ctx, user.ID)
 
 	tokenPair, err := h.jwt.GenerateTokenPair(user.ID, user.TenantID, user.Role)
 	if err != nil {
@@ -121,12 +143,11 @@ func (h *AuthHandler) Login(c *gin.Context) {
 		RefreshToken: tokenPair.RefreshToken,
 		ExpiresAt:    tokenPair.ExpiresAt,
 		User: UserInfo{
-			ID:        user.ID.String(),
-			Email:     user.Email,
-			FirstName: user.FirstName,
-			LastName:  user.LastName,
-			Role:      user.Role,
-			TenantID:  user.TenantID.String(),
+			ID:       user.ID.String(),
+			Email:    user.Email,
+			Name:     user.Name,
+			Role:     user.Role,
+			TenantID: user.TenantID.String(),
 		},
 	})
 }
@@ -172,7 +193,7 @@ func (h *AuthHandler) Register(c *gin.Context) {
 	}
 
 	userID := uuid.New()
-	err = h.createUser(ctx, userID, tenantID, req.Email, passwordHash, req.FirstName, req.LastName)
+	err = h.createUser(ctx, userID, tenantID, req.Email, passwordHash, req.Name)
 	if err != nil {
 		log.Error().Err(err).Msg("Failed to create user")
 		c.JSON(http.StatusInternalServerError, gin.H{
@@ -197,12 +218,11 @@ func (h *AuthHandler) Register(c *gin.Context) {
 		RefreshToken: tokenPair.RefreshToken,
 		ExpiresAt:    tokenPair.ExpiresAt,
 		User: UserInfo{
-			ID:        userID.String(),
-			Email:     req.Email,
-			FirstName: req.FirstName,
-			LastName:  req.LastName,
-			Role:      "staff",
-			TenantID:  tenantID.String(),
+			ID:       userID.String(),
+			Email:    req.Email,
+			Name:     req.Name,
+			Role:     "staff",
+			TenantID: tenantID.String(),
 		},
 	})
 }
@@ -243,25 +263,55 @@ type userRecord struct {
 	ID                  uuid.UUID
 	TenantID            uuid.UUID
 	Email               string
-	PasswordHash        string
-	FirstName           string
-	LastName            string
+	Password            string
+	Name                string
 	Role                string
 	FailedLoginAttempts int
 	LockedUntil         *time.Time
 }
 
-func (h *AuthHandler) getUserByEmail(ctx context.Context, email string) (*userRecord, error) {
+func (h *AuthHandler) getUserByEmail(ctx context.Context, email string, tenantID *uuid.UUID) (*userRecord, error) {
+	email = strings.ToLower(email)
+
+	if tenantID != nil {
+		// Tenant-scoped lookup
+		query := `
+			SELECT id, tenant_id, email, password, name, role,
+			       failed_login_attempts, locked_until
+			FROM users
+			WHERE email = $1 AND tenant_id = $2 AND deleted_at IS NULL
+		`
+		var user userRecord
+		err := h.db.QueryRow(ctx, query, email, *tenantID).Scan(
+			&user.ID, &user.TenantID, &user.Email, &user.Password,
+			&user.Name, &user.Role,
+			&user.FailedLoginAttempts, &user.LockedUntil,
+		)
+		return &user, err
+	}
+
+	// No tenant specified - check how many tenants have this email
+	countQuery := `SELECT COUNT(DISTINCT tenant_id) FROM users WHERE email = $1 AND deleted_at IS NULL`
+	var count int
+	if err := h.db.QueryRow(ctx, countQuery, email).Scan(&count); err != nil {
+		return nil, err
+	}
+
+	if count > 1 {
+		return nil, errors.New("multiple_tenants")
+	}
+
+	// Single tenant or super_admin - proceed with lookup
 	query := `
-		SELECT id, tenant_id, email, password_hash, first_name, last_name, role,
+		SELECT id, tenant_id, email, password, name, role,
 		       failed_login_attempts, locked_until
 		FROM users
 		WHERE email = $1 AND deleted_at IS NULL
 	`
 	var user userRecord
-	err := h.db.QueryRow(ctx, query, strings.ToLower(email)).Scan(
-		&user.ID, &user.TenantID, &user.Email, &user.PasswordHash,
-		&user.FirstName, &user.LastName, &user.Role,
+	err := h.db.QueryRow(ctx, query, email).Scan(
+		&user.ID, &user.TenantID, &user.Email, &user.Password,
+		&user.Name, &user.Role,
 		&user.FailedLoginAttempts, &user.LockedUntil,
 	)
 	return &user, err
@@ -274,12 +324,12 @@ func (h *AuthHandler) emailExists(ctx context.Context, email string) (bool, erro
 	return exists, err
 }
 
-func (h *AuthHandler) createUser(ctx context.Context, id, tenantID uuid.UUID, email, passwordHash, firstName, lastName string) error {
+func (h *AuthHandler) createUser(ctx context.Context, id, tenantID uuid.UUID, email, password, name string) error {
 	query := `
-		INSERT INTO users (id, tenant_id, email, password_hash, first_name, last_name, role, created_at, updated_at)
-		VALUES ($1, $2, $3, $4, $5, $6, 'staff', NOW(), NOW())
+		INSERT INTO users (id, tenant_id, email, password, name, role, created_at, updated_at)
+		VALUES ($1, $2, $3, $4, $5, 'staff', NOW(), NOW())
 	`
-	_, err := h.db.Exec(ctx, query, id, tenantID, strings.ToLower(email), passwordHash, firstName, lastName)
+	_, err := h.db.Exec(ctx, query, id, tenantID, strings.ToLower(email), password, name)
 	return err
 }
 
@@ -303,4 +353,20 @@ func (h *AuthHandler) resetFailedAttempts(ctx context.Context, userID uuid.UUID)
 	`
 	_, err := h.db.Exec(ctx, query, userID)
 	return err
+}
+
+func (h *AuthHandler) updateLastLogin(ctx context.Context, userID uuid.UUID) error {
+	query := `UPDATE users SET last_login_at = NOW(), updated_at = NOW() WHERE id = $1`
+	_, err := h.db.Exec(ctx, query, userID)
+	return err
+}
+
+func (h *AuthHandler) getTenantByDomain(ctx context.Context, domain string) (uuid.UUID, error) {
+	query := `
+		SELECT id FROM tenants
+		WHERE (domain = $1 OR custom_domain = $1) AND is_active = true AND deleted_at IS NULL
+	`
+	var tenantID uuid.UUID
+	err := h.db.QueryRow(ctx, query, strings.ToLower(domain)).Scan(&tenantID)
+	return tenantID, err
 }

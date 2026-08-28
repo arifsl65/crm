@@ -163,9 +163,11 @@ async def fetch_tenant_by_domain(domain: str) -> Optional[dict[str, Any]]:
 
             row = await conn.fetchrow(
                 """
-                SELECT id, name, domain, status, plan, settings, metadata, created_at, updated_at
+                SELECT id, name, domain, custom_domain, plan, logo_url, favicon_url,
+                       primary_color, secondary_color, timezone, is_active, settings,
+                       created_at, updated_at
                 FROM tenants
-                WHERE domain = $1 AND deleted_at IS NULL
+                WHERE (domain = $1 OR custom_domain = $1) AND is_active = true AND deleted_at IS NULL
                 """,
                 domain,
             )
