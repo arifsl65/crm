@@ -369,7 +369,7 @@ func (h *AuthHandler) Logout(c *gin.Context) {
 	_ = c.ShouldBindJSON(&req)
 
 	ctx := c.Request.Context()
-	userID := middleware.GetUserID(c)
+	userID, _ := middleware.GetUserID(c)
 
 	if req.RevokeAll {
 		// Revoke all user sessions
@@ -709,7 +709,7 @@ func (h *AuthHandler) updatePasswordAndClearToken(ctx context.Context, userID uu
 // GetMe returns the current user's profile.
 // GET /api/v1/auth/me
 func (h *AuthHandler) GetMe(c *gin.Context) {
-	userID := middleware.GetUserID(c)
+	userID, _ := middleware.GetUserID(c)
 	ctx := c.Request.Context()
 
 	query := `
@@ -758,7 +758,7 @@ func (h *AuthHandler) GetMe(c *gin.Context) {
 // UpdateMe updates the current user's profile.
 // PATCH /api/v1/auth/me
 func (h *AuthHandler) UpdateMe(c *gin.Context) {
-	userID := middleware.GetUserID(c)
+	userID, _ := middleware.GetUserID(c)
 	ctx := c.Request.Context()
 
 	var req struct {
@@ -790,7 +790,7 @@ func (h *AuthHandler) UpdateMe(c *gin.Context) {
 // ChangePassword allows the current user to change their password.
 // PATCH /api/v1/auth/password
 func (h *AuthHandler) ChangePassword(c *gin.Context) {
-	userID := middleware.GetUserID(c)
+	userID, _ := middleware.GetUserID(c)
 	ctx := c.Request.Context()
 
 	var req struct {
@@ -857,7 +857,7 @@ func (h *AuthHandler) ChangePassword(c *gin.Context) {
 // GetSessions returns the current user's active sessions.
 // GET /api/v1/auth/sessions
 func (h *AuthHandler) GetSessions(c *gin.Context) {
-	userID := middleware.GetUserID(c)
+	userID, _ := middleware.GetUserID(c)
 	ctx := c.Request.Context()
 
 	sessions, err := h.session.GetUserActiveSessions(ctx, userID)
@@ -1114,7 +1114,7 @@ type TwoFASetupResponse struct {
 // Setup2FA initializes 2FA for the current user.
 // POST /api/v1/auth/2fa/setup
 func (h *AuthHandler) Setup2FA(c *gin.Context) {
-	userID := middleware.GetUserID(c)
+	userID, _ := middleware.GetUserID(c)
 	ctx := c.Request.Context()
 
 	// Check if 2FA is already enabled
@@ -1198,7 +1198,7 @@ func (h *AuthHandler) Verify2FA(c *gin.Context) {
 		return
 	}
 
-	userID := middleware.GetUserID(c)
+	userID, _ := middleware.GetUserID(c)
 	ctx := c.Request.Context()
 
 	// Rate limit check
@@ -1269,7 +1269,7 @@ func (h *AuthHandler) Verify2FA(c *gin.Context) {
 // Disable2FA disables 2FA for a user (admin only or self).
 // DELETE /api/v1/auth/2fa
 func (h *AuthHandler) Disable2FA(c *gin.Context) {
-	userID := middleware.GetUserID(c)
+	userID, _ := middleware.GetUserID(c)
 	ctx := c.Request.Context()
 
 	// Clear TOTP secret and backup codes
@@ -1296,7 +1296,7 @@ func (h *AuthHandler) Disable2FA(c *gin.Context) {
 // GenerateBackupCodes generates new backup codes for the user.
 // POST /api/v1/auth/2fa/backup-codes
 func (h *AuthHandler) GenerateBackupCodes(c *gin.Context) {
-	userID := middleware.GetUserID(c)
+	userID, _ := middleware.GetUserID(c)
 	ctx := c.Request.Context()
 
 	// Check if 2FA is enabled
