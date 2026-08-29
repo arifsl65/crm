@@ -18,6 +18,7 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/rs/zerolog/log"
 
+	"github.com/accountant-crm/go-backend/internal/audit"
 	"github.com/accountant-crm/go-backend/internal/auth"
 	"github.com/accountant-crm/go-backend/internal/database"
 	"github.com/accountant-crm/go-backend/internal/email"
@@ -31,9 +32,10 @@ type AuthHandler struct {
 	email       *email.Client
 	frontendURL string
 	rateLimiter *middleware.AuthRateLimiter
+	audit       *audit.Logger
 }
 
-func NewAuthHandler(db *database.Pool, jwt *auth.JWTManager, session *auth.SessionManager, emailClient *email.Client, frontendURL string, rateLimiter *middleware.AuthRateLimiter) *AuthHandler {
+func NewAuthHandler(db *database.Pool, jwt *auth.JWTManager, session *auth.SessionManager, emailClient *email.Client, frontendURL string, rateLimiter *middleware.AuthRateLimiter, auditLogger *audit.Logger) *AuthHandler {
 	return &AuthHandler{
 		db:          db,
 		jwt:         jwt,
@@ -41,6 +43,7 @@ func NewAuthHandler(db *database.Pool, jwt *auth.JWTManager, session *auth.Sessi
 		email:       emailClient,
 		frontendURL: frontendURL,
 		rateLimiter: rateLimiter,
+		audit:       auditLogger,
 	}
 }
 
@@ -102,9 +105,12 @@ func (h *AuthHandler) Login(c *gin.Context) {
 
 	// Resolve tenant if domain provided
 	var tenantID *uuid.UUID
+	ipAddress := c.ClientIP()
+	userAgent := c.Request.UserAgent()
 	if req.TenantDomain != "" {
 		tid, err := h.getTenantByDomain(ctx, req.TenantDomain)
 		if err != nil {
+			h.audit.LogAuth(ctx, audit.ActionLogin, nil, nil, ipAddress, userAgent, false, "invalid_tenant_domain")
 			c.JSON(http.StatusUnauthorized, gin.H{
 				"error":   "invalid_credentials",
 				"message": "Invalid email or password",
@@ -117,6 +123,7 @@ func (h *AuthHandler) Login(c *gin.Context) {
 	user, err := h.getUserByEmail(ctx, req.Email, tenantID)
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
+			h.audit.LogAuth(ctx, audit.ActionLogin, nil, nil, ipAddress, userAgent, false, "user_not_found")
 			c.JSON(http.StatusUnauthorized, gin.H{
 				"error":   "invalid_credentials",
 				"message": "Invalid email or password",
@@ -139,6 +146,7 @@ func (h *AuthHandler) Login(c *gin.Context) {
 	}
 
 	if user.LockedUntil != nil && user.LockedUntil.After(time.Now()) {
+		h.audit.LogAuth(ctx, audit.ActionLogin, &user.ID, user.TenantID, ipAddress, userAgent, false, "account_locked")
 		c.JSON(http.StatusForbidden, gin.H{
 			"error":   "account_locked",
 			"message": "Account is temporarily locked",
@@ -149,6 +157,7 @@ func (h *AuthHandler) Login(c *gin.Context) {
 	valid, err := auth.VerifyPassword(req.Password, user.Password)
 	if err != nil || !valid {
 		_ = h.incrementFailedAttempts(ctx, user.ID)
+		h.audit.LogAuth(ctx, audit.ActionLogin, &user.ID, user.TenantID, ipAddress, userAgent, false, "invalid_password")
 		c.JSON(http.StatusUnauthorized, gin.H{
 			"error":   "invalid_credentials",
 			"message": "Invalid email or password",
@@ -183,13 +192,14 @@ func (h *AuthHandler) Login(c *gin.Context) {
 	}
 
 	// Store refresh token in database for revocation tracking
-	ipAddress := c.ClientIP()
-	userAgent := c.Request.UserAgent()
 	_, err = h.session.StoreRefreshToken(ctx, user.ID, user.TenantID, tokenPair.RefreshToken, ipAddress, userAgent)
 	if err != nil {
 		log.Error().Err(err).Msg("Failed to store refresh token")
 		// Continue anyway - token will still work, just won't be revocable
 	}
+
+	// Audit log successful login
+	h.audit.LogAuth(ctx, audit.ActionLogin, &user.ID, user.TenantID, ipAddress, userAgent, true, "")
 
 	c.JSON(http.StatusOK, AuthResponse{
 		AccessToken:  tokenPair.AccessToken,
@@ -274,6 +284,9 @@ func (h *AuthHandler) Register(c *gin.Context) {
 		log.Error().Err(err).Msg("Failed to store refresh token")
 		// Continue anyway
 	}
+
+	// Audit log successful registration
+	h.audit.LogAuth(ctx, audit.ActionRegister, &userID, &tenantID, ipAddress, userAgent, true, "")
 
 	c.JSON(http.StatusCreated, AuthResponse{
 		AccessToken:  tokenPair.AccessToken,
@@ -370,12 +383,16 @@ func (h *AuthHandler) Logout(c *gin.Context) {
 
 	ctx := c.Request.Context()
 	userID, _ := middleware.GetUserID(c)
+	tenantID, _ := middleware.GetTenantID(c)
+	ipAddress := c.ClientIP()
+	userAgent := c.Request.UserAgent()
 
 	if req.RevokeAll {
 		// Revoke all user sessions
 		if err := h.session.RevokeAllUserTokens(ctx, userID); err != nil {
 			log.Error().Err(err).Str("user_id", userID.String()).Msg("Failed to revoke all user tokens")
 		}
+		h.audit.LogAuth(ctx, audit.ActionLogout, &userID, &tenantID, ipAddress, userAgent, true, "revoke_all")
 		c.JSON(http.StatusOK, gin.H{
 			"message": "Logged out from all devices",
 		})
@@ -389,6 +406,7 @@ func (h *AuthHandler) Logout(c *gin.Context) {
 		}
 	}
 
+	h.audit.LogAuth(ctx, audit.ActionLogout, &userID, &tenantID, ipAddress, userAgent, true, "")
 	c.JSON(http.StatusOK, gin.H{
 		"message": "Logged out successfully",
 	})
@@ -1406,7 +1424,10 @@ func (h *AuthHandler) VerifyBackupCode(c *gin.Context) {
 
 	// Count remaining codes
 	var remainingCodes int
-	h.db.QueryRow(ctx, `SELECT COUNT(*) FROM totp_backup_codes WHERE user_id = $1 AND used_at IS NULL`, user.ID).Scan(&remainingCodes)
+	if err := h.db.QueryRow(ctx, `SELECT COUNT(*) FROM totp_backup_codes WHERE user_id = $1 AND used_at IS NULL`, user.ID).Scan(&remainingCodes); err != nil {
+		log.Warn().Err(err).Str("user_id", user.ID.String()).Msg("Failed to count remaining backup codes")
+		remainingCodes = 0 // Default to 0 on error, login can still proceed
+	}
 
 	// Generate tokens
 	tokenTenantID := uuid.Nil

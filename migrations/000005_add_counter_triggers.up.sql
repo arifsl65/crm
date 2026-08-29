@@ -5,6 +5,15 @@
 --   3. chase_logs.opened when webhooks update status
 
 -- ============================================================================
+-- DROP EXISTING TRIGGERS FROM 000001 (to prevent duplicates)
+-- ============================================================================
+-- These triggers were created in 000001_initial_schema.up.sql
+-- We drop them here and recreate with improved logic (separate triggers per operation)
+
+DROP TRIGGER IF EXISTS trg_update_service_docs_count ON documents;
+DROP TRIGGER IF EXISTS trg_update_thread_message_count ON emails;
+
+-- ============================================================================
 -- TRIGGER 1: Update service document count on document INSERT
 -- ============================================================================
 

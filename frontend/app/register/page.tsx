@@ -11,8 +11,7 @@ export default function RegisterPage() {
     email: '',
     password: '',
     confirmPassword: '',
-    first_name: '',
-    last_name: '',
+    name: '',
     tenant_id: '',
   });
   const [error, setError] = useState('');
@@ -42,8 +41,7 @@ export default function RegisterPage() {
       const auth = await register({
         email: formData.email,
         password: formData.password,
-        first_name: formData.first_name,
-        last_name: formData.last_name,
+        name: formData.name,
         tenant_id: formData.tenant_id,
       });
       saveAuth(auth);
@@ -78,35 +76,19 @@ export default function RegisterPage() {
           )}
 
           <div className="space-y-4">
-            <div className="grid grid-cols-2 gap-4">
-              <div>
-                <label htmlFor="first_name" className="block text-sm font-medium text-gray-700 dark:text-gray-300">
-                  First name
-                </label>
-                <input
-                  id="first_name"
-                  name="first_name"
-                  type="text"
-                  required
-                  value={formData.first_name}
-                  onChange={handleChange}
-                  className="mt-1 block w-full px-3 py-2 border border-gray-300 dark:border-gray-700 rounded-md shadow-sm placeholder-gray-400 focus:outline-none focus:ring-blue-500 focus:border-blue-500 sm:text-sm bg-white dark:bg-slate-800 text-gray-900 dark:text-white"
-                />
-              </div>
-              <div>
-                <label htmlFor="last_name" className="block text-sm font-medium text-gray-700 dark:text-gray-300">
-                  Last name
-                </label>
-                <input
-                  id="last_name"
-                  name="last_name"
-                  type="text"
-                  required
-                  value={formData.last_name}
-                  onChange={handleChange}
-                  className="mt-1 block w-full px-3 py-2 border border-gray-300 dark:border-gray-700 rounded-md shadow-sm placeholder-gray-400 focus:outline-none focus:ring-blue-500 focus:border-blue-500 sm:text-sm bg-white dark:bg-slate-800 text-gray-900 dark:text-white"
-                />
-              </div>
+            <div>
+              <label htmlFor="name" className="block text-sm font-medium text-gray-700 dark:text-gray-300">
+                Full name
+              </label>
+              <input
+                id="name"
+                name="name"
+                type="text"
+                required
+                value={formData.name}
+                onChange={handleChange}
+                className="mt-1 block w-full px-3 py-2 border border-gray-300 dark:border-gray-700 rounded-md shadow-sm placeholder-gray-400 focus:outline-none focus:ring-blue-500 focus:border-blue-500 sm:text-sm bg-white dark:bg-slate-800 text-gray-900 dark:text-white"
+              />
             </div>
 
             <div>

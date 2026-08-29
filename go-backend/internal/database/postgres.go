@@ -135,3 +135,68 @@ func (p *Pool) Transaction(ctx context.Context, fn func(tx pgx.Tx) error) error 
 
 	return nil
 }
+
+// TenantTransaction executes a function within a transaction with RLS context set.
+// This sets app.tenant_id and app.role as PostgreSQL session variables for RLS policies.
+func (p *Pool) TenantTransaction(ctx context.Context, tenantID, role string, fn func(tx pgx.Tx) error) error {
+	tx, err := p.Begin(ctx)
+	if err != nil {
+		return fmt.Errorf("failed to begin transaction: %w", err)
+	}
+
+	defer func() {
+		if r := recover(); r != nil {
+			_ = tx.Rollback(ctx)
+			panic(r)
+		}
+	}()
+
+	// Set RLS context variables using SET LOCAL (scoped to this transaction)
+	if tenantID != "" {
+		_, err = tx.Exec(ctx, "SET LOCAL app.tenant_id = $1", tenantID)
+		if err != nil {
+			_ = tx.Rollback(ctx)
+			return fmt.Errorf("failed to set tenant_id: %w", err)
+		}
+	}
+
+	if role != "" {
+		_, err = tx.Exec(ctx, "SET LOCAL app.role = $1", role)
+		if err != nil {
+			_ = tx.Rollback(ctx)
+			return fmt.Errorf("failed to set role: %w", err)
+		}
+	}
+
+	if err := fn(tx); err != nil {
+		if rbErr := tx.Rollback(ctx); rbErr != nil {
+			log.Error().Err(rbErr).Msg("Failed to rollback transaction")
+		}
+		return err
+	}
+
+	if err := tx.Commit(ctx); err != nil {
+		return fmt.Errorf("failed to commit transaction: %w", err)
+	}
+
+	return nil
+}
+
+// SetRLSContext sets tenant_id and role on a connection for RLS.
+// Use this for queries outside of TenantTransaction.
+// Note: Uses SET LOCAL which only works within a transaction.
+func (p *Pool) SetRLSContext(ctx context.Context, conn *pgxpool.Conn, tenantID, role string) error {
+	if tenantID != "" {
+		_, err := conn.Exec(ctx, "SET LOCAL app.tenant_id = $1", tenantID)
+		if err != nil {
+			return fmt.Errorf("failed to set tenant_id: %w", err)
+		}
+	}
+	if role != "" {
+		_, err := conn.Exec(ctx, "SET LOCAL app.role = $1", role)
+		if err != nil {
+			return fmt.Errorf("failed to set role: %w", err)
+		}
+	}
+	return nil
+}

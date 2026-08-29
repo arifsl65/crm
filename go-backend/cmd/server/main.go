@@ -19,6 +19,7 @@ import (
 	"github.com/rs/zerolog/log"
 
 	"github.com/accountant-crm/go-backend/internal/ai"
+	"github.com/accountant-crm/go-backend/internal/audit"
 	"github.com/accountant-crm/go-backend/internal/auth"
 	"github.com/accountant-crm/go-backend/internal/cache"
 	"github.com/accountant-crm/go-backend/internal/config"
@@ -95,14 +96,22 @@ func main() {
 	// Initialize auth rate limiter
 	authRateLimiter := middleware.NewAuthRateLimiter(redis)
 
+	// Initialize audit logger
+	auditLogger := audit.NewLogger(db)
+
 	// Initialize handlers
-	authHandler := handlers.NewAuthHandler(db, jwtManager, sessionManager, emailClient, cfg.FrontendURL, authRateLimiter)
+	authHandler := handlers.NewAuthHandler(db, jwtManager, sessionManager, emailClient, cfg.FrontendURL, authRateLimiter, auditLogger)
 	tenantHandler := handlers.NewTenantHandler(db)
 	userHandler := handlers.NewUserHandler(db)
-	clientHandler := handlers.NewClientHandler(db)
+	clientHandler := handlers.NewClientHandler(db, auditLogger)
+	serviceHandler := handlers.NewServiceHandler(db, auditLogger)
+	documentHandler := handlers.NewDocumentHandler(db, auditLogger)
+	dashboardHandler := handlers.NewDashboardHandler(db)
+	serviceTypeHandler := handlers.NewServiceTypeHandler(db, auditLogger)
+	documentTypeHandler := handlers.NewDocumentTypeHandler(db, auditLogger)
 
 	// Setup Gin router
-	router := setupRouter(cfg, db, redis, aiClient, jwtManager, authHandler, tenantHandler, userHandler, clientHandler)
+	router := setupRouter(cfg, db, redis, aiClient, jwtManager, authHandler, tenantHandler, userHandler, clientHandler, serviceHandler, documentHandler, dashboardHandler, serviceTypeHandler, documentTypeHandler)
 
 	// Create HTTP server
 	srv := &http.Server{
@@ -163,7 +172,7 @@ func setupLogging(cfg config.AppConfig) {
 }
 
 // setupRouter configures the Gin router with all routes.
-func setupRouter(cfg *config.Config, db *database.Pool, redis *cache.Client, aiClient *ai.Client, jwtManager *auth.JWTManager, authHandler *handlers.AuthHandler, tenantHandler *handlers.TenantHandler, userHandler *handlers.UserHandler, clientHandler *handlers.ClientHandler) *gin.Engine {
+func setupRouter(cfg *config.Config, db *database.Pool, redis *cache.Client, aiClient *ai.Client, jwtManager *auth.JWTManager, authHandler *handlers.AuthHandler, tenantHandler *handlers.TenantHandler, userHandler *handlers.UserHandler, clientHandler *handlers.ClientHandler, serviceHandler *handlers.ServiceHandler, documentHandler *handlers.DocumentHandler, dashboardHandler *handlers.DashboardHandler, serviceTypeHandler *handlers.ServiceTypeHandler, documentTypeHandler *handlers.DocumentTypeHandler) *gin.Engine {
 	// Set Gin mode
 	if cfg.App.Env == "production" {
 		gin.SetMode(gin.ReleaseMode)
@@ -175,7 +184,12 @@ func setupRouter(cfg *config.Config, db *database.Pool, redis *cache.Client, aiC
 	router.Use(gin.Recovery())
 	router.Use(middleware.RequestID()) // Fix #20: X-Request-ID propagation
 	router.Use(requestLogger())
-	router.Use(corsMiddleware(cfg.CORS))
+	router.Use(middleware.DynamicCORS(middleware.CORSConfig{
+		StaticOrigins:    cfg.CORS.AllowedOrigins,
+		AllowCredentials: cfg.CORS.AllowCredentials,
+		DB:               db,
+		CacheTTL:         5 * time.Minute,
+	}))
 
 	// Security headers (HSTS, CSP, X-Frame-Options, etc.)
 	router.Use(middleware.SecurityHeadersWithConfig(middleware.SecurityHeadersConfig{
@@ -216,6 +230,7 @@ func setupRouter(cfg *config.Config, db *database.Pool, redis *cache.Client, aiC
 		// Auth routes (protected)
 		authProtected := v1.Group("/auth")
 		authProtected.Use(middleware.JWTAuth(jwtManager))
+		authProtected.Use(middleware.TenantRLS(db)) // Wire RLS context
 		{
 			authProtected.POST("/logout", authHandler.Logout)
 			authProtected.GET("/me", authHandler.GetMe)
@@ -232,6 +247,7 @@ func setupRouter(cfg *config.Config, db *database.Pool, redis *cache.Client, aiC
 		// Protected routes (require authentication)
 		protected := v1.Group("")
 		protected.Use(middleware.JWTAuth(jwtManager))
+		protected.Use(middleware.TenantRLS(db)) // Wire RLS context for tenant isolation
 
 		// Tenant routes
 		tenants := protected.Group("/tenants")
@@ -261,6 +277,85 @@ func setupRouter(cfg *config.Config, db *database.Pool, redis *cache.Client, aiC
 			clients.GET("/:id", middleware.ValidateUUID("id"), clientHandler.Get)
 			clients.PATCH("/:id", middleware.ValidateUUID("id"), middleware.RequireRole("super_admin", "tenant_admin", "staff"), clientHandler.Update)
 			clients.DELETE("/:id", middleware.ValidateUUID("id"), middleware.RequireRole("super_admin", "tenant_admin"), clientHandler.Delete)
+			clients.POST("/:id/restore", middleware.ValidateUUID("id"), middleware.RequireRole("super_admin", "tenant_admin"), clientHandler.Restore)
+			clients.GET("/:id/documents", middleware.ValidateUUID("id"), clientHandler.GetDocuments)
+			clients.GET("/:id/services", middleware.ValidateUUID("id"), clientHandler.GetServices)
+			clients.POST("/:id/assign", middleware.ValidateUUID("id"), middleware.RequireRole("super_admin", "tenant_admin"), clientHandler.AssignStaff)
+		}
+
+		// Service routes
+		services := protected.Group("/services")
+		{
+			services.GET("", serviceHandler.List)
+			services.POST("", middleware.RequireRole("super_admin", "tenant_admin", "staff"), serviceHandler.Create)
+			services.GET("/deadlines", serviceHandler.GetDeadlines)
+			services.GET("/alerts", serviceHandler.GetAlerts)
+			services.POST("/bulk-update", middleware.RequireRole("super_admin", "tenant_admin"), serviceHandler.BulkUpdate)
+			services.PATCH("/reorder", serviceHandler.Reorder)
+			services.GET("/:id", middleware.ValidateUUID("id"), serviceHandler.Get)
+			services.PATCH("/:id", middleware.ValidateUUID("id"), middleware.RequireRole("super_admin", "tenant_admin", "staff"), serviceHandler.Update)
+			services.PATCH("/:id/status", middleware.ValidateUUID("id"), serviceHandler.UpdateStatus)
+			services.POST("/:id/complete", middleware.ValidateUUID("id"), serviceHandler.Complete)
+			services.POST("/:id/hmrc-mark", middleware.ValidateUUID("id"), serviceHandler.MarkHMRC)
+			services.DELETE("/:id", middleware.ValidateUUID("id"), middleware.RequireRole("super_admin", "tenant_admin"), serviceHandler.Delete)
+		}
+
+		// Document routes
+		documents := protected.Group("/documents")
+		{
+			documents.GET("", documentHandler.List)
+			documents.POST("", middleware.RequireRole("super_admin", "tenant_admin", "staff"), documentHandler.Create)
+			documents.POST("/bulk-request", middleware.RequireRole("super_admin", "tenant_admin", "staff"), documentHandler.BulkRequest)
+			documents.POST("/bulk-approve", middleware.RequireRole("super_admin", "tenant_admin"), documentHandler.BulkApprove)
+			documents.GET("/firm", documentHandler.ListFirm)
+			documents.POST("/qr", middleware.RequireRole("super_admin", "tenant_admin", "staff"), documentHandler.GenerateQRToken)
+			documents.GET("/:id", middleware.ValidateUUID("id"), documentHandler.Get)
+			documents.PATCH("/:id", middleware.ValidateUUID("id"), middleware.RequireRole("super_admin", "tenant_admin", "staff"), documentHandler.Update)
+			documents.POST("/:id/approve", middleware.ValidateUUID("id"), middleware.RequireRole("super_admin", "tenant_admin"), documentHandler.Approve)
+			documents.POST("/:id/reject", middleware.ValidateUUID("id"), middleware.RequireRole("super_admin", "tenant_admin"), documentHandler.Reject)
+			documents.GET("/:id/versions", middleware.ValidateUUID("id"), documentHandler.GetVersions)
+			documents.POST("/:id/versions/:versionId/restore", middleware.ValidateUUID("id"), documentHandler.RestoreVersion)
+		}
+
+		// QR upload routes (public - no auth required)
+		qr := v1.Group("/documents/qr")
+		{
+			qr.GET("/:token", documentHandler.GetQRToken)
+		}
+
+		// Dashboard routes
+		dashboard := protected.Group("/dashboard")
+		{
+			dashboard.GET("/stats", dashboardHandler.GetStats)
+			dashboard.GET("/deadlines", dashboardHandler.GetDeadlines)
+			dashboard.GET("/pending-documents", dashboardHandler.GetPendingDocuments)
+			dashboard.GET("/workload", middleware.RequireRole("super_admin", "tenant_admin"), dashboardHandler.GetClientWorkload)
+			dashboard.GET("/recent-clients", dashboardHandler.GetRecentClients)
+			dashboard.GET("/kanban", dashboardHandler.GetKanban)
+		}
+
+		// Service Type routes
+		serviceTypes := protected.Group("/service-types")
+		{
+			serviceTypes.GET("", serviceTypeHandler.List)
+			serviceTypes.GET("/categories", serviceTypeHandler.GetCategories)
+			serviceTypes.POST("", middleware.RequireRole("super_admin", "tenant_admin"), serviceTypeHandler.Create)
+			serviceTypes.PATCH("/reorder", middleware.RequireRole("super_admin", "tenant_admin"), serviceTypeHandler.Reorder)
+			serviceTypes.GET("/:id", middleware.ValidateUUID("id"), serviceTypeHandler.Get)
+			serviceTypes.PATCH("/:id", middleware.ValidateUUID("id"), middleware.RequireRole("super_admin", "tenant_admin"), serviceTypeHandler.Update)
+			serviceTypes.DELETE("/:id", middleware.ValidateUUID("id"), middleware.RequireRole("super_admin", "tenant_admin"), serviceTypeHandler.Delete)
+			serviceTypes.POST("/:id/clone", middleware.ValidateUUID("id"), middleware.RequireRole("super_admin", "tenant_admin"), serviceTypeHandler.Clone)
+		}
+
+		// Document Type routes
+		documentTypes := protected.Group("/document-types")
+		{
+			documentTypes.GET("", documentTypeHandler.List)
+			documentTypes.GET("/categories", documentTypeHandler.GetCategories)
+			documentTypes.POST("", middleware.RequireRole("super_admin", "tenant_admin"), documentTypeHandler.Create)
+			documentTypes.GET("/:id", middleware.ValidateUUID("id"), documentTypeHandler.Get)
+			documentTypes.PATCH("/:id", middleware.ValidateUUID("id"), middleware.RequireRole("super_admin", "tenant_admin"), documentTypeHandler.Update)
+			documentTypes.DELETE("/:id", middleware.ValidateUUID("id"), middleware.RequireRole("super_admin", "tenant_admin"), documentTypeHandler.Delete)
 		}
 	}
 
@@ -288,40 +383,6 @@ func requestLogger() gin.HandlerFunc {
 			Dur("latency", latency).
 			Str("ip", c.ClientIP()).
 			Msg("Request")
-	}
-}
-
-// corsMiddleware returns a Gin middleware for CORS handling.
-func corsMiddleware(cfg config.CORSConfig) gin.HandlerFunc {
-	// Build allowed origins map for O(1) lookup
-	allowedOrigins := make(map[string]bool)
-	for _, origin := range cfg.AllowedOrigins {
-		allowedOrigins[origin] = true
-	}
-
-	return func(c *gin.Context) {
-		origin := c.Request.Header.Get("Origin")
-
-		// Check if origin is allowed
-		if origin != "" && allowedOrigins[origin] {
-			c.Writer.Header().Set("Access-Control-Allow-Origin", origin)
-			c.Writer.Header().Set("Vary", "Origin")
-
-			if cfg.AllowCredentials {
-				c.Writer.Header().Set("Access-Control-Allow-Credentials", "true")
-			}
-		}
-
-		c.Writer.Header().Set("Access-Control-Allow-Methods", "GET, POST, PUT, PATCH, DELETE, OPTIONS")
-		c.Writer.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization, X-Request-ID")
-		c.Writer.Header().Set("Access-Control-Max-Age", "86400")
-
-		if c.Request.Method == "OPTIONS" {
-			c.AbortWithStatus(http.StatusNoContent)
-			return
-		}
-
-		c.Next()
 	}
 }
 
