@@ -50,6 +50,15 @@ export default function LoginPage() {
             </div>
           )}
 
+          <div className="flex items-center justify-end">
+            <Link
+              href="/forgot-password"
+              className="text-sm font-medium text-blue-600 hover:text-blue-500 dark:text-blue-400"
+            >
+              Forgot your password?
+            </Link>
+          </div>
+
           <div className="rounded-md shadow-sm -space-y-px">
             <div>
               <label htmlFor="email" className="sr-only">Email address</label>

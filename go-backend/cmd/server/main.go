@@ -23,6 +23,7 @@ import (
 	"github.com/accountant-crm/go-backend/internal/cache"
 	"github.com/accountant-crm/go-backend/internal/config"
 	"github.com/accountant-crm/go-backend/internal/database"
+	"github.com/accountant-crm/go-backend/internal/email"
 	"github.com/accountant-crm/go-backend/internal/handlers"
 	"github.com/accountant-crm/go-backend/internal/middleware"
 )
@@ -75,8 +76,27 @@ func main() {
 		cfg.JWT.Issuer,
 	)
 
+	// Initialize session manager for token revocation
+	sessionManager := auth.NewSessionManager(db, cfg.JWT.RefreshTokenExpire)
+
+	// Initialize email client (optional - can be nil if not configured)
+	var emailClient *email.Client
+	if cfg.Email.APIKey != "" {
+		emailClient = email.NewClient(email.Config{
+			APIKey:    cfg.Email.APIKey,
+			FromEmail: cfg.Email.FromEmail,
+			FromName:  cfg.Email.FromName,
+		})
+		log.Info().Msg("Email client configured (Resend)")
+	} else {
+		log.Warn().Msg("Email client not configured - password reset emails will not be sent")
+	}
+
+	// Initialize auth rate limiter
+	authRateLimiter := middleware.NewAuthRateLimiter(redis)
+
 	// Initialize handlers
-	authHandler := handlers.NewAuthHandler(db, jwtManager)
+	authHandler := handlers.NewAuthHandler(db, jwtManager, sessionManager, emailClient, cfg.FrontendURL, authRateLimiter)
 	tenantHandler := handlers.NewTenantHandler(db)
 	userHandler := handlers.NewUserHandler(db)
 	clientHandler := handlers.NewClientHandler(db)
@@ -157,6 +177,12 @@ func setupRouter(cfg *config.Config, db *database.Pool, redis *cache.Client, aiC
 	router.Use(requestLogger())
 	router.Use(corsMiddleware(cfg.CORS))
 
+	// Security headers (HSTS, CSP, X-Frame-Options, etc.)
+	router.Use(middleware.SecurityHeadersWithConfig(middleware.SecurityHeadersConfig{
+		EnableHSTS:   cfg.App.Env == "production",
+		AllowFraming: false,
+	}))
+
 	// Rate limiting (applied to all routes except health checks)
 	if cfg.RateLimit.Enabled {
 		router.Use(rateLimiter(cfg.RateLimit, redis))
@@ -173,13 +199,34 @@ func setupRouter(cfg *config.Config, db *database.Pool, redis *cache.Client, aiC
 	// API v1 routes
 	v1 := router.Group("/api/v1")
 	{
-		// Auth routes
+		// Auth routes (public)
 		authRoutes := v1.Group("/auth")
 		{
 			authRoutes.POST("/login", authHandler.Login)
 			authRoutes.POST("/register", authHandler.Register)
 			authRoutes.POST("/refresh", authHandler.Refresh)
-			authRoutes.POST("/logout", middleware.JWTAuth(jwtManager), authHandler.Logout)
+			authRoutes.POST("/reset-password", authHandler.ForgotPassword)
+			authRoutes.POST("/reset-password/confirm", authHandler.ResetPassword)
+			authRoutes.POST("/magic-link", authHandler.SendMagicLink)
+			authRoutes.GET("/magic-link", authHandler.VerifyMagicLink)
+			// 2FA backup code verification (public - for lockout recovery)
+			authRoutes.POST("/2fa/backup-codes/verify", authHandler.VerifyBackupCode)
+		}
+
+		// Auth routes (protected)
+		authProtected := v1.Group("/auth")
+		authProtected.Use(middleware.JWTAuth(jwtManager))
+		{
+			authProtected.POST("/logout", authHandler.Logout)
+			authProtected.GET("/me", authHandler.GetMe)
+			authProtected.PATCH("/me", authHandler.UpdateMe)
+			authProtected.PATCH("/password", authHandler.ChangePassword)
+			authProtected.GET("/sessions", authHandler.GetSessions)
+			// 2FA endpoints
+			authProtected.POST("/2fa/setup", authHandler.Setup2FA)
+			authProtected.POST("/2fa/verify", authHandler.Verify2FA)
+			authProtected.DELETE("/2fa", authHandler.Disable2FA)
+			authProtected.POST("/2fa/backup-codes", authHandler.GenerateBackupCodes)
 		}
 
 		// Protected routes (require authentication)

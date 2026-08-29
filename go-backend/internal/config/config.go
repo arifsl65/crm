@@ -16,15 +16,24 @@ import (
 
 // Config holds all application configuration.
 type Config struct {
-	App       AppConfig
-	Server    ServerConfig
-	Postgres  PostgresConfig
-	Redis     RedisConfig
-	JWT       JWTConfig
-	MTLS      MTLSConfig
-	CORS      CORSConfig
-	PythonAI  PythonAIConfig
-	RateLimit RateLimitConfig
+	App         AppConfig
+	Server      ServerConfig
+	Postgres    PostgresConfig
+	Redis       RedisConfig
+	JWT         JWTConfig
+	MTLS        MTLSConfig
+	CORS        CORSConfig
+	PythonAI    PythonAIConfig
+	RateLimit   RateLimitConfig
+	Email       EmailConfig
+	FrontendURL string
+}
+
+// EmailConfig holds email service settings.
+type EmailConfig struct {
+	APIKey    string
+	FromEmail string
+	FromName  string
 }
 
 // RateLimitConfig holds rate limiting settings.
@@ -219,6 +228,16 @@ func Load() (*Config, error) {
 		RefreshTokenExpire: getEnvDuration("JWT_REFRESH_TOKEN_EXPIRE", 7*24*time.Hour),
 		Issuer:             getEnv("JWT_ISSUER", "accountant-crm"),
 	}
+
+	// Email config (Resend)
+	cfg.Email = EmailConfig{
+		APIKey:    getEnv("RESEND_API_KEY", ""),
+		FromEmail: getEnv("EMAIL_FROM", "noreply@accountant-crm.com"),
+		FromName:  getEnv("EMAIL_FROM_NAME", "Accountant CRM"),
+	}
+
+	// Frontend URL for email links
+	cfg.FrontendURL = getEnv("FRONTEND_URL", "http://localhost:3000")
 
 	// mTLS config
 	// When SECRETS_FROM_KMS=true, fetch certs from KMS and write to temp files
