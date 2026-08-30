@@ -4,6 +4,7 @@ package middleware
 import (
 	"context"
 	"net/http"
+	"net/url"
 	"strings"
 	"sync"
 	"time"
@@ -115,24 +116,11 @@ func DynamicCORS(cfg CORSConfig) gin.HandlerFunc {
 			}
 
 			// Add tenant domain as HTTPS origin
-			// Domain format: subdomain.app.com or full URL
-			if !strings.HasPrefix(domain, "http") {
-				origins["https://"+domain] = true
-				// Also allow without www if it has www
-				if strings.HasPrefix(domain, "www.") {
-					origins["https://"+strings.TrimPrefix(domain, "www.")] = true
-				}
-			} else {
-				origins[domain] = true
-			}
+			addDomainOrigins(origins, domain)
 
 			// Add custom domain if set
 			if customDomain != nil && *customDomain != "" {
-				if !strings.HasPrefix(*customDomain, "http") {
-					origins["https://"+*customDomain] = true
-				} else {
-					origins[*customDomain] = true
-				}
+				addDomainOrigins(origins, *customDomain)
 			}
 		}
 
@@ -158,12 +146,42 @@ func DynamicCORS(cfg CORSConfig) gin.HandlerFunc {
 				go refreshCache()
 			}
 
+			allowed := false
+
 			// Check static origins first (fast path)
 			if staticOrigins[origin] {
 				setAllowedOrigin(c, origin, cfg.AllowCredentials)
+				allowed = true
+				log.Debug().
+					Str("origin", origin).
+					Str("match_type", "static").
+					Msg("CORS origin allowed")
 			} else if cache.isAllowed(origin) {
 				// Check cached tenant origins
 				setAllowedOrigin(c, origin, cfg.AllowCredentials)
+				allowed = true
+				log.Debug().
+					Str("origin", origin).
+					Str("match_type", "tenant_domain").
+					Msg("CORS origin allowed")
+			}
+
+			// Log rejected origins for security auditing
+			if !allowed {
+				// Parse origin to extract host for logging
+				parsedOrigin, err := url.Parse(origin)
+				host := origin
+				if err == nil && parsedOrigin.Host != "" {
+					host = parsedOrigin.Host
+				}
+
+				log.Warn().
+					Str("origin", origin).
+					Str("host", host).
+					Str("method", c.Request.Method).
+					Str("path", c.Request.URL.Path).
+					Str("remote_ip", c.ClientIP()).
+					Msg("CORS origin rejected - not in allowed list")
 			}
 		}
 
@@ -180,6 +198,60 @@ func DynamicCORS(cfg CORSConfig) gin.HandlerFunc {
 		}
 
 		c.Next()
+	}
+}
+
+// parseOriginHost extracts the host from an Origin header value.
+// Returns the host without port for comparison purposes.
+func parseOriginHost(origin string) string {
+	parsed, err := url.Parse(origin)
+	if err != nil || parsed.Host == "" {
+		return ""
+	}
+	// Return host without port
+	host := parsed.Hostname()
+	return host
+}
+
+// addDomainOrigins adds a domain and its variants to the origins map.
+// Handles both plain domains and full URLs, adding HTTPS variants.
+func addDomainOrigins(origins map[string]bool, domain string) {
+	domain = strings.TrimSpace(domain)
+	if domain == "" {
+		return
+	}
+
+	// If already a full URL, parse and normalize it
+	if strings.HasPrefix(domain, "http://") || strings.HasPrefix(domain, "https://") {
+		parsed, err := url.Parse(domain)
+		if err != nil {
+			log.Warn().Str("domain", domain).Msg("Invalid domain URL in tenant")
+			return
+		}
+		// Always use HTTPS for security
+		origins["https://"+parsed.Host] = true
+		// Also add without www if present
+		if strings.HasPrefix(parsed.Host, "www.") {
+			origins["https://"+strings.TrimPrefix(parsed.Host, "www.")] = true
+		}
+		return
+	}
+
+	// Plain domain - add as HTTPS
+	origins["https://"+domain] = true
+
+	// Also allow without www if it has www
+	if strings.HasPrefix(domain, "www.") {
+		origins["https://"+strings.TrimPrefix(domain, "www.")] = true
+	}
+
+	// Also allow with www if it doesn't have www (for flexibility)
+	if !strings.HasPrefix(domain, "www.") && !strings.Contains(domain, ".app.") {
+		// Only add www variant for custom domains, not subdomains
+		parts := strings.Split(domain, ".")
+		if len(parts) == 2 {
+			origins["https://www."+domain] = true
+		}
 	}
 }
 

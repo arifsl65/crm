@@ -1,9 +1,13 @@
 package handlers
 
 import (
+	"bytes"
 	"crypto/rand"
 	"encoding/hex"
+	"fmt"
+	"io"
 	"net/http"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
@@ -17,6 +21,74 @@ import (
 	"github.com/accountant-crm/go-backend/internal/database"
 	"github.com/accountant-crm/go-backend/internal/middleware"
 )
+
+// Magic byte signatures for file type validation
+// These are the first few bytes that identify file types
+var magicBytes = map[string][]byte{
+	"application/pdf":  {0x25, 0x50, 0x44, 0x46}, // %PDF
+	"image/jpeg":       {0xFF, 0xD8, 0xFF},
+	"image/png":        {0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A},
+	"image/gif":        {0x47, 0x49, 0x46, 0x38}, // GIF8
+	"application/zip":  {0x50, 0x4B, 0x03, 0x04},
+	"image/webp":       {0x52, 0x49, 0x46, 0x46}, // RIFF (need to check WEBP later)
+	"application/msword": {0xD0, 0xCF, 0x11, 0xE0}, // OLE compound doc
+	"application/vnd.openxmlformats-officedocument.wordprocessingml.document": {0x50, 0x4B, 0x03, 0x04}, // DOCX (ZIP-based)
+	"application/vnd.openxmlformats-officedocument.spreadsheetml.sheet":       {0x50, 0x4B, 0x03, 0x04}, // XLSX (ZIP-based)
+	"application/vnd.ms-excel": {0xD0, 0xCF, 0x11, 0xE0}, // XLS (OLE)
+	"text/csv":                 nil,                      // No magic bytes for text files
+	"text/plain":               nil,
+}
+
+// Allowed MIME types for document uploads
+var allowedMimeTypes = map[string]bool{
+	"application/pdf":  true,
+	"image/jpeg":       true,
+	"image/png":        true,
+	"image/gif":        true,
+	"image/webp":       true,
+	"application/zip":  true,
+	"application/msword": true,
+	"application/vnd.openxmlformats-officedocument.wordprocessingml.document": true,
+	"application/vnd.openxmlformats-officedocument.spreadsheetml.sheet":       true,
+	"application/vnd.ms-excel": true,
+	"text/csv":                 true,
+	"text/plain":               true,
+}
+
+// validateMagicBytes checks if the file content matches the claimed MIME type
+func validateMagicBytes(data []byte, claimedMime string) bool {
+	expected, exists := magicBytes[claimedMime]
+
+	// No magic bytes to check for text files
+	if expected == nil || !exists {
+		// For text files, do a basic check for binary content
+		if strings.HasPrefix(claimedMime, "text/") {
+			// Check first 512 bytes for binary content
+			checkLen := 512
+			if len(data) < checkLen {
+				checkLen = len(data)
+			}
+			for i := 0; i < checkLen; i++ {
+				// Allow common text characters
+				if data[i] < 0x09 || (data[i] > 0x0D && data[i] < 0x20 && data[i] != 0x1B) {
+					if data[i] != 0x00 { // Allow UTF-16 BOM
+						return false // Binary content found
+					}
+				}
+			}
+		}
+		return true
+	}
+
+	if len(data) < len(expected) {
+		return false
+	}
+
+	return bytes.Equal(data[:len(expected)], expected)
+}
+
+// MaxUploadSize is the maximum file size (50MB)
+const MaxUploadSize = 50 * 1024 * 1024
 
 type DocumentHandler struct {
 	db    *database.Pool
@@ -280,13 +352,21 @@ func (h *DocumentHandler) Create(c *gin.Context) {
 	tenantID, _ := middleware.GetTenantID(c)
 	userID, _ := middleware.GetUserID(c)
 
+	// Get tenant-scoped DB for RLS enforcement
+	tenantDB, ok := middleware.GetTenantDB(c)
+	if !ok {
+		log.Error().Msg("TenantDB not found in context")
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "internal_error"})
+		return
+	}
+
 	documentID := uuid.New()
 
 	// Parse optional UUIDs
 	var clientID, serviceID, typeID *uuid.UUID
 	if req.ClientID != nil && *req.ClientID != "" {
-		c, _ := uuid.Parse(*req.ClientID)
-		clientID = &c
+		cid, _ := uuid.Parse(*req.ClientID)
+		clientID = &cid
 	}
 	if req.ServiceID != nil && *req.ServiceID != "" {
 		s, _ := uuid.Parse(*req.ServiceID)
@@ -311,15 +391,18 @@ func (h *DocumentHandler) Create(c *gin.Context) {
 		status = *req.Status
 	}
 
-	_, err := h.db.Exec(ctx, `
-		INSERT INTO documents (
-			id, tenant_id, client_id, service_id, uploaded_by, type_id,
-			name, original_name, status, access, expiry_date, request_note, requested_at
-		) VALUES (
-			$1, $2, $3, $4, $5, $6, $7, $7, $8, 'all_staff', $9, $10, NOW()
-		)
-	`, documentID, tenantID, clientID, serviceID, userID, typeID,
-		req.Name, status, expiryDate, req.RequestNote)
+	err := tenantDB.Transaction(c, func(tx pgx.Tx) error {
+		_, err := tx.Exec(ctx, `
+			INSERT INTO documents (
+				id, tenant_id, client_id, service_id, uploaded_by, type_id,
+				name, original_name, status, access, expiry_date, request_note, requested_at
+			) VALUES (
+				$1, $2, $3, $4, $5, $6, $7, $7, $8, 'all_staff', $9, $10, NOW()
+			)
+		`, documentID, tenantID, clientID, serviceID, userID, typeID,
+			req.Name, status, expiryDate, req.RequestNote)
+		return err
+	})
 
 	if err != nil {
 		log.Error().Err(err).Msg("Failed to create document")
@@ -354,6 +437,14 @@ func (h *DocumentHandler) Update(c *gin.Context) {
 	ctx := c.Request.Context()
 	tenantID, _ := middleware.GetTenantID(c)
 	userID, _ := middleware.GetUserID(c)
+
+	// Get tenant-scoped DB for RLS enforcement
+	tenantDB, ok := middleware.GetTenantDB(c)
+	if !ok {
+		log.Error().Msg("TenantDB not found in context")
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "internal_error"})
+		return
+	}
 
 	// Build dynamic update query
 	var setClauses []string
@@ -412,14 +503,23 @@ func (h *DocumentHandler) Update(c *gin.Context) {
 		" WHERE id = $" + strconv.Itoa(argNum) + " AND tenant_id = $" + strconv.Itoa(argNum+1)
 	args = append(args, documentID, tenantID)
 
-	result, err := h.db.Exec(ctx, query, args...)
+	var rowsAffected int64
+	err = tenantDB.Transaction(c, func(tx pgx.Tx) error {
+		result, err := tx.Exec(ctx, query, args...)
+		if err != nil {
+			return err
+		}
+		rowsAffected = result.RowsAffected()
+		return nil
+	})
+
 	if err != nil {
 		log.Error().Err(err).Msg("Failed to update document")
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "internal_error"})
 		return
 	}
 
-	if result.RowsAffected() == 0 {
+	if rowsAffected == 0 {
 		c.JSON(http.StatusNotFound, gin.H{"error": "document_not_found"})
 		return
 	}
@@ -448,11 +548,27 @@ func (h *DocumentHandler) Approve(c *gin.Context) {
 	tenantID, _ := middleware.GetTenantID(c)
 	userID, _ := middleware.GetUserID(c)
 
-	result, err := h.db.Exec(ctx, `
-		UPDATE documents SET status = 'approved', review_note = $1,
-		       reviewed_by = $2, reviewed_at = NOW(), updated_at = NOW()
-		WHERE id = $3 AND tenant_id = $4
-	`, req.Note, userID, documentID, tenantID)
+	// Get tenant-scoped DB for RLS enforcement
+	tenantDB, ok := middleware.GetTenantDB(c)
+	if !ok {
+		log.Error().Msg("TenantDB not found in context")
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "internal_error"})
+		return
+	}
+
+	var rowsAffected int64
+	err = tenantDB.Transaction(c, func(tx pgx.Tx) error {
+		result, err := tx.Exec(ctx, `
+			UPDATE documents SET status = 'approved', review_note = $1,
+			       reviewed_by = $2, reviewed_at = NOW(), updated_at = NOW()
+			WHERE id = $3 AND tenant_id = $4
+		`, req.Note, userID, documentID, tenantID)
+		if err != nil {
+			return err
+		}
+		rowsAffected = result.RowsAffected()
+		return nil
+	})
 
 	if err != nil {
 		log.Error().Err(err).Msg("Failed to approve document")
@@ -460,7 +576,7 @@ func (h *DocumentHandler) Approve(c *gin.Context) {
 		return
 	}
 
-	if result.RowsAffected() == 0 {
+	if rowsAffected == 0 {
 		c.JSON(http.StatusNotFound, gin.H{"error": "document_not_found"})
 		return
 	}
@@ -492,11 +608,27 @@ func (h *DocumentHandler) Reject(c *gin.Context) {
 	tenantID, _ := middleware.GetTenantID(c)
 	userID, _ := middleware.GetUserID(c)
 
-	result, err := h.db.Exec(ctx, `
-		UPDATE documents SET status = 'rejected', review_note = $1,
-		       reviewed_by = $2, reviewed_at = NOW(), updated_at = NOW()
-		WHERE id = $3 AND tenant_id = $4
-	`, req.Note, userID, documentID, tenantID)
+	// Get tenant-scoped DB for RLS enforcement
+	tenantDB, ok := middleware.GetTenantDB(c)
+	if !ok {
+		log.Error().Msg("TenantDB not found in context")
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "internal_error"})
+		return
+	}
+
+	var rowsAffected int64
+	err = tenantDB.Transaction(c, func(tx pgx.Tx) error {
+		result, err := tx.Exec(ctx, `
+			UPDATE documents SET status = 'rejected', review_note = $1,
+			       reviewed_by = $2, reviewed_at = NOW(), updated_at = NOW()
+			WHERE id = $3 AND tenant_id = $4
+		`, req.Note, userID, documentID, tenantID)
+		if err != nil {
+			return err
+		}
+		rowsAffected = result.RowsAffected()
+		return nil
+	})
 
 	if err != nil {
 		log.Error().Err(err).Msg("Failed to reject document")
@@ -504,7 +636,7 @@ func (h *DocumentHandler) Reject(c *gin.Context) {
 		return
 	}
 
-	if result.RowsAffected() == 0 {
+	if rowsAffected == 0 {
 		c.JSON(http.StatusNotFound, gin.H{"error": "document_not_found"})
 		return
 	}
@@ -930,5 +1062,295 @@ func (h *DocumentHandler) GetQRToken(c *gin.Context) {
 		"client_name": clientName,
 		"expires_at":  expiresAt,
 		"note":        note,
+	})
+}
+
+// Upload handles file upload for a document
+// POST /api/v1/documents/:id/upload
+func (h *DocumentHandler) Upload(c *gin.Context) {
+	documentID, err := uuid.Parse(c.Param("id"))
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid_document_id"})
+		return
+	}
+
+	ctx := c.Request.Context()
+	tenantID, _ := middleware.GetTenantID(c)
+	userID, _ := middleware.GetUserID(c)
+
+	// Check file size limit (50MB)
+	c.Request.Body = http.MaxBytesReader(c.Writer, c.Request.Body, MaxUploadSize)
+
+	// Parse multipart form
+	file, header, err := c.Request.FormFile("file")
+	if err != nil {
+		if err.Error() == "http: request body too large" {
+			c.JSON(http.StatusRequestEntityTooLarge, gin.H{
+				"error":   "file_too_large",
+				"message": fmt.Sprintf("File size exceeds maximum allowed size of %d MB", MaxUploadSize/(1024*1024)),
+			})
+			return
+		}
+		c.JSON(http.StatusBadRequest, gin.H{"error": "no_file_provided", "message": err.Error()})
+		return
+	}
+	defer file.Close()
+
+	// Read file content for validation
+	fileContent, err := io.ReadAll(file)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed_to_read_file"})
+		return
+	}
+
+	// Detect MIME type from content
+	detectedMime := http.DetectContentType(fileContent)
+
+	// Get claimed MIME type from header
+	claimedMime := header.Header.Get("Content-Type")
+	if claimedMime == "" {
+		claimedMime = detectedMime
+	}
+
+	// Validate MIME type is allowed
+	if !allowedMimeTypes[detectedMime] && !allowedMimeTypes[claimedMime] {
+		c.JSON(http.StatusBadRequest, gin.H{
+			"error":   "invalid_file_type",
+			"message": fmt.Sprintf("File type '%s' is not allowed", detectedMime),
+		})
+		return
+	}
+
+	// Validate magic bytes match claimed type
+	if !validateMagicBytes(fileContent, detectedMime) {
+		log.Warn().
+			Str("document_id", documentID.String()).
+			Str("claimed_mime", claimedMime).
+			Str("detected_mime", detectedMime).
+			Msg("Magic byte validation failed - possible file type spoofing")
+		c.JSON(http.StatusBadRequest, gin.H{
+			"error":   "invalid_file_content",
+			"message": "File content does not match its declared type",
+		})
+		return
+	}
+
+	// Verify document exists and belongs to tenant
+	var currentStatus string
+	err = h.db.QueryRow(ctx, `
+		SELECT status FROM documents WHERE id = $1 AND tenant_id = $2
+	`, documentID, tenantID).Scan(&currentStatus)
+	if err != nil {
+		if err == pgx.ErrNoRows {
+			c.JSON(http.StatusNotFound, gin.H{"error": "document_not_found"})
+			return
+		}
+		log.Error().Err(err).Msg("Failed to get document")
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "internal_error"})
+		return
+	}
+
+	// Generate secure file path
+	// Format: tenant_id/year/month/document_id_random.ext
+	now := time.Now()
+	randomSuffix := make([]byte, 8)
+	rand.Read(randomSuffix)
+	ext := filepath.Ext(header.Filename)
+	if ext == "" {
+		// Fallback extension based on MIME type
+		switch detectedMime {
+		case "application/pdf":
+			ext = ".pdf"
+		case "image/jpeg":
+			ext = ".jpg"
+		case "image/png":
+			ext = ".png"
+		case "image/gif":
+			ext = ".gif"
+		default:
+			ext = ".bin"
+		}
+	}
+
+	filePath := fmt.Sprintf("%s/%d/%02d/%s_%s%s",
+		tenantID.String(),
+		now.Year(),
+		now.Month(),
+		documentID.String(),
+		hex.EncodeToString(randomSuffix),
+		ext,
+	)
+
+	// TODO: Upload to OSS when configured
+	// For now, store file path metadata but don't persist the actual file
+	// This stub allows the API to work while OSS is being set up
+
+	// Get tenant-scoped DB for RLS enforcement
+	tenantDB, ok := middleware.GetTenantDB(c)
+	if !ok {
+		log.Error().Msg("TenantDB not found in context")
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "internal_error"})
+		return
+	}
+
+	fileSize := len(fileContent)
+	originalName := header.Filename
+
+	err = tenantDB.Transaction(c, func(tx pgx.Tx) error {
+		_, err := tx.Exec(ctx, `
+			UPDATE documents SET
+				file_path = $1,
+				file_size = $2,
+				mime_type = $3,
+				original_name = $4,
+				status = 'uploaded',
+				uploaded_by = $5,
+				updated_at = NOW()
+			WHERE id = $6 AND tenant_id = $7
+		`, filePath, fileSize, detectedMime, originalName, userID, documentID, tenantID)
+		return err
+	})
+
+	if err != nil {
+		log.Error().Err(err).Msg("Failed to update document with file info")
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "internal_error"})
+		return
+	}
+
+	// Audit log
+	h.audit.LogEntity(ctx, audit.ActionDocumentUpload, &userID, &tenantID, "document", &documentID, c.ClientIP(), map[string]interface{}{
+		"file_size":     fileSize,
+		"mime_type":     detectedMime,
+		"original_name": originalName,
+	})
+
+	c.JSON(http.StatusOK, gin.H{
+		"message":       "File uploaded successfully",
+		"document_id":   documentID,
+		"file_size":     fileSize,
+		"mime_type":     detectedMime,
+		"original_name": originalName,
+	})
+}
+
+// UploadViaQR handles file upload via QR token (PUBLIC - no auth required)
+// POST /api/v1/documents/qr/:token/upload
+func (h *DocumentHandler) UploadViaQR(c *gin.Context) {
+	token := c.Param("token")
+	ctx := c.Request.Context()
+
+	// Validate token and get associated info
+	var tokenID, tenantID, clientID, createdBy uuid.UUID
+	var expiresAt time.Time
+	err := h.db.QueryRow(ctx, `
+		SELECT id, tenant_id, client_id, created_by, expires_at
+		FROM upload_tokens
+		WHERE token = $1 AND expires_at > NOW() AND used_at IS NULL
+	`, token).Scan(&tokenID, &tenantID, &clientID, &createdBy, &expiresAt)
+
+	if err != nil {
+		c.JSON(http.StatusNotFound, gin.H{"error": "invalid_or_expired_token"})
+		return
+	}
+
+	// Check file size limit
+	c.Request.Body = http.MaxBytesReader(c.Writer, c.Request.Body, MaxUploadSize)
+
+	// Parse multipart form
+	file, header, err := c.Request.FormFile("file")
+	if err != nil {
+		if err.Error() == "http: request body too large" {
+			c.JSON(http.StatusRequestEntityTooLarge, gin.H{
+				"error":   "file_too_large",
+				"message": fmt.Sprintf("File size exceeds maximum allowed size of %d MB", MaxUploadSize/(1024*1024)),
+			})
+			return
+		}
+		c.JSON(http.StatusBadRequest, gin.H{"error": "no_file_provided"})
+		return
+	}
+	defer file.Close()
+
+	// Read and validate file content
+	fileContent, err := io.ReadAll(file)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed_to_read_file"})
+		return
+	}
+
+	detectedMime := http.DetectContentType(fileContent)
+
+	if !allowedMimeTypes[detectedMime] {
+		c.JSON(http.StatusBadRequest, gin.H{
+			"error":   "invalid_file_type",
+			"message": fmt.Sprintf("File type '%s' is not allowed", detectedMime),
+		})
+		return
+	}
+
+	if !validateMagicBytes(fileContent, detectedMime) {
+		c.JSON(http.StatusBadRequest, gin.H{
+			"error":   "invalid_file_content",
+			"message": "File content does not match its declared type",
+		})
+		return
+	}
+
+	// Generate file path
+	now := time.Now()
+	randomSuffix := make([]byte, 8)
+	rand.Read(randomSuffix)
+	ext := filepath.Ext(header.Filename)
+	if ext == "" {
+		ext = ".bin"
+	}
+
+	documentID := uuid.New()
+	filePath := fmt.Sprintf("%s/%d/%02d/%s_%s%s",
+		tenantID.String(),
+		now.Year(),
+		now.Month(),
+		documentID.String(),
+		hex.EncodeToString(randomSuffix),
+		ext,
+	)
+
+	fileSize := len(fileContent)
+	originalName := header.Filename
+
+	// Create document record
+	_, err = h.db.Exec(ctx, `
+		INSERT INTO documents (
+			id, tenant_id, client_id, uploaded_by,
+			name, original_name, file_path, file_size, mime_type,
+			status, access
+		) VALUES (
+			$1, $2, $3, $4, $5, $5, $6, $7, $8, 'pending_review', 'all_staff'
+		)
+	`, documentID, tenantID, clientID, createdBy, originalName, filePath, fileSize, detectedMime)
+
+	if err != nil {
+		log.Error().Err(err).Msg("Failed to create document from QR upload")
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "internal_error"})
+		return
+	}
+
+	// Mark token as used (optional: allow multiple uploads with same token)
+	// _, _ = h.db.Exec(ctx, `UPDATE upload_tokens SET used_at = NOW() WHERE id = $1`, tokenID)
+
+	// Audit log
+	h.audit.LogEntity(ctx, audit.ActionDocumentUpload, &createdBy, &tenantID, "document", &documentID, c.ClientIP(), map[string]interface{}{
+		"via":           "qr_upload",
+		"file_size":     fileSize,
+		"mime_type":     detectedMime,
+		"original_name": originalName,
+	})
+
+	c.JSON(http.StatusCreated, gin.H{
+		"message":       "File uploaded successfully",
+		"document_id":   documentID,
+		"file_size":     fileSize,
+		"mime_type":     detectedMime,
+		"original_name": originalName,
 	})
 }

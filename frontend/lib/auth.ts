@@ -18,6 +18,7 @@ export interface AuthResponse {
 export interface LoginCredentials {
   email: string;
   password: string;
+  tenant_domain?: string; // Required when email exists in multiple tenants
 }
 
 export interface RegisterData {
@@ -25,6 +26,12 @@ export interface RegisterData {
   password: string;
   name: string;
   tenant_id: string;
+}
+
+export interface InviteAcceptData {
+  token: string;
+  password: string;
+  name?: string; // Optional: update name if provided
 }
 
 export async function login(credentials: LoginCredentials): Promise<AuthResponse> {
@@ -36,7 +43,8 @@ export async function login(credentials: LoginCredentials): Promise<AuthResponse
 
   if (!res.ok) {
     const error = await res.json();
-    throw new Error(error.message || 'Login failed');
+    // Throw stringified error so we can parse the full structure
+    throw new Error(JSON.stringify(error));
   }
 
   return res.json();
@@ -52,6 +60,26 @@ export async function register(data: RegisterData): Promise<AuthResponse> {
   if (!res.ok) {
     const error = await res.json();
     throw new Error(error.message || 'Registration failed');
+  }
+
+  return res.json();
+}
+
+/**
+ * Accept an invitation and set password.
+ * This is the proper way to register new users in a multi-tenant system.
+ * Users receive an invite email with a token, then use this endpoint to activate.
+ */
+export async function acceptInvite(data: InviteAcceptData): Promise<AuthResponse> {
+  const res = await fetch(`${API_URL}/api/v1/auth/invite-accept`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(data),
+  });
+
+  if (!res.ok) {
+    const error = await res.json();
+    throw new Error(error.message || 'Failed to accept invitation');
   }
 
   return res.json();
@@ -104,4 +132,45 @@ export function clearAuth(): void {
 
 export function isAuthenticated(): boolean {
   return !!getAccessToken();
+}
+
+/**
+ * Detects the current tenant domain from the browser hostname.
+ * This helps pre-fill tenant_domain on multi-tenant deployments.
+ *
+ * Examples:
+ * - acme.crm.example.com → acme.crm.example.com
+ * - crm.example.com → null (main app, no tenant subdomain)
+ * - localhost:3000 → null (development)
+ */
+export function detectTenantDomain(): string | null {
+  if (typeof window === 'undefined') {
+    return null;
+  }
+
+  const hostname = window.location.hostname;
+
+  // Skip localhost and IP addresses
+  if (hostname === 'localhost' || /^[\d.]+$/.test(hostname)) {
+    return null;
+  }
+
+  // Return the full hostname as the tenant domain
+  // The backend will match against tenants.domain or tenants.custom_domain
+  return hostname;
+}
+
+/**
+ * Login error structure returned by the API
+ */
+export interface LoginError {
+  error: string;
+  message: string;
+}
+
+/**
+ * Checks if the error indicates tenant selection is required
+ */
+export function isTenantRequiredError(error: LoginError): boolean {
+  return error.error === 'tenant_required';
 }

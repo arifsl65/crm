@@ -8,9 +8,10 @@ import (
 // These headers help protect against common web vulnerabilities.
 func SecurityHeaders() gin.HandlerFunc {
 	return func(c *gin.Context) {
-		// HSTS - Force HTTPS for 1 year, include subdomains
+		// HSTS - Force HTTPS for 1 year, include subdomains, enable preload
 		// Only enable in production to avoid issues with local development
-		c.Header("Strict-Transport-Security", "max-age=31536000; includeSubDomains")
+		// Preload allows submission to browser preload lists (hstspreload.org)
+		c.Header("Strict-Transport-Security", "max-age=31536000; includeSubDomains; preload")
 
 		// Prevent clickjacking attacks by disallowing framing
 		c.Header("X-Frame-Options", "DENY")
@@ -75,9 +76,9 @@ func SecurityHeadersWithConfig(cfg SecurityHeadersConfig) gin.HandlerFunc {
 	}
 
 	return func(c *gin.Context) {
-		// HSTS - only in production
+		// HSTS - only in production (with preload for browser preload lists)
 		if cfg.EnableHSTS {
-			c.Header("Strict-Transport-Security", "max-age=31536000; includeSubDomains")
+			c.Header("Strict-Transport-Security", "max-age=31536000; includeSubDomains; preload")
 		}
 
 		// X-Frame-Options

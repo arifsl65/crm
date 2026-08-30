@@ -11,6 +11,8 @@ import (
 var (
 	ErrInvalidToken = errors.New("invalid token")
 	ErrExpiredToken = errors.New("token has expired")
+	ErrTokenReused  = errors.New("token reuse detected")
+	ErrTokenRevoked = errors.New("token has been revoked")
 )
 
 type TokenType string

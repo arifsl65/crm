@@ -1,16 +1,26 @@
 'use client';
 
-import { useState } from 'react';
+import { useState, useEffect } from 'react';
 import { useRouter } from 'next/navigation';
 import Link from 'next/link';
-import { login, saveAuth } from '@/lib/auth';
+import { login, saveAuth, detectTenantDomain, isTenantRequiredError, type LoginError } from '@/lib/auth';
 
 export default function LoginPage() {
   const router = useRouter();
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
+  const [tenantDomain, setTenantDomain] = useState('');
+  const [showTenantField, setShowTenantField] = useState(false);
   const [error, setError] = useState('');
   const [loading, setLoading] = useState(false);
+
+  // Auto-detect tenant domain from hostname on mount
+  useEffect(() => {
+    const detected = detectTenantDomain();
+    if (detected) {
+      setTenantDomain(detected);
+    }
+  }, []);
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -18,11 +28,31 @@ export default function LoginPage() {
     setLoading(true);
 
     try {
-      const auth = await login({ email, password });
+      const credentials = {
+        email,
+        password,
+        ...(tenantDomain && { tenant_domain: tenantDomain }),
+      };
+      const auth = await login(credentials);
       saveAuth(auth);
       router.push('/dashboard');
     } catch (err) {
-      setError(err instanceof Error ? err.message : 'Login failed');
+      if (err instanceof Error) {
+        // Try to parse error response
+        try {
+          const errorData: LoginError = JSON.parse(err.message);
+          if (isTenantRequiredError(errorData)) {
+            setShowTenantField(true);
+            setError('Your email exists in multiple workspaces. Please specify your workspace domain.');
+          } else {
+            setError(errorData.message || err.message);
+          }
+        } catch {
+          setError(err.message);
+        }
+      } else {
+        setError('Login failed');
+      }
     } finally {
       setLoading(false);
     }
@@ -70,10 +100,26 @@ export default function LoginPage() {
                 required
                 value={email}
                 onChange={(e) => setEmail(e.target.value)}
-                className="appearance-none rounded-none relative block w-full px-3 py-2 border border-gray-300 dark:border-gray-700 placeholder-gray-500 dark:placeholder-gray-400 text-gray-900 dark:text-white rounded-t-md focus:outline-none focus:ring-blue-500 focus:border-blue-500 focus:z-10 sm:text-sm bg-white dark:bg-slate-800"
+                className={`appearance-none rounded-none relative block w-full px-3 py-2 border border-gray-300 dark:border-gray-700 placeholder-gray-500 dark:placeholder-gray-400 text-gray-900 dark:text-white ${showTenantField ? '' : 'rounded-t-md'} focus:outline-none focus:ring-blue-500 focus:border-blue-500 focus:z-10 sm:text-sm bg-white dark:bg-slate-800`}
                 placeholder="Email address"
               />
             </div>
+            {showTenantField && (
+              <div>
+                <label htmlFor="tenant_domain" className="sr-only">Workspace domain</label>
+                <input
+                  id="tenant_domain"
+                  name="tenant_domain"
+                  type="text"
+                  autoComplete="organization"
+                  required
+                  value={tenantDomain}
+                  onChange={(e) => setTenantDomain(e.target.value)}
+                  className="appearance-none rounded-none relative block w-full px-3 py-2 border border-gray-300 dark:border-gray-700 placeholder-gray-500 dark:placeholder-gray-400 text-gray-900 dark:text-white focus:outline-none focus:ring-blue-500 focus:border-blue-500 focus:z-10 sm:text-sm bg-white dark:bg-slate-800"
+                  placeholder="Workspace domain (e.g., acme.crm.example.com)"
+                />
+              </div>
+            )}
             <div>
               <label htmlFor="password" className="sr-only">Password</label>
               <input

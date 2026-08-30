@@ -7,6 +7,7 @@ import (
 	"crypto/sha1"
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http"
@@ -327,10 +328,30 @@ func (h *AuthHandler) Refresh(c *gin.Context) {
 		}
 	}
 	if err != nil {
-		c.JSON(http.StatusUnauthorized, gin.H{
-			"error":   "invalid_token",
-			"message": "Invalid or expired refresh token",
-		})
+		// Return specific error codes for different failure modes
+		switch {
+		case errors.Is(err, auth.ErrTokenReused):
+			// Token reuse detected - potential theft, family revoked
+			c.JSON(http.StatusUnauthorized, gin.H{
+				"error":   "token_reused",
+				"message": "Token reuse detected. All sessions in this family have been revoked for security.",
+			})
+		case errors.Is(err, auth.ErrTokenRevoked):
+			c.JSON(http.StatusUnauthorized, gin.H{
+				"error":   "token_revoked",
+				"message": "This token has been revoked",
+			})
+		case errors.Is(err, auth.ErrExpiredToken):
+			c.JSON(http.StatusUnauthorized, gin.H{
+				"error":   "token_expired",
+				"message": "Refresh token has expired. Please log in again.",
+			})
+		default:
+			c.JSON(http.StatusUnauthorized, gin.H{
+				"error":   "invalid_token",
+				"message": "Invalid or expired refresh token",
+			})
+		}
 		return
 	}
 
@@ -731,7 +752,8 @@ func (h *AuthHandler) GetMe(c *gin.Context) {
 	ctx := c.Request.Context()
 
 	query := `
-		SELECT id, tenant_id, email, name, role, last_login_at, created_at
+		SELECT id, tenant_id, email, name, role, phone, avatar_url, preferences,
+		       last_login_at, created_at
 		FROM users WHERE id = $1 AND deleted_at IS NULL
 	`
 
@@ -741,12 +763,16 @@ func (h *AuthHandler) GetMe(c *gin.Context) {
 		Email       string
 		Name        string
 		Role        string
+		Phone       *string
+		AvatarURL   *string
+		Preferences []byte // JSONB as bytes
 		LastLoginAt *time.Time
 		CreatedAt   time.Time
 	}
 
 	err := h.db.QueryRow(ctx, query, userID).Scan(
 		&user.ID, &user.TenantID, &user.Email, &user.Name, &user.Role,
+		&user.Phone, &user.AvatarURL, &user.Preferences,
 		&user.LastLoginAt, &user.CreatedAt,
 	)
 	if err != nil {
@@ -762,26 +788,45 @@ func (h *AuthHandler) GetMe(c *gin.Context) {
 		tenantIDStr = user.TenantID.String()
 	}
 
+	// Parse preferences JSONB
+	var preferences map[string]interface{}
+	if len(user.Preferences) > 0 {
+		_ = json.Unmarshal(user.Preferences, &preferences)
+	}
+	if preferences == nil {
+		preferences = map[string]interface{}{}
+	}
+
 	c.JSON(http.StatusOK, gin.H{
 		"id":            user.ID.String(),
 		"tenant_id":     tenantIDStr,
 		"email":         user.Email,
 		"name":          user.Name,
 		"role":          user.Role,
+		"phone":         user.Phone,
+		"avatar_url":    user.AvatarURL,
+		"preferences":   preferences,
 		"last_login_at": user.LastLoginAt,
 		"created_at":    user.CreatedAt,
 	})
 }
 
+// UpdateMeRequest is the request body for updating user profile.
+type UpdateMeRequest struct {
+	Name        *string                `json:"name,omitempty"`
+	Phone       *string                `json:"phone,omitempty"`
+	AvatarURL   *string                `json:"avatar_url,omitempty"`
+	Preferences map[string]interface{} `json:"preferences,omitempty"` // e.g., {"theme": "dark"}
+}
+
 // UpdateMe updates the current user's profile.
 // PATCH /api/v1/auth/me
+// Supports: name, phone, avatar_url, preferences (including theme)
 func (h *AuthHandler) UpdateMe(c *gin.Context) {
 	userID, _ := middleware.GetUserID(c)
 	ctx := c.Request.Context()
 
-	var req struct {
-		Name string `json:"name"`
-	}
+	var req UpdateMeRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{
 			"error":   "validation_error",
@@ -790,9 +835,53 @@ func (h *AuthHandler) UpdateMe(c *gin.Context) {
 		return
 	}
 
-	query := `UPDATE users SET name = $1, updated_at = NOW() WHERE id = $2`
-	_, err := h.db.Exec(ctx, query, req.Name, userID)
+	// Build dynamic update query
+	setClauses := []string{}
+	args := []interface{}{}
+	argNum := 1
+
+	if req.Name != nil {
+		setClauses = append(setClauses, fmt.Sprintf("name = $%d", argNum))
+		args = append(args, *req.Name)
+		argNum++
+	}
+	if req.Phone != nil {
+		setClauses = append(setClauses, fmt.Sprintf("phone = $%d", argNum))
+		args = append(args, *req.Phone)
+		argNum++
+	}
+	if req.AvatarURL != nil {
+		setClauses = append(setClauses, fmt.Sprintf("avatar_url = $%d", argNum))
+		args = append(args, *req.AvatarURL)
+		argNum++
+	}
+	if req.Preferences != nil {
+		// Merge with existing preferences using JSONB || operator
+		setClauses = append(setClauses, fmt.Sprintf("preferences = COALESCE(preferences, '{}'::jsonb) || $%d::jsonb", argNum))
+		args = append(args, req.Preferences)
+		argNum++
+	}
+
+	if len(setClauses) == 0 {
+		c.JSON(http.StatusBadRequest, gin.H{
+			"error":   "validation_error",
+			"message": "No fields to update",
+		})
+		return
+	}
+
+	// Add updated_at
+	setClauses = append(setClauses, "updated_at = NOW()")
+
+	// Add user ID
+	args = append(args, userID)
+
+	query := fmt.Sprintf("UPDATE users SET %s WHERE id = $%d",
+		strings.Join(setClauses, ", "), argNum)
+
+	_, err := h.db.Exec(ctx, query, args...)
 	if err != nil {
+		log.Error().Err(err).Str("user_id", userID.String()).Msg("Failed to update profile")
 		c.JSON(http.StatusInternalServerError, gin.H{
 			"error":   "internal_error",
 			"message": "An error occurred",
@@ -1605,4 +1694,234 @@ func hmacSHA1(key, data []byte) []byte {
 	h := hmac.New(sha1.New, key)
 	h.Write(data)
 	return h.Sum(nil)
+}
+
+// ============================================================================
+// Invite Accept (Accept invitation and set password)
+// ============================================================================
+
+type InviteAcceptRequest struct {
+	Token    string `json:"token" binding:"required"`
+	Password string `json:"password" binding:"required,min=8"`
+	Name     string `json:"name"` // Optional: update name if provided
+}
+
+// InviteAccept accepts a user invitation and sets the password.
+// POST /api/v1/auth/invite-accept
+func (h *AuthHandler) InviteAccept(c *gin.Context) {
+	var req InviteAcceptRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{
+			"error":   "validation_error",
+			"message": "Invalid request body. Token and password (min 8 chars) are required.",
+		})
+		return
+	}
+
+	ctx := c.Request.Context()
+	ipAddress := c.ClientIP()
+	userAgent := c.Request.UserAgent()
+
+	// Validate invite token and get user
+	user, err := h.validateInviteToken(ctx, req.Token)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{
+			"error":   "invalid_token",
+			"message": "Invalid or expired invitation token",
+		})
+		return
+	}
+
+	// Hash new password
+	passwordHash, err := auth.HashPassword(req.Password)
+	if err != nil {
+		log.Error().Err(err).Msg("Failed to hash password")
+		c.JSON(http.StatusInternalServerError, gin.H{
+			"error":   "internal_error",
+			"message": "An error occurred",
+		})
+		return
+	}
+
+	// Update user: set password, clear invite token, activate status
+	name := user.Name
+	if req.Name != "" {
+		name = req.Name
+	}
+	err = h.acceptInvite(ctx, user.ID, passwordHash, name)
+	if err != nil {
+		log.Error().Err(err).Msg("Failed to accept invite")
+		c.JSON(http.StatusInternalServerError, gin.H{
+			"error":   "internal_error",
+			"message": "An error occurred",
+		})
+		return
+	}
+
+	// Update last login
+	_ = h.updateLastLogin(ctx, user.ID)
+
+	// Generate token pair
+	tokenTenantID := uuid.Nil
+	tenantIDStr := ""
+	if user.TenantID != nil {
+		tokenTenantID = *user.TenantID
+		tenantIDStr = user.TenantID.String()
+	}
+
+	tokenPair, err := h.jwt.GenerateTokenPair(user.ID, tokenTenantID, user.Role)
+	if err != nil {
+		log.Error().Err(err).Msg("Failed to generate token pair")
+		c.JSON(http.StatusInternalServerError, gin.H{
+			"error":   "internal_error",
+			"message": "An error occurred",
+		})
+		return
+	}
+
+	// Store refresh token
+	_, err = h.session.StoreRefreshToken(ctx, user.ID, user.TenantID, tokenPair.RefreshToken, ipAddress, userAgent)
+	if err != nil {
+		log.Error().Err(err).Msg("Failed to store refresh token")
+	}
+
+	// Audit log successful invite accept
+	h.audit.LogAuth(ctx, audit.ActionRegister, &user.ID, user.TenantID, ipAddress, userAgent, true, "invite_accepted")
+
+	log.Info().
+		Str("user_id", user.ID.String()).
+		Str("email", user.Email).
+		Msg("User accepted invitation and set password")
+
+	c.JSON(http.StatusOK, AuthResponse{
+		AccessToken:  tokenPair.AccessToken,
+		RefreshToken: tokenPair.RefreshToken,
+		ExpiresAt:    tokenPair.ExpiresAt,
+		User: UserInfo{
+			ID:       user.ID.String(),
+			Email:    user.Email,
+			Name:     name,
+			Role:     user.Role,
+			TenantID: tenantIDStr,
+		},
+	})
+}
+
+type inviteUserRecord struct {
+	ID       uuid.UUID
+	TenantID *uuid.UUID
+	Email    string
+	Name     string
+	Role     string
+}
+
+func (h *AuthHandler) validateInviteToken(ctx context.Context, token string) (*inviteUserRecord, error) {
+	query := `
+		SELECT id, tenant_id, email, name, role
+		FROM users
+		WHERE invite_token = $1
+		AND invite_expires > NOW()
+		AND deleted_at IS NULL
+	`
+	var user inviteUserRecord
+	err := h.db.QueryRow(ctx, query, token).Scan(
+		&user.ID, &user.TenantID, &user.Email, &user.Name, &user.Role,
+	)
+	if err != nil {
+		return nil, errors.New("invalid or expired invite token")
+	}
+	return &user, nil
+}
+
+func (h *AuthHandler) acceptInvite(ctx context.Context, userID uuid.UUID, passwordHash, name string) error {
+	query := `
+		UPDATE users
+		SET password = $1,
+		    name = $2,
+		    status = 'active',
+		    invite_token = NULL,
+		    invite_expires = NULL,
+		    updated_at = NOW()
+		WHERE id = $3
+	`
+	_, err := h.db.Exec(ctx, query, passwordHash, name, userID)
+	return err
+}
+
+// ============================================================================
+// Revoke Token Family (Security: revoke all tokens when theft detected)
+// ============================================================================
+
+type RevokeTokenFamilyRequest struct {
+	Family string `json:"family" binding:"required,uuid"`
+}
+
+// RevokeTokenFamily revokes all tokens in a token family.
+// This is used when token theft/reuse is detected.
+// POST /api/v1/auth/refresh/revoke-family
+func (h *AuthHandler) RevokeTokenFamily(c *gin.Context) {
+	var req RevokeTokenFamilyRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{
+			"error":   "validation_error",
+			"message": "Invalid request body. Family UUID is required.",
+		})
+		return
+	}
+
+	ctx := c.Request.Context()
+	userID, _ := middleware.GetUserID(c)
+
+	familyUUID, err := uuid.Parse(req.Family)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{
+			"error":   "validation_error",
+			"message": "Invalid family UUID",
+		})
+		return
+	}
+
+	// Verify the family belongs to the current user (security check)
+	var familyUserID uuid.UUID
+	err = h.db.QueryRow(ctx, `
+		SELECT user_id FROM refresh_tokens WHERE family = $1 LIMIT 1
+	`, familyUUID).Scan(&familyUserID)
+	if err != nil {
+		c.JSON(http.StatusNotFound, gin.H{
+			"error":   "not_found",
+			"message": "Token family not found",
+		})
+		return
+	}
+
+	// Only allow users to revoke their own token families (or super_admin)
+	role, _ := c.Get(middleware.AuthRole)
+	roleStr, _ := role.(string)
+	if familyUserID != userID && roleStr != "super_admin" {
+		c.JSON(http.StatusForbidden, gin.H{
+			"error":   "forbidden",
+			"message": "You can only revoke your own token families",
+		})
+		return
+	}
+
+	// Revoke the token family
+	err = h.session.RevokeTokenFamily(ctx, familyUUID)
+	if err != nil {
+		log.Error().Err(err).Str("family", familyUUID.String()).Msg("Failed to revoke token family")
+		c.JSON(http.StatusInternalServerError, gin.H{
+			"error":   "internal_error",
+			"message": "An error occurred",
+		})
+		return
+	}
+
+	log.Info().
+		Str("user_id", userID.String()).
+		Str("family", familyUUID.String()).
+		Msg("Token family revoked")
+
+	c.JSON(http.StatusOK, gin.H{
+		"message": "Token family has been revoked",
+	})
 }

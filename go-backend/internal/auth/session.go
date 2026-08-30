@@ -129,18 +129,18 @@ func (sm *SessionManager) ValidateRefreshToken(ctx context.Context, token string
 	// Check if token is revoked
 	if record.RevokedAt != nil {
 		log.Warn().Str("token_id", record.ID.String()).Msg("Attempted to use revoked refresh token")
-		return nil, ErrInvalidToken
+		return nil, ErrTokenRevoked
 	}
 
 	// Check if token is already used (replay attack detection)
 	if record.UsedAt != nil {
-		// Token reuse detected! Revoke entire family
+		// Token reuse detected! Revoke entire family for security
 		log.Warn().
 			Str("token_id", record.ID.String()).
 			Str("family", record.Family.String()).
 			Msg("Token reuse detected - revoking entire token family")
 		_ = sm.RevokeTokenFamily(ctx, record.Family)
-		return nil, ErrInvalidToken
+		return nil, ErrTokenReused
 	}
 
 	// Check if token is expired

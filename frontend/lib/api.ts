@@ -109,30 +109,101 @@ function getAuthToken(): string | null {
   return null;
 }
 
-// Helper to make authenticated requests
-async function authFetch(url: string, options: RequestInit = {}): Promise<Response> {
-  const token = getAuthToken();
-  const headers: HeadersInit = {
-    'Content-Type': 'application/json',
-    ...(options.headers || {}),
-  };
+function getRefreshToken(): string | null {
+  if (typeof window !== 'undefined') {
+    return localStorage.getItem('refresh_token');
+  }
+  return null;
+}
 
-  if (token) {
-    (headers as Record<string, string>)['Authorization'] = `Bearer ${token}`;
+// Token refresh state to prevent multiple simultaneous refresh attempts
+let isRefreshing = false;
+let refreshPromise: Promise<boolean> | null = null;
+
+async function tryRefreshToken(): Promise<boolean> {
+  // If already refreshing, wait for the existing refresh to complete
+  if (isRefreshing && refreshPromise) {
+    return refreshPromise;
   }
 
-  const res = await fetch(`${API_URL}${url}`, {
-    ...options,
-    headers,
-  });
+  const refreshToken = getRefreshToken();
+  if (!refreshToken) {
+    return false;
+  }
 
+  isRefreshing = true;
+  refreshPromise = (async () => {
+    try {
+      const res = await fetch(`${API_URL}/api/v1/auth/refresh`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ refresh_token: refreshToken }),
+      });
+
+      if (!res.ok) {
+        return false;
+      }
+
+      const data = await res.json();
+
+      // Save new tokens
+      if (typeof window !== 'undefined') {
+        localStorage.setItem('access_token', data.access_token);
+        localStorage.setItem('refresh_token', data.refresh_token);
+      }
+
+      return true;
+    } catch {
+      return false;
+    } finally {
+      isRefreshing = false;
+      refreshPromise = null;
+    }
+  })();
+
+  return refreshPromise;
+}
+
+function clearAuthAndRedirect(): void {
+  if (typeof window !== 'undefined') {
+    localStorage.removeItem('access_token');
+    localStorage.removeItem('refresh_token');
+    localStorage.removeItem('user');
+    window.location.href = '/login';
+  }
+}
+
+// Helper to make authenticated requests with automatic token refresh
+async function authFetch(url: string, options: RequestInit = {}): Promise<Response> {
+  const makeRequest = async () => {
+    const token = getAuthToken();
+    const headers: HeadersInit = {
+      'Content-Type': 'application/json',
+      ...(options.headers || {}),
+    };
+
+    if (token) {
+      (headers as Record<string, string>)['Authorization'] = `Bearer ${token}`;
+    }
+
+    return fetch(`${API_URL}${url}`, {
+      ...options,
+      headers,
+    });
+  };
+
+  let res = await makeRequest();
+
+  // If 401 Unauthorized, try to refresh the token
   if (res.status === 401) {
-    // Token expired, redirect to login
-    if (typeof window !== 'undefined') {
-      localStorage.removeItem('access_token');
-      localStorage.removeItem('refresh_token');
-      localStorage.removeItem('user');
-      window.location.href = '/login';
+    const refreshed = await tryRefreshToken();
+
+    if (refreshed) {
+      // Retry the original request with the new token
+      res = await makeRequest();
+    } else {
+      // Refresh failed, redirect to login
+      clearAuthAndRedirect();
     }
   }
 

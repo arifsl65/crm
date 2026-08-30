@@ -109,9 +109,10 @@ func main() {
 	dashboardHandler := handlers.NewDashboardHandler(db)
 	serviceTypeHandler := handlers.NewServiceTypeHandler(db, auditLogger)
 	documentTypeHandler := handlers.NewDocumentTypeHandler(db, auditLogger)
+	aiHandler := handlers.NewAIHandler(aiClient)
 
 	// Setup Gin router
-	router := setupRouter(cfg, db, redis, aiClient, jwtManager, authHandler, tenantHandler, userHandler, clientHandler, serviceHandler, documentHandler, dashboardHandler, serviceTypeHandler, documentTypeHandler)
+	router := setupRouter(cfg, db, redis, aiClient, jwtManager, authHandler, tenantHandler, userHandler, clientHandler, serviceHandler, documentHandler, dashboardHandler, serviceTypeHandler, documentTypeHandler, aiHandler)
 
 	// Create HTTP server
 	srv := &http.Server{
@@ -172,7 +173,7 @@ func setupLogging(cfg config.AppConfig) {
 }
 
 // setupRouter configures the Gin router with all routes.
-func setupRouter(cfg *config.Config, db *database.Pool, redis *cache.Client, aiClient *ai.Client, jwtManager *auth.JWTManager, authHandler *handlers.AuthHandler, tenantHandler *handlers.TenantHandler, userHandler *handlers.UserHandler, clientHandler *handlers.ClientHandler, serviceHandler *handlers.ServiceHandler, documentHandler *handlers.DocumentHandler, dashboardHandler *handlers.DashboardHandler, serviceTypeHandler *handlers.ServiceTypeHandler, documentTypeHandler *handlers.DocumentTypeHandler) *gin.Engine {
+func setupRouter(cfg *config.Config, db *database.Pool, redis *cache.Client, aiClient *ai.Client, jwtManager *auth.JWTManager, authHandler *handlers.AuthHandler, tenantHandler *handlers.TenantHandler, userHandler *handlers.UserHandler, clientHandler *handlers.ClientHandler, serviceHandler *handlers.ServiceHandler, documentHandler *handlers.DocumentHandler, dashboardHandler *handlers.DashboardHandler, serviceTypeHandler *handlers.ServiceTypeHandler, documentTypeHandler *handlers.DocumentTypeHandler, aiHandler *handlers.AIHandler) *gin.Engine {
 	// Set Gin mode
 	if cfg.App.Env == "production" {
 		gin.SetMode(gin.ReleaseMode)
@@ -223,6 +224,7 @@ func setupRouter(cfg *config.Config, db *database.Pool, redis *cache.Client, aiC
 			authRoutes.POST("/reset-password/confirm", authHandler.ResetPassword)
 			authRoutes.POST("/magic-link", authHandler.SendMagicLink)
 			authRoutes.GET("/magic-link", authHandler.VerifyMagicLink)
+			authRoutes.POST("/invite-accept", authHandler.InviteAccept) // Accept invite and set password
 			// 2FA backup code verification (public - for lockout recovery)
 			authRoutes.POST("/2fa/backup-codes/verify", authHandler.VerifyBackupCode)
 		}
@@ -237,6 +239,8 @@ func setupRouter(cfg *config.Config, db *database.Pool, redis *cache.Client, aiC
 			authProtected.PATCH("/me", authHandler.UpdateMe)
 			authProtected.PATCH("/password", authHandler.ChangePassword)
 			authProtected.GET("/sessions", authHandler.GetSessions)
+			// Token family revocation (for theft detection)
+			authProtected.POST("/refresh/revoke-family", authHandler.RevokeTokenFamily)
 			// 2FA endpoints
 			authProtected.POST("/2fa/setup", authHandler.Setup2FA)
 			authProtected.POST("/2fa/verify", authHandler.Verify2FA)
@@ -315,12 +319,14 @@ func setupRouter(cfg *config.Config, db *database.Pool, redis *cache.Client, aiC
 			documents.POST("/:id/reject", middleware.ValidateUUID("id"), middleware.RequireRole("super_admin", "tenant_admin"), documentHandler.Reject)
 			documents.GET("/:id/versions", middleware.ValidateUUID("id"), documentHandler.GetVersions)
 			documents.POST("/:id/versions/:versionId/restore", middleware.ValidateUUID("id"), documentHandler.RestoreVersion)
+			documents.POST("/:id/upload", middleware.ValidateUUID("id"), documentHandler.Upload)
 		}
 
 		// QR upload routes (public - no auth required)
 		qr := v1.Group("/documents/qr")
 		{
 			qr.GET("/:token", documentHandler.GetQRToken)
+			qr.POST("/:token/upload", documentHandler.UploadViaQR)
 		}
 
 		// Dashboard routes
@@ -356,6 +362,59 @@ func setupRouter(cfg *config.Config, db *database.Pool, redis *cache.Client, aiC
 			documentTypes.GET("/:id", middleware.ValidateUUID("id"), documentTypeHandler.Get)
 			documentTypes.PATCH("/:id", middleware.ValidateUUID("id"), middleware.RequireRole("super_admin", "tenant_admin"), documentTypeHandler.Update)
 			documentTypes.DELETE("/:id", middleware.ValidateUUID("id"), middleware.RequireRole("super_admin", "tenant_admin"), documentTypeHandler.Delete)
+		}
+
+		// AI routes (proxy to Python AI service)
+		aiRoutes := protected.Group("/ai")
+		{
+			// Chat AI
+			aiRoutes.POST("/chat", aiHandler.Chat)
+			aiRoutes.POST("/chat/stream", aiHandler.ChatStream)
+			aiRoutes.GET("/chat/history", aiHandler.GetChatHistory)
+			aiRoutes.DELETE("/chat/:id", aiHandler.DeleteChat)
+
+			// Document AI
+			aiRoutes.POST("/documents/extract", aiHandler.ExtractDocument)
+			aiRoutes.POST("/documents/classify", aiHandler.ClassifyDocument)
+			aiRoutes.POST("/documents/summarize", aiHandler.SummarizeDocument)
+			aiRoutes.POST("/documents/rename", aiHandler.RenameDocument)
+
+			// Email AI
+			aiRoutes.POST("/emails/summarize", aiHandler.SummarizeEmail)
+			aiRoutes.POST("/emails/sentiment", aiHandler.AnalyzeEmailSentiment)
+			aiRoutes.POST("/emails/promises", aiHandler.ExtractEmailPromises)
+			aiRoutes.POST("/emails/draft", aiHandler.NotImplementedAI)
+			aiRoutes.POST("/emails/match-client", aiHandler.NotImplementedAI)
+			aiRoutes.POST("/emails/thread-summary", aiHandler.NotImplementedAI)
+			aiRoutes.POST("/emails/find-alternate", aiHandler.NotImplementedAI)
+
+			// Form AI
+			aiRoutes.POST("/forms/extract", aiHandler.ExtractFormData)
+			aiRoutes.POST("/forms/vat", aiHandler.AutoFillVAT)
+			aiRoutes.POST("/forms/ct600", aiHandler.AutoFillCT600)
+			aiRoutes.POST("/forms/sa", aiHandler.AutoFillSA)
+
+			// Risk AI
+			aiRoutes.POST("/risk/client", aiHandler.AnalyzeClientRisk)
+			aiRoutes.POST("/risk/service", aiHandler.AnalyzeServiceRisk)
+
+			// Template AI
+			aiRoutes.POST("/templates/generate", aiHandler.NotImplementedAI)
+
+			// Client AI
+			aiRoutes.POST("/clients/duplicate-check", aiHandler.NotImplementedAI)
+
+			// Service AI
+			aiRoutes.POST("/services/auto-name", aiHandler.NotImplementedAI)
+			aiRoutes.POST("/services/completion-summary", aiHandler.NotImplementedAI)
+
+			// Dashboard AI
+			aiRoutes.POST("/dashboard/troublemakers", aiHandler.NotImplementedAI)
+			aiRoutes.POST("/dashboard/anomalies", aiHandler.NotImplementedAI)
+			aiRoutes.POST("/staff/activity", aiHandler.NotImplementedAI)
+
+			// AI Jobs
+			aiRoutes.GET("/jobs/:id", middleware.ValidateUUID("id"), aiHandler.GetJobStatus)
 		}
 	}
 
