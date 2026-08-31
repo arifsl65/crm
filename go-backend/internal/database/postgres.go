@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"time"
 
+	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/rs/zerolog/log"
@@ -151,9 +152,11 @@ func (p *Pool) TenantTransaction(ctx context.Context, tenantID, role string, fn 
 		}
 	}()
 
-	// Set RLS context variables using SET LOCAL (scoped to this transaction)
+	// Set RLS context variables using SET LOCAL (scoped to this transaction).
+	// SET does not accept parameter placeholders, so we use fmt.Sprintf with
+	// controlled values (UUID for tenant_id, known role enum for role).
 	if tenantID != "" {
-		_, err = tx.Exec(ctx, "SET LOCAL app.tenant_id = $1", tenantID)
+		_, err = tx.Exec(ctx, fmt.Sprintf("SET LOCAL app.tenant_id = '%s'", tenantID))
 		if err != nil {
 			_ = tx.Rollback(ctx)
 			return fmt.Errorf("failed to set tenant_id: %w", err)
@@ -161,7 +164,7 @@ func (p *Pool) TenantTransaction(ctx context.Context, tenantID, role string, fn 
 	}
 
 	if role != "" {
-		_, err = tx.Exec(ctx, "SET LOCAL app.role = $1", role)
+		_, err = tx.Exec(ctx, fmt.Sprintf("SET LOCAL app.role = '%s'", role))
 		if err != nil {
 			_ = tx.Rollback(ctx)
 			return fmt.Errorf("failed to set role: %w", err)
@@ -182,18 +185,25 @@ func (p *Pool) TenantTransaction(ctx context.Context, tenantID, role string, fn 
 	return nil
 }
 
+// SuperAdminTransaction executes a function within a transaction with super_admin role.
+// Use this for cross-tenant queries (e.g., authentication lookups) where tenant_id is unknown.
+// app.tenant_id is set to uuid.Nil so RLS policies that cast it to uuid do not fail.
+func (p *Pool) SuperAdminTransaction(ctx context.Context, fn func(tx pgx.Tx) error) error {
+	return p.TenantTransaction(ctx, uuid.Nil.String(), "super_admin", fn)
+}
+
 // SetRLSContext sets tenant_id and role on a connection for RLS.
 // Use this for queries outside of TenantTransaction.
 // Note: Uses SET LOCAL which only works within a transaction.
 func (p *Pool) SetRLSContext(ctx context.Context, conn *pgxpool.Conn, tenantID, role string) error {
 	if tenantID != "" {
-		_, err := conn.Exec(ctx, "SET LOCAL app.tenant_id = $1", tenantID)
+		_, err := conn.Exec(ctx, fmt.Sprintf("SET LOCAL app.tenant_id = '%s'", tenantID))
 		if err != nil {
 			return fmt.Errorf("failed to set tenant_id: %w", err)
 		}
 	}
 	if role != "" {
-		_, err := conn.Exec(ctx, "SET LOCAL app.role = $1", role)
+		_, err := conn.Exec(ctx, fmt.Sprintf("SET LOCAL app.role = '%s'", role))
 		if err != nil {
 			return fmt.Errorf("failed to set role: %w", err)
 		}

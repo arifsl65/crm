@@ -126,6 +126,7 @@ CREATE POLICY user_isolation_totp_backup_codes ON totp_backup_codes FOR ALL
     WITH CHECK (user_id = current_setting('app.user_id', true)::uuid OR current_setting('app.role', true) = 'super_admin');
 
 -- =============================================================================
--- Update schema version
+-- Update schema migrations
 -- =============================================================================
-UPDATE schema_version SET version = 2, applied_at = CURRENT_TIMESTAMP WHERE version = 1;
+INSERT INTO schema_migrations (version, dirty) VALUES (2, false)
+ON CONFLICT (version) DO UPDATE SET dirty = false;

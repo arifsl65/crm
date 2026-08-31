@@ -1,6 +1,7 @@
 'use client';
 
 import { useState, useEffect } from 'react';
+import { useTheme } from '@/components/theme-provider';
 
 interface HealthStatus {
   status: string;
@@ -9,18 +10,12 @@ interface HealthStatus {
 }
 
 export default function Home() {
-  const [theme, setTheme] = useState<'light' | 'dark'>('light');
+  const { resolvedTheme, setTheme } = useTheme();
   const [backendHealth, setBackendHealth] = useState<HealthStatus | null>(null);
   const [aiHealth, setAiHealth] = useState<HealthStatus | null>(null);
   const [loading, setLoading] = useState(true);
 
   useEffect(() => {
-    // Check system theme preference
-    if (typeof window !== 'undefined') {
-      const isDark = document.documentElement.classList.contains('dark');
-      setTheme(isDark ? 'dark' : 'light');
-    }
-
     // Check backend health
     const checkHealth = async () => {
       try {
@@ -52,9 +47,7 @@ export default function Home() {
   }, []);
 
   const toggleTheme = () => {
-    const newTheme = theme === 'light' ? 'dark' : 'light';
-    setTheme(newTheme);
-    document.documentElement.classList.toggle('dark');
+    setTheme(resolvedTheme === 'dark' ? 'light' : 'dark');
   };
 
   return (
@@ -88,7 +81,7 @@ export default function Home() {
             className="rounded-lg p-2 text-slate-500 hover:bg-slate-100 dark:text-slate-400 dark:hover:bg-slate-800"
             aria-label="Toggle theme"
           >
-            {theme === 'light' ? (
+            {resolvedTheme === 'light' ? (
               <svg
                 xmlns="http://www.w3.org/2000/svg"
                 viewBox="0 0 24 24"

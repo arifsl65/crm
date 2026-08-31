@@ -6,6 +6,7 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5"
 	"github.com/rs/zerolog/log"
 
 	"github.com/accountant-crm/go-backend/internal/database"
@@ -54,10 +55,17 @@ type ActivityItem struct {
 // GetStats returns dashboard statistics
 // GET /api/v1/dashboard/stats
 func (h *DashboardHandler) GetStats(c *gin.Context) {
-	ctx := c.Request.Context()
 	tenantID, _ := middleware.GetTenantID(c)
 	userID, _ := middleware.GetUserID(c)
 	role, _ := c.Get(middleware.AuthRole)
+
+	// Get TenantDB for RLS-protected operations
+	tenantDB, ok := middleware.GetTenantDB(c)
+	if !ok {
+		log.Error().Msg("TenantDB not found in context")
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "internal_error"})
+		return
+	}
 
 	roleStr, _ := role.(string)
 	isStaff := roleStr == "staff"
@@ -67,7 +75,7 @@ func (h *DashboardHandler) GetStats(c *gin.Context) {
 	// Client stats
 	if isStaff {
 		// Staff only sees their assigned clients
-		err := h.db.QueryRow(ctx, `
+		err := tenantDB.QueryRowScan(c, []interface{}{&stats.TotalClients, &stats.ActiveClients, &stats.InactiveClients}, `
 			SELECT
 				COUNT(*) as total,
 				COUNT(*) FILTER (WHERE c.status = 'active') as active,
@@ -75,19 +83,19 @@ func (h *DashboardHandler) GetStats(c *gin.Context) {
 			FROM clients c
 			INNER JOIN staff_clients sc ON c.id = sc.client_id
 			WHERE c.tenant_id = $1 AND sc.staff_id = $2
-		`, tenantID, userID).Scan(&stats.TotalClients, &stats.ActiveClients, &stats.InactiveClients)
+		`, tenantID, userID)
 		if err != nil {
 			log.Error().Err(err).Msg("Failed to get client stats")
 		}
 	} else {
-		err := h.db.QueryRow(ctx, `
+		err := tenantDB.QueryRowScan(c, []interface{}{&stats.TotalClients, &stats.ActiveClients, &stats.InactiveClients}, `
 			SELECT
 				COUNT(*) as total,
 				COUNT(*) FILTER (WHERE status = 'active') as active,
 				COUNT(*) FILTER (WHERE status = 'inactive') as inactive
 			FROM clients
 			WHERE tenant_id = $1
-		`, tenantID).Scan(&stats.TotalClients, &stats.ActiveClients, &stats.InactiveClients)
+		`, tenantID)
 		if err != nil {
 			log.Error().Err(err).Msg("Failed to get client stats")
 		}
@@ -108,17 +116,19 @@ func (h *DashboardHandler) GetStats(c *gin.Context) {
 			INNER JOIN staff_clients sc ON s.client_id = sc.client_id
 			WHERE s.tenant_id = $1 AND sc.staff_id = $2
 		`
-		err := h.db.QueryRow(ctx, serviceQuery, tenantID, userID).Scan(
+		err := tenantDB.QueryRowScan(c, []interface{}{
 			&stats.TotalServices, &stats.ServicesInProgress, &stats.ServicesOverdue,
-			&stats.ServicesDueSoon, &stats.ServicesCompleted)
+			&stats.ServicesDueSoon, &stats.ServicesCompleted},
+			serviceQuery, tenantID, userID)
 		if err != nil {
 			log.Error().Err(err).Msg("Failed to get service stats")
 		}
 	} else {
 		serviceQuery += ` WHERE s.tenant_id = $1`
-		err := h.db.QueryRow(ctx, serviceQuery, tenantID).Scan(
+		err := tenantDB.QueryRowScan(c, []interface{}{
 			&stats.TotalServices, &stats.ServicesInProgress, &stats.ServicesOverdue,
-			&stats.ServicesDueSoon, &stats.ServicesCompleted)
+			&stats.ServicesDueSoon, &stats.ServicesCompleted},
+			serviceQuery, tenantID)
 		if err != nil {
 			log.Error().Err(err).Msg("Failed to get service stats")
 		}
@@ -138,42 +148,44 @@ func (h *DashboardHandler) GetStats(c *gin.Context) {
 			INNER JOIN staff_clients sc ON d.client_id = sc.client_id
 			WHERE d.tenant_id = $1 AND sc.staff_id = $2 AND d.client_id IS NOT NULL
 		`
-		err := h.db.QueryRow(ctx, docQuery, tenantID, userID).Scan(
+		err := tenantDB.QueryRowScan(c, []interface{}{
 			&stats.TotalDocuments, &stats.DocumentsRequested,
-			&stats.DocumentsPending, &stats.DocumentsApproved)
+			&stats.DocumentsPending, &stats.DocumentsApproved},
+			docQuery, tenantID, userID)
 		if err != nil {
 			log.Error().Err(err).Msg("Failed to get document stats")
 		}
 	} else {
 		docQuery += ` WHERE d.tenant_id = $1 AND d.client_id IS NOT NULL`
-		err := h.db.QueryRow(ctx, docQuery, tenantID).Scan(
+		err := tenantDB.QueryRowScan(c, []interface{}{
 			&stats.TotalDocuments, &stats.DocumentsRequested,
-			&stats.DocumentsPending, &stats.DocumentsApproved)
+			&stats.DocumentsPending, &stats.DocumentsApproved},
+			docQuery, tenantID)
 		if err != nil {
 			log.Error().Err(err).Msg("Failed to get document stats")
 		}
 	}
 
 	// Recent activity from audit logs
-	activityRows, err := h.db.Query(ctx, `
+	err := tenantDB.Query(c, `
 		SELECT al.id, al.action, al.entity_type, al.entity_id, u.name, al.created_at
 		FROM audit_logs al
 		LEFT JOIN users u ON al.user_id = u.id
 		WHERE al.tenant_id = $1 AND al.success = true
 		ORDER BY al.created_at DESC
 		LIMIT 10
-	`, tenantID)
-	if err == nil {
-		defer activityRows.Close()
-		for activityRows.Next() {
-			var item ActivityItem
-			err := activityRows.Scan(&item.ID, &item.Action, &item.EntityType, &item.EntityID, &item.UserName, &item.CreatedAt)
-			if err != nil {
-				continue
-			}
-			item.Description = formatActivityDescription(item.Action, item.EntityType)
-			stats.RecentActivity = append(stats.RecentActivity, item)
+	`, []interface{}{tenantID}, func(rows pgx.Rows) error {
+		var item ActivityItem
+		err := rows.Scan(&item.ID, &item.Action, &item.EntityType, &item.EntityID, &item.UserName, &item.CreatedAt)
+		if err != nil {
+			return err
 		}
+		item.Description = formatActivityDescription(item.Action, item.EntityType)
+		stats.RecentActivity = append(stats.RecentActivity, item)
+		return nil
+	})
+	if err != nil {
+		log.Error().Err(err).Msg("Failed to get recent activity")
 	}
 
 	c.JSON(http.StatusOK, stats)
@@ -182,10 +194,17 @@ func (h *DashboardHandler) GetStats(c *gin.Context) {
 // GetDeadlines returns upcoming deadlines
 // GET /api/v1/dashboard/deadlines
 func (h *DashboardHandler) GetDeadlines(c *gin.Context) {
-	ctx := c.Request.Context()
 	tenantID, _ := middleware.GetTenantID(c)
 	userID, _ := middleware.GetUserID(c)
 	role, _ := c.Get(middleware.AuthRole)
+
+	// Get TenantDB for RLS-protected operations
+	tenantDB, ok := middleware.GetTenantDB(c)
+	if !ok {
+		log.Error().Msg("TenantDB not found in context")
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "internal_error"})
+		return
+	}
 
 	roleStr, _ := role.(string)
 	isStaff := roleStr == "staff"
@@ -223,23 +242,15 @@ func (h *DashboardHandler) GetDeadlines(c *gin.Context) {
 
 	query += ` ORDER BY s.deadline ASC LIMIT 20`
 
-	rows, err := h.db.Query(ctx, query, args...)
-	if err != nil {
-		log.Error().Err(err).Msg("Failed to get deadlines")
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "internal_error"})
-		return
-	}
-	defer rows.Close()
-
 	var deadlines []map[string]interface{}
-	for rows.Next() {
+	err := tenantDB.Query(c, query, args, func(rows pgx.Rows) error {
 		var id, clientID uuid.UUID
 		var name, status, priority, urgency string
 		var deadline time.Time
 		var clientName *string
 
 		if err := rows.Scan(&id, &name, &status, &priority, &deadline, &clientID, &clientName, &urgency); err != nil {
-			continue
+			return err
 		}
 
 		deadlines = append(deadlines, map[string]interface{}{
@@ -252,6 +263,13 @@ func (h *DashboardHandler) GetDeadlines(c *gin.Context) {
 			"client_name": clientName,
 			"urgency":     urgency,
 		})
+		return nil
+	})
+
+	if err != nil {
+		log.Error().Err(err).Msg("Failed to get deadlines")
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "internal_error"})
+		return
 	}
 
 	c.JSON(http.StatusOK, gin.H{"deadlines": deadlines})
@@ -260,10 +278,17 @@ func (h *DashboardHandler) GetDeadlines(c *gin.Context) {
 // GetPendingDocuments returns documents awaiting action
 // GET /api/v1/dashboard/pending-documents
 func (h *DashboardHandler) GetPendingDocuments(c *gin.Context) {
-	ctx := c.Request.Context()
 	tenantID, _ := middleware.GetTenantID(c)
 	userID, _ := middleware.GetUserID(c)
 	role, _ := c.Get(middleware.AuthRole)
+
+	// Get TenantDB for RLS-protected operations
+	tenantDB, ok := middleware.GetTenantDB(c)
+	if !ok {
+		log.Error().Msg("TenantDB not found in context")
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "internal_error"})
+		return
+	}
 
 	roleStr, _ := role.(string)
 	isStaff := roleStr == "staff"
@@ -294,23 +319,15 @@ func (h *DashboardHandler) GetPendingDocuments(c *gin.Context) {
 
 	query += ` ORDER BY d.created_at ASC LIMIT 20`
 
-	rows, err := h.db.Query(ctx, query, args...)
-	if err != nil {
-		log.Error().Err(err).Msg("Failed to get pending documents")
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "internal_error"})
-		return
-	}
-	defer rows.Close()
-
 	var documents []map[string]interface{}
-	for rows.Next() {
+	err := tenantDB.Query(c, query, args, func(rows pgx.Rows) error {
 		var id, clientID uuid.UUID
 		var name, status string
 		var clientName *string
 		var requestedAt, createdAt *time.Time
 
 		if err := rows.Scan(&id, &name, &status, &clientID, &clientName, &requestedAt, &createdAt); err != nil {
-			continue
+			return err
 		}
 
 		doc := map[string]interface{}{
@@ -326,6 +343,13 @@ func (h *DashboardHandler) GetPendingDocuments(c *gin.Context) {
 		}
 
 		documents = append(documents, doc)
+		return nil
+	})
+
+	if err != nil {
+		log.Error().Err(err).Msg("Failed to get pending documents")
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "internal_error"})
+		return
 	}
 
 	c.JSON(http.StatusOK, gin.H{"documents": documents})
@@ -334,10 +358,18 @@ func (h *DashboardHandler) GetPendingDocuments(c *gin.Context) {
 // GetClientWorkload returns staff workload distribution
 // GET /api/v1/dashboard/workload
 func (h *DashboardHandler) GetClientWorkload(c *gin.Context) {
-	ctx := c.Request.Context()
 	tenantID, _ := middleware.GetTenantID(c)
 
-	rows, err := h.db.Query(ctx, `
+	// Get TenantDB for RLS-protected operations
+	tenantDB, ok := middleware.GetTenantDB(c)
+	if !ok {
+		log.Error().Msg("TenantDB not found in context")
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "internal_error"})
+		return
+	}
+
+	var workload []map[string]interface{}
+	err := tenantDB.Query(c, `
 		SELECT u.id, u.name,
 		       COUNT(sc.client_id) as client_count,
 		       COUNT(s.id) FILTER (WHERE s.status = 'in_progress') as active_services
@@ -347,23 +379,13 @@ func (h *DashboardHandler) GetClientWorkload(c *gin.Context) {
 		WHERE u.tenant_id = $1 AND u.role = 'staff' AND u.deleted_at IS NULL
 		GROUP BY u.id, u.name
 		ORDER BY client_count DESC
-	`, tenantID)
-
-	if err != nil {
-		log.Error().Err(err).Msg("Failed to get workload")
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "internal_error"})
-		return
-	}
-	defer rows.Close()
-
-	var workload []map[string]interface{}
-	for rows.Next() {
+	`, []interface{}{tenantID}, func(rows pgx.Rows) error {
 		var id uuid.UUID
 		var name string
 		var clientCount, activeServices int
 
 		if err := rows.Scan(&id, &name, &clientCount, &activeServices); err != nil {
-			continue
+			return err
 		}
 
 		workload = append(workload, map[string]interface{}{
@@ -372,6 +394,13 @@ func (h *DashboardHandler) GetClientWorkload(c *gin.Context) {
 			"client_count":    clientCount,
 			"active_services": activeServices,
 		})
+		return nil
+	})
+
+	if err != nil {
+		log.Error().Err(err).Msg("Failed to get workload")
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "internal_error"})
+		return
 	}
 
 	c.JSON(http.StatusOK, gin.H{"workload": workload})
@@ -380,10 +409,17 @@ func (h *DashboardHandler) GetClientWorkload(c *gin.Context) {
 // GetRecentClients returns recently added/modified clients
 // GET /api/v1/dashboard/recent-clients
 func (h *DashboardHandler) GetRecentClients(c *gin.Context) {
-	ctx := c.Request.Context()
 	tenantID, _ := middleware.GetTenantID(c)
 	userID, _ := middleware.GetUserID(c)
 	role, _ := c.Get(middleware.AuthRole)
+
+	// Get TenantDB for RLS-protected operations
+	tenantDB, ok := middleware.GetTenantDB(c)
+	if !ok {
+		log.Error().Msg("TenantDB not found in context")
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "internal_error"})
+		return
+	}
 
 	roleStr, _ := role.(string)
 	isStaff := roleStr == "staff"
@@ -407,22 +443,14 @@ func (h *DashboardHandler) GetRecentClients(c *gin.Context) {
 
 	query += ` ORDER BY c.updated_at DESC LIMIT 10`
 
-	rows, err := h.db.Query(ctx, query, args...)
-	if err != nil {
-		log.Error().Err(err).Msg("Failed to get recent clients")
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "internal_error"})
-		return
-	}
-	defer rows.Close()
-
 	var clients []map[string]interface{}
-	for rows.Next() {
+	err := tenantDB.Query(c, query, args, func(rows pgx.Rows) error {
 		var id uuid.UUID
 		var companyName, contactName, email, status string
 		var createdAt, updatedAt time.Time
 
 		if err := rows.Scan(&id, &companyName, &contactName, &email, &status, &createdAt, &updatedAt); err != nil {
-			continue
+			return err
 		}
 
 		clients = append(clients, map[string]interface{}{
@@ -434,6 +462,13 @@ func (h *DashboardHandler) GetRecentClients(c *gin.Context) {
 			"created_at":   createdAt,
 			"updated_at":   updatedAt,
 		})
+		return nil
+	})
+
+	if err != nil {
+		log.Error().Err(err).Msg("Failed to get recent clients")
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "internal_error"})
+		return
 	}
 
 	c.JSON(http.StatusOK, gin.H{"clients": clients})
@@ -442,10 +477,17 @@ func (h *DashboardHandler) GetRecentClients(c *gin.Context) {
 // GetKanban returns services grouped by status for Kanban board
 // GET /api/v1/dashboard/kanban
 func (h *DashboardHandler) GetKanban(c *gin.Context) {
-	ctx := c.Request.Context()
 	tenantID, _ := middleware.GetTenantID(c)
 	userID, _ := middleware.GetUserID(c)
 	role, _ := c.Get(middleware.AuthRole)
+
+	// Get TenantDB for RLS-protected operations
+	tenantDB, ok := middleware.GetTenantDB(c)
+	if !ok {
+		log.Error().Msg("TenantDB not found in context")
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "internal_error"})
+		return
+	}
 
 	roleStr, _ := role.(string)
 	isStaff := roleStr == "staff"
@@ -475,14 +517,6 @@ func (h *DashboardHandler) GetKanban(c *gin.Context) {
 
 	query += ` ORDER BY s.kanban_position ASC, s.created_at DESC`
 
-	rows, err := h.db.Query(ctx, query, args...)
-	if err != nil {
-		log.Error().Err(err).Msg("Failed to get kanban data")
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "internal_error"})
-		return
-	}
-	defer rows.Close()
-
 	// Group by status
 	kanban := map[string][]map[string]interface{}{
 		"not_started": {},
@@ -491,7 +525,7 @@ func (h *DashboardHandler) GetKanban(c *gin.Context) {
 		"waiting":     {},
 	}
 
-	for rows.Next() {
+	err := tenantDB.Query(c, query, args, func(rows pgx.Rows) error {
 		var id, clientID uuid.UUID
 		var name, status, priority string
 		var deadline *time.Time
@@ -500,7 +534,7 @@ func (h *DashboardHandler) GetKanban(c *gin.Context) {
 
 		if err := rows.Scan(&id, &name, &status, &priority, &deadline, &kanbanPosition,
 			&clientID, &clientName, &docsRequired, &docsReceived); err != nil {
-			continue
+			return err
 		}
 
 		item := map[string]interface{}{
@@ -520,6 +554,13 @@ func (h *DashboardHandler) GetKanban(c *gin.Context) {
 		if column, exists := kanban[status]; exists {
 			kanban[status] = append(column, item)
 		}
+		return nil
+	})
+
+	if err != nil {
+		log.Error().Err(err).Msg("Failed to get kanban data")
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "internal_error"})
+		return
 	}
 
 	c.JSON(http.StatusOK, kanban)

@@ -25,7 +25,7 @@ FRONTEND_DIR="$PROJECT_ROOT/frontend"
 # Server configuration (from cloud.md)
 ECS_HOST="8.211.195.17"
 ECS_USER="root"
-REMOTE_PATH="/var/www/frontend"
+REMOTE_PATH="/opt/accountant-crm/out"
 SSH_KEY="${SSH_KEY:-$HOME/.ssh/id_rsa}"
 
 # Environment-specific settings

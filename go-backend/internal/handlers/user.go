@@ -1,7 +1,6 @@
 package handlers
 
 import (
-	"context"
 	"net/http"
 	"time"
 
@@ -72,17 +71,37 @@ func (h *UserHandler) List(c *gin.Context) {
 	role, _ := middleware.GetRole(c)
 	userTenantID, _ := middleware.GetTenantID(c)
 
-	var users []User
+	users := []User{}
 
 	if role == "super_admin" {
-		// Super admins can see all users
-		rows, err := h.db.Query(ctx, `
-			SELECT id, tenant_id, name, email, role, status, avatar_url, phone,
-			       specialism, notes, last_login_at, created_at, updated_at
-			FROM users
-			WHERE deleted_at IS NULL
-			ORDER BY created_at DESC
-		`)
+		// Super admins can see all users; use SuperAdminTransaction so RLS
+		// policies see app.role='super_admin' and allow cross-tenant reads.
+		err := h.db.SuperAdminTransaction(ctx, func(tx pgx.Tx) error {
+			rows, err := tx.Query(ctx, `
+				SELECT id, tenant_id, name, email, role, status, avatar_url, phone,
+				       specialism, notes, last_login_at, created_at, updated_at
+				FROM users
+				WHERE deleted_at IS NULL
+				ORDER BY created_at DESC
+			`)
+			if err != nil {
+				return err
+			}
+			defer rows.Close()
+
+			for rows.Next() {
+				var u User
+				if err := rows.Scan(
+					&u.ID, &u.TenantID, &u.Name, &u.Email, &u.Role, &u.Status,
+					&u.AvatarURL, &u.Phone, &u.Specialism, &u.Notes,
+					&u.LastLoginAt, &u.CreatedAt, &u.UpdatedAt,
+				); err != nil {
+					return err
+				}
+				users = append(users, u)
+			}
+			return rows.Err()
+		})
 		if err != nil {
 			c.JSON(http.StatusInternalServerError, gin.H{
 				"error":   "database_error",
@@ -90,55 +109,43 @@ func (h *UserHandler) List(c *gin.Context) {
 			})
 			return
 		}
-		defer rows.Close()
-
-		for rows.Next() {
-			var u User
-			if err := rows.Scan(
-				&u.ID, &u.TenantID, &u.Name, &u.Email, &u.Role, &u.Status,
-				&u.AvatarURL, &u.Phone, &u.Specialism, &u.Notes,
-				&u.LastLoginAt, &u.CreatedAt, &u.UpdatedAt,
-			); err != nil {
-				c.JSON(http.StatusInternalServerError, gin.H{
-					"error":   "scan_error",
-					"message": "Failed to parse user data",
-				})
-				return
-			}
-			users = append(users, u)
-		}
 	} else {
-		// Others only see users in their tenant
-		rows, err := h.db.Query(ctx, `
+		// Others only see users in their tenant - use TenantDB for RLS
+		tenantDB, ok := middleware.GetTenantDB(c)
+		if !ok {
+			c.JSON(http.StatusInternalServerError, gin.H{
+				"error":   "internal_error",
+				"message": "Database context not available",
+			})
+			return
+		}
+
+		err := tenantDB.Query(c, `
 			SELECT id, tenant_id, name, email, role, status, avatar_url, phone,
 			       specialism, notes, last_login_at, created_at, updated_at
 			FROM users
 			WHERE tenant_id = $1 AND deleted_at IS NULL
 			ORDER BY created_at DESC
-		`, userTenantID)
+		`, []interface{}{userTenantID}, func(rows pgx.Rows) error {
+			for rows.Next() {
+				var u User
+				if err := rows.Scan(
+					&u.ID, &u.TenantID, &u.Name, &u.Email, &u.Role, &u.Status,
+					&u.AvatarURL, &u.Phone, &u.Specialism, &u.Notes,
+					&u.LastLoginAt, &u.CreatedAt, &u.UpdatedAt,
+				); err != nil {
+					return err
+				}
+				users = append(users, u)
+			}
+			return nil
+		})
 		if err != nil {
 			c.JSON(http.StatusInternalServerError, gin.H{
 				"error":   "database_error",
 				"message": "Failed to fetch users",
 			})
 			return
-		}
-		defer rows.Close()
-
-		for rows.Next() {
-			var u User
-			if err := rows.Scan(
-				&u.ID, &u.TenantID, &u.Name, &u.Email, &u.Role, &u.Status,
-				&u.AvatarURL, &u.Phone, &u.Specialism, &u.Notes,
-				&u.LastLoginAt, &u.CreatedAt, &u.UpdatedAt,
-			); err != nil {
-				c.JSON(http.StatusInternalServerError, gin.H{
-					"error":   "scan_error",
-					"message": "Failed to parse user data",
-				})
-				return
-			}
-			users = append(users, u)
 		}
 	}
 
@@ -150,7 +157,6 @@ func (h *UserHandler) List(c *gin.Context) {
 
 // Create creates a new user (super_admin or tenant_admin)
 func (h *UserHandler) Create(c *gin.Context) {
-	ctx := c.Request.Context()
 	role, _ := middleware.GetRole(c)
 	userTenantID, _ := middleware.GetTenantID(c)
 
@@ -190,11 +196,21 @@ func (h *UserHandler) Create(c *gin.Context) {
 		return
 	}
 
-	// Validate tenant exists
+	// Get TenantDB for RLS-protected queries
+	tenantDB, ok := middleware.GetTenantDB(c)
+	if !ok {
+		c.JSON(http.StatusInternalServerError, gin.H{
+			"error":   "internal_error",
+			"message": "Database context not available",
+		})
+		return
+	}
+
+	// Validate tenant exists (uses TenantDB so RLS context is set)
 	var tenantExists bool
-	err = h.db.QueryRow(ctx, `
+	err = tenantDB.QueryRowScan(c, []interface{}{&tenantExists}, `
 		SELECT EXISTS(SELECT 1 FROM tenants WHERE id = $1 AND deleted_at IS NULL)
-	`, targetTenantID).Scan(&tenantExists)
+	`, targetTenantID)
 	if err != nil || !tenantExists {
 		c.JSON(http.StatusBadRequest, gin.H{
 			"error":   "invalid_tenant",
@@ -205,9 +221,9 @@ func (h *UserHandler) Create(c *gin.Context) {
 
 	// Check if email already exists in that tenant
 	var emailExists bool
-	err = h.db.QueryRow(ctx, `
+	err = tenantDB.QueryRowScan(c, []interface{}{&emailExists}, `
 		SELECT EXISTS(SELECT 1 FROM users WHERE email = $1 AND tenant_id = $2 AND deleted_at IS NULL)
-	`, req.Email, targetTenantID).Scan(&emailExists)
+	`, req.Email, targetTenantID)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{
 			"error":   "database_error",
@@ -235,7 +251,7 @@ func (h *UserHandler) Create(c *gin.Context) {
 
 	// Create user
 	id := uuid.New()
-	_, err = h.db.Exec(ctx, `
+	_, err = tenantDB.Exec(c, `
 		INSERT INTO users (id, tenant_id, name, email, password, role, status,
 		                   phone, specialism, notes, created_at, updated_at)
 		VALUES ($1, $2, $3, $4, $5, $6, 'active', $7, $8, $9, NOW(), NOW())
@@ -251,7 +267,7 @@ func (h *UserHandler) Create(c *gin.Context) {
 	}
 
 	// Fetch the created user
-	user, err := h.getUserByID(ctx, id)
+	user, err := h.getUserByID(c, id)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{
 			"error":   "fetch_error",
@@ -268,7 +284,6 @@ func (h *UserHandler) Create(c *gin.Context) {
 
 // Get retrieves a user by ID
 func (h *UserHandler) Get(c *gin.Context) {
-	ctx := c.Request.Context()
 	id, err := uuid.Parse(c.Param("id"))
 	if err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{
@@ -283,7 +298,7 @@ func (h *UserHandler) Get(c *gin.Context) {
 	userTenantID, _ := middleware.GetTenantID(c)
 	currentUserID, _ := middleware.GetUserID(c)
 
-	user, err := h.getUserByID(ctx, id)
+	user, err := h.getUserByID(c, id)
 	if err != nil {
 		if err == pgx.ErrNoRows {
 			c.JSON(http.StatusNotFound, gin.H{
@@ -321,7 +336,6 @@ func (h *UserHandler) Get(c *gin.Context) {
 
 // Update updates a user
 func (h *UserHandler) Update(c *gin.Context) {
-	ctx := c.Request.Context()
 	id, err := uuid.Parse(c.Param("id"))
 	if err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{
@@ -336,7 +350,7 @@ func (h *UserHandler) Update(c *gin.Context) {
 	currentUserID, _ := middleware.GetUserID(c)
 
 	// Fetch target user to check permissions
-	targetUser, err := h.getUserByID(ctx, id)
+	targetUser, err := h.getUserByID(c, id)
 	if err != nil {
 		if err == pgx.ErrNoRows {
 			c.JSON(http.StatusNotFound, gin.H{
@@ -442,8 +456,18 @@ func (h *UserHandler) Update(c *gin.Context) {
 		hashedPassword = &hashed
 	}
 
+	// Get TenantDB for RLS-protected queries
+	tenantDB, ok := middleware.GetTenantDB(c)
+	if !ok {
+		c.JSON(http.StatusInternalServerError, gin.H{
+			"error":   "internal_error",
+			"message": "Database context not available",
+		})
+		return
+	}
+
 	// Update user
-	_, err = h.db.Exec(ctx, `
+	_, err = tenantDB.Exec(c, `
 		UPDATE users SET
 			name = COALESCE($2, name),
 			email = COALESCE($3, email),
@@ -468,7 +492,7 @@ func (h *UserHandler) Update(c *gin.Context) {
 	}
 
 	// Fetch the updated user
-	user, err := h.getUserByID(ctx, id)
+	user, err := h.getUserByID(c, id)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{
 			"error":   "fetch_error",
@@ -485,7 +509,6 @@ func (h *UserHandler) Update(c *gin.Context) {
 
 // Delete soft-deletes a user (super_admin or tenant_admin)
 func (h *UserHandler) Delete(c *gin.Context) {
-	ctx := c.Request.Context()
 	id, err := uuid.Parse(c.Param("id"))
 	if err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{
@@ -509,7 +532,7 @@ func (h *UserHandler) Delete(c *gin.Context) {
 	}
 
 	// Fetch target user
-	targetUser, err := h.getUserByID(ctx, id)
+	targetUser, err := h.getUserByID(c, id)
 	if err != nil {
 		if err == pgx.ErrNoRows {
 			c.JSON(http.StatusNotFound, gin.H{
@@ -553,8 +576,18 @@ func (h *UserHandler) Delete(c *gin.Context) {
 		}
 	}
 
+	// Get TenantDB for RLS-protected queries
+	tenantDB, ok := middleware.GetTenantDB(c)
+	if !ok {
+		c.JSON(http.StatusInternalServerError, gin.H{
+			"error":   "internal_error",
+			"message": "Database context not available",
+		})
+		return
+	}
+
 	// Soft delete the user
-	_, err = h.db.Exec(ctx, `
+	_, err = tenantDB.Exec(c, `
 		UPDATE users SET deleted_at = NOW(), status = 'inactive', updated_at = NOW()
 		WHERE id = $1 AND deleted_at IS NULL
 	`, id)
@@ -571,19 +604,24 @@ func (h *UserHandler) Delete(c *gin.Context) {
 	})
 }
 
-// getUserByID is a helper function to fetch a user by ID
-func (h *UserHandler) getUserByID(ctx context.Context, id uuid.UUID) (*User, error) {
+// getUserByID is a helper function to fetch a user by ID using TenantDB for RLS
+func (h *UserHandler) getUserByID(c *gin.Context, id uuid.UUID) (*User, error) {
+	tenantDB, ok := middleware.GetTenantDB(c)
+	if !ok {
+		return nil, pgx.ErrNoRows // Return error if TenantDB not available
+	}
+
 	var u User
-	err := h.db.QueryRow(ctx, `
+	err := tenantDB.QueryRowScan(c, []interface{}{
+		&u.ID, &u.TenantID, &u.Name, &u.Email, &u.Role, &u.Status,
+		&u.AvatarURL, &u.Phone, &u.Specialism, &u.Notes,
+		&u.LastLoginAt, &u.CreatedAt, &u.UpdatedAt,
+	}, `
 		SELECT id, tenant_id, name, email, role, status, avatar_url, phone,
 		       specialism, notes, last_login_at, created_at, updated_at
 		FROM users
 		WHERE id = $1 AND deleted_at IS NULL
-	`, id).Scan(
-		&u.ID, &u.TenantID, &u.Name, &u.Email, &u.Role, &u.Status,
-		&u.AvatarURL, &u.Phone, &u.Specialism, &u.Notes,
-		&u.LastLoginAt, &u.CreatedAt, &u.UpdatedAt,
-	)
+	`, id)
 	if err != nil {
 		return nil, err
 	}

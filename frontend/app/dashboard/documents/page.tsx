@@ -8,7 +8,7 @@ import { SkeletonTable, useToast } from '@/components';
 
 export default function DocumentsPage() {
   const { user } = useAuth();
-  const { toast } = useToast();
+  const toast = useToast();
   const [documents, setDocuments] = useState<Document[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);

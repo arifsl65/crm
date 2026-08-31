@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/gin-gonic/gin"
+	"github.com/jackc/pgx/v5"
 	"github.com/rs/zerolog/log"
 
 	"github.com/accountant-crm/go-backend/internal/database"
@@ -94,38 +95,40 @@ func DynamicCORS(cfg CORSConfig) gin.HandlerFunc {
 			origins[origin] = true
 		}
 
-		// Query tenant domains
+		// Query tenant domains (super_admin to bypass RLS since CORS runs before auth)
 		query := `
 			SELECT domain, custom_domain
 			FROM tenants
 			WHERE is_active = true AND deleted_at IS NULL
 		`
-		rows, err := cfg.DB.Query(ctx, query)
+		err := cfg.DB.SuperAdminTransaction(ctx, func(tx pgx.Tx) error {
+			rows, err := tx.Query(ctx, query)
+			if err != nil {
+				return err
+			}
+			defer rows.Close()
+
+			for rows.Next() {
+				var domain string
+				var customDomain *string
+				if err := rows.Scan(&domain, &customDomain); err != nil {
+					log.Error().Err(err).Msg("Failed to scan tenant domain")
+					continue
+				}
+
+				// Add tenant domain as HTTPS origin
+				addDomainOrigins(origins, domain)
+
+				// Add custom domain if set
+				if customDomain != nil && *customDomain != "" {
+					addDomainOrigins(origins, *customDomain)
+				}
+			}
+
+			return rows.Err()
+		})
 		if err != nil {
 			log.Error().Err(err).Msg("Failed to fetch tenant domains for CORS")
-			return
-		}
-		defer rows.Close()
-
-		for rows.Next() {
-			var domain string
-			var customDomain *string
-			if err := rows.Scan(&domain, &customDomain); err != nil {
-				log.Error().Err(err).Msg("Failed to scan tenant domain")
-				continue
-			}
-
-			// Add tenant domain as HTTPS origin
-			addDomainOrigins(origins, domain)
-
-			// Add custom domain if set
-			if customDomain != nil && *customDomain != "" {
-				addDomainOrigins(origins, *customDomain)
-			}
-		}
-
-		if err := rows.Err(); err != nil {
-			log.Error().Err(err).Msg("Error iterating tenant domains")
 			return
 		}
 

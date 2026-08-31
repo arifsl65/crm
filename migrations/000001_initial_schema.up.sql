@@ -1134,16 +1134,16 @@ CREATE POLICY tenants_policy ON tenants FOR ALL
     );
 
 -- ============================================================================
--- SCHEMA VERSION
+-- SCHEMA MIGRATIONS
 -- ============================================================================
 
-CREATE TABLE IF NOT EXISTS schema_version (
-    version INTEGER PRIMARY KEY,
-    description TEXT,
-    applied_at TIMESTAMP DEFAULT NOW()
+CREATE TABLE IF NOT EXISTS schema_migrations (
+    version BIGINT PRIMARY KEY,
+    dirty BOOLEAN NOT NULL DEFAULT false
 );
 
-INSERT INTO schema_version (version, description) VALUES (1, 'Initial schema - 36 PostgreSQL tables');
+INSERT INTO schema_migrations (version, dirty) VALUES (1, false)
+ON CONFLICT (version) DO UPDATE SET dirty = false;
 
 -- ============================================================================
 -- DONE

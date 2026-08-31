@@ -42,5 +42,5 @@ ALTER TABLE document_types
     DROP COLUMN IF EXISTS sort_order,
     DROP COLUMN IF EXISTS updated_at;
 
--- Remove schema version
-DELETE FROM schema_version WHERE version = 6;
+-- Remove schema migration
+DELETE FROM schema_migrations WHERE version = 6;

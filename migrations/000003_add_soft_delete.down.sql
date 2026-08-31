@@ -13,5 +13,5 @@ DROP INDEX IF EXISTS idx_clients_deleted;
 ALTER TABLE documents DROP COLUMN IF EXISTS deleted_at;
 ALTER TABLE clients DROP COLUMN IF EXISTS deleted_at;
 
--- Revert schema version
-UPDATE schema_version SET version = 2, description = 'RLS policies added', applied_at = CURRENT_TIMESTAMP WHERE version = 3;
+-- Revert schema migration
+DELETE FROM schema_migrations WHERE version = 3;

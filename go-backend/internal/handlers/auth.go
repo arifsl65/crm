@@ -27,24 +27,26 @@ import (
 )
 
 type AuthHandler struct {
-	db          *database.Pool
-	jwt         *auth.JWTManager
-	session     *auth.SessionManager
-	email       *email.Client
-	frontendURL string
-	rateLimiter *middleware.AuthRateLimiter
-	audit       *audit.Logger
+	db             *database.Pool
+	jwt            *auth.JWTManager
+	session        *auth.SessionManager
+	email          *email.Client
+	frontendURL    string
+	rateLimiter    *middleware.AuthRateLimiter
+	audit          *audit.Logger
+	tokenBlocklist middleware.TokenBlocklist
 }
 
-func NewAuthHandler(db *database.Pool, jwt *auth.JWTManager, session *auth.SessionManager, emailClient *email.Client, frontendURL string, rateLimiter *middleware.AuthRateLimiter, auditLogger *audit.Logger) *AuthHandler {
+func NewAuthHandler(db *database.Pool, jwt *auth.JWTManager, session *auth.SessionManager, emailClient *email.Client, frontendURL string, rateLimiter *middleware.AuthRateLimiter, auditLogger *audit.Logger, tokenBlocklist middleware.TokenBlocklist) *AuthHandler {
 	return &AuthHandler{
-		db:          db,
-		jwt:         jwt,
-		session:     session,
-		email:       emailClient,
-		frontendURL: frontendURL,
-		rateLimiter: rateLimiter,
-		audit:       auditLogger,
+		db:             db,
+		jwt:            jwt,
+		session:        session,
+		email:          emailClient,
+		frontendURL:    frontendURL,
+		rateLimiter:    rateLimiter,
+		audit:          auditLogger,
+		tokenBlocklist: tokenBlocklist,
 	}
 }
 
@@ -408,6 +410,19 @@ func (h *AuthHandler) Logout(c *gin.Context) {
 	ipAddress := c.ClientIP()
 	userAgent := c.Request.UserAgent()
 
+	// Blocklist the current access token so it cannot be reused after logout.
+	authHeader := c.GetHeader("Authorization")
+	if parts := strings.SplitN(authHeader, " ", 2); len(parts) == 2 && strings.EqualFold(parts[0], "bearer") {
+		if claims, err := h.jwt.ValidateToken(parts[1]); err == nil && claims.ID != "" {
+			ttl := time.Until(claims.ExpiresAt.Time)
+			if ttl > 0 && h.tokenBlocklist != nil {
+				if err := h.tokenBlocklist.BlockToken(ctx, claims.ID, ttl); err != nil {
+					log.Warn().Err(err).Str("jti", claims.ID).Msg("Failed to blocklist access token")
+				}
+			}
+		}
+	}
+
 	if req.RevokeAll {
 		// Revoke all user sessions
 		if err := h.session.RevokeAllUserTokens(ctx, userID); err != nil {
@@ -447,55 +462,77 @@ type userRecord struct {
 func (h *AuthHandler) getUserByEmail(ctx context.Context, email string, tenantID *uuid.UUID) (*userRecord, error) {
 	email = strings.ToLower(email)
 
-	if tenantID != nil {
-		// Tenant-scoped lookup
+	var result *userRecord
+	var qErr error
+	if err := h.db.SuperAdminTransaction(ctx, func(tx pgx.Tx) error {
+		if tenantID != nil {
+			// Tenant-scoped lookup
+			query := `
+				SELECT id, tenant_id, email, password, name, role,
+				       failed_login_attempts, locked_until
+				FROM users
+				WHERE email = $1 AND tenant_id = $2 AND deleted_at IS NULL
+			`
+			var user userRecord
+			qErr = tx.QueryRow(ctx, query, email, *tenantID).Scan(
+				&user.ID, &user.TenantID, &user.Email, &user.Password,
+				&user.Name, &user.Role,
+				&user.FailedLoginAttempts, &user.LockedUntil,
+			)
+			if qErr == nil {
+				result = &user
+			}
+			return nil
+		}
+
+		// No tenant specified - check how many tenants have this email
+		countQuery := `SELECT COUNT(DISTINCT tenant_id) FROM users WHERE email = $1 AND deleted_at IS NULL`
+		var count int
+		qErr = tx.QueryRow(ctx, countQuery, email).Scan(&count)
+		if qErr != nil {
+			return nil
+		}
+
+		if count > 1 {
+			qErr = errors.New("multiple_tenants")
+			return nil
+		}
+
+		// Single tenant or super_admin - proceed with lookup
 		query := `
 			SELECT id, tenant_id, email, password, name, role,
 			       failed_login_attempts, locked_until
 			FROM users
-			WHERE email = $1 AND tenant_id = $2 AND deleted_at IS NULL
+			WHERE email = $1 AND deleted_at IS NULL
 		`
 		var user userRecord
-		err := h.db.QueryRow(ctx, query, email, *tenantID).Scan(
+		qErr = tx.QueryRow(ctx, query, email).Scan(
 			&user.ID, &user.TenantID, &user.Email, &user.Password,
 			&user.Name, &user.Role,
 			&user.FailedLoginAttempts, &user.LockedUntil,
 		)
-		return &user, err
-	}
-
-	// No tenant specified - check how many tenants have this email
-	countQuery := `SELECT COUNT(DISTINCT tenant_id) FROM users WHERE email = $1 AND deleted_at IS NULL`
-	var count int
-	if err := h.db.QueryRow(ctx, countQuery, email).Scan(&count); err != nil {
+		if qErr == nil {
+			result = &user
+		}
+		return nil
+	}); err != nil {
 		return nil, err
 	}
 
-	if count > 1 {
-		return nil, errors.New("multiple_tenants")
-	}
-
-	// Single tenant or super_admin - proceed with lookup
-	query := `
-		SELECT id, tenant_id, email, password, name, role,
-		       failed_login_attempts, locked_until
-		FROM users
-		WHERE email = $1 AND deleted_at IS NULL
-	`
-	var user userRecord
-	err := h.db.QueryRow(ctx, query, email).Scan(
-		&user.ID, &user.TenantID, &user.Email, &user.Password,
-		&user.Name, &user.Role,
-		&user.FailedLoginAttempts, &user.LockedUntil,
-	)
-	return &user, err
+	return result, qErr
 }
 
 func (h *AuthHandler) emailExists(ctx context.Context, email string) (bool, error) {
 	query := `SELECT EXISTS(SELECT 1 FROM users WHERE email = $1 AND deleted_at IS NULL)`
 	var exists bool
-	err := h.db.QueryRow(ctx, query, strings.ToLower(email)).Scan(&exists)
-	return exists, err
+	var qErr error
+	if err := h.db.SuperAdminTransaction(ctx, func(tx pgx.Tx) error {
+		qErr = tx.QueryRow(ctx, query, strings.ToLower(email)).Scan(&exists)
+		return nil
+	}); err != nil {
+		return false, err
+	}
+	return exists, qErr
 }
 
 func (h *AuthHandler) createUser(ctx context.Context, id, tenantID uuid.UUID, email, password, name string) error {
@@ -503,8 +540,10 @@ func (h *AuthHandler) createUser(ctx context.Context, id, tenantID uuid.UUID, em
 		INSERT INTO users (id, tenant_id, email, password, name, role, created_at, updated_at)
 		VALUES ($1, $2, $3, $4, $5, 'staff', NOW(), NOW())
 	`
-	_, err := h.db.Exec(ctx, query, id, tenantID, strings.ToLower(email), password, name)
-	return err
+	return h.db.SuperAdminTransaction(ctx, func(tx pgx.Tx) error {
+		_, err := tx.Exec(ctx, query, id, tenantID, strings.ToLower(email), password, name)
+		return err
+	})
 }
 
 func (h *AuthHandler) incrementFailedAttempts(ctx context.Context, userID uuid.UUID) error {
@@ -528,8 +567,10 @@ func (h *AuthHandler) incrementFailedAttempts(ctx context.Context, userID uuid.U
 		    updated_at = NOW()
 		WHERE id = $1
 	`
-	_, err := h.db.Exec(ctx, query, userID)
-	return err
+	return h.db.SuperAdminTransaction(ctx, func(tx pgx.Tx) error {
+		_, err := tx.Exec(ctx, query, userID)
+		return err
+	})
 }
 
 func (h *AuthHandler) resetFailedAttempts(ctx context.Context, userID uuid.UUID) error {
@@ -538,14 +579,18 @@ func (h *AuthHandler) resetFailedAttempts(ctx context.Context, userID uuid.UUID)
 		SET failed_login_attempts = 0, locked_until = NULL, updated_at = NOW()
 		WHERE id = $1
 	`
-	_, err := h.db.Exec(ctx, query, userID)
-	return err
+	return h.db.SuperAdminTransaction(ctx, func(tx pgx.Tx) error {
+		_, err := tx.Exec(ctx, query, userID)
+		return err
+	})
 }
 
 func (h *AuthHandler) updateLastLogin(ctx context.Context, userID uuid.UUID) error {
 	query := `UPDATE users SET last_login_at = NOW(), updated_at = NOW() WHERE id = $1`
-	_, err := h.db.Exec(ctx, query, userID)
-	return err
+	return h.db.SuperAdminTransaction(ctx, func(tx pgx.Tx) error {
+		_, err := tx.Exec(ctx, query, userID)
+		return err
+	})
 }
 
 func (h *AuthHandler) getTenantByDomain(ctx context.Context, domain string) (uuid.UUID, error) {
@@ -554,8 +599,14 @@ func (h *AuthHandler) getTenantByDomain(ctx context.Context, domain string) (uui
 		WHERE (domain = $1 OR custom_domain = $1) AND is_active = true AND deleted_at IS NULL
 	`
 	var tenantID uuid.UUID
-	err := h.db.QueryRow(ctx, query, strings.ToLower(domain)).Scan(&tenantID)
-	return tenantID, err
+	var qErr error
+	if err := h.db.SuperAdminTransaction(ctx, func(tx pgx.Tx) error {
+		qErr = tx.QueryRow(ctx, query, strings.ToLower(domain)).Scan(&tenantID)
+		return nil
+	}); err != nil {
+		return uuid.Nil, err
+	}
+	return tenantID, qErr
 }
 
 // ============================================================================
@@ -705,14 +756,22 @@ type userRecordForReset struct {
 func (h *AuthHandler) getUserByEmailForReset(ctx context.Context, email string) (*userRecordForReset, error) {
 	query := `SELECT id, email, name FROM users WHERE email = $1 AND deleted_at IS NULL`
 	var user userRecordForReset
-	err := h.db.QueryRow(ctx, query, email).Scan(&user.ID, &user.Email, &user.Name)
-	return &user, err
+	var qErr error
+	if err := h.db.SuperAdminTransaction(ctx, func(tx pgx.Tx) error {
+		qErr = tx.QueryRow(ctx, query, email).Scan(&user.ID, &user.Email, &user.Name)
+		return nil
+	}); err != nil {
+		return nil, err
+	}
+	return &user, qErr
 }
 
 func (h *AuthHandler) storeResetToken(ctx context.Context, userID uuid.UUID, token string, expiresAt time.Time) error {
 	query := `UPDATE users SET reset_token = $1, reset_token_expires = $2, updated_at = NOW() WHERE id = $3`
-	_, err := h.db.Exec(ctx, query, token, expiresAt, userID)
-	return err
+	return h.db.SuperAdminTransaction(ctx, func(tx pgx.Tx) error {
+		_, err := tx.Exec(ctx, query, token, expiresAt, userID)
+		return err
+	})
 }
 
 func (h *AuthHandler) validateResetToken(ctx context.Context, token string) (uuid.UUID, error) {
@@ -723,8 +782,14 @@ func (h *AuthHandler) validateResetToken(ctx context.Context, token string) (uui
 		AND deleted_at IS NULL
 	`
 	var userID uuid.UUID
-	err := h.db.QueryRow(ctx, query, token).Scan(&userID)
-	if err != nil {
+	var qErr error
+	if err := h.db.SuperAdminTransaction(ctx, func(tx pgx.Tx) error {
+		qErr = tx.QueryRow(ctx, query, token).Scan(&userID)
+		return nil
+	}); err != nil {
+		return uuid.Nil, err
+	}
+	if qErr != nil {
 		return uuid.Nil, errors.New("invalid or expired token")
 	}
 	return userID, nil
@@ -737,8 +802,10 @@ func (h *AuthHandler) updatePasswordAndClearToken(ctx context.Context, userID uu
 		    failed_login_attempts = 0, locked_until = NULL, updated_at = NOW()
 		WHERE id = $2
 	`
-	_, err := h.db.Exec(ctx, query, passwordHash, userID)
-	return err
+	return h.db.SuperAdminTransaction(ctx, func(tx pgx.Tx) error {
+		_, err := tx.Exec(ctx, query, passwordHash, userID)
+		return err
+	})
 }
 
 // ============================================================================
@@ -749,7 +816,15 @@ func (h *AuthHandler) updatePasswordAndClearToken(ctx context.Context, userID uu
 // GET /api/v1/auth/me
 func (h *AuthHandler) GetMe(c *gin.Context) {
 	userID, _ := middleware.GetUserID(c)
-	ctx := c.Request.Context()
+
+	tenantDB, ok := middleware.GetTenantDB(c)
+	if !ok {
+		c.JSON(http.StatusInternalServerError, gin.H{
+			"error":   "internal_error",
+			"message": "Database context not available",
+		})
+		return
+	}
 
 	query := `
 		SELECT id, tenant_id, email, name, role, phone, avatar_url, preferences,
@@ -770,11 +845,11 @@ func (h *AuthHandler) GetMe(c *gin.Context) {
 		CreatedAt   time.Time
 	}
 
-	err := h.db.QueryRow(ctx, query, userID).Scan(
+	err := tenantDB.QueryRowScan(c, []interface{}{
 		&user.ID, &user.TenantID, &user.Email, &user.Name, &user.Role,
 		&user.Phone, &user.AvatarURL, &user.Preferences,
 		&user.LastLoginAt, &user.CreatedAt,
-	)
+	}, query, userID)
 	if err != nil {
 		c.JSON(http.StatusNotFound, gin.H{
 			"error":   "not_found",
@@ -879,7 +954,10 @@ func (h *AuthHandler) UpdateMe(c *gin.Context) {
 	query := fmt.Sprintf("UPDATE users SET %s WHERE id = $%d",
 		strings.Join(setClauses, ", "), argNum)
 
-	_, err := h.db.Exec(ctx, query, args...)
+	err := h.db.SuperAdminTransaction(ctx, func(tx pgx.Tx) error {
+		_, err := tx.Exec(ctx, query, args...)
+		return err
+	})
 	if err != nil {
 		log.Error().Err(err).Str("user_id", userID.String()).Msg("Failed to update profile")
 		c.JSON(http.StatusInternalServerError, gin.H{
@@ -914,7 +992,9 @@ func (h *AuthHandler) ChangePassword(c *gin.Context) {
 
 	// Get current password hash
 	var currentHash string
-	err := h.db.QueryRow(ctx, `SELECT password FROM users WHERE id = $1`, userID).Scan(&currentHash)
+	err := h.db.SuperAdminTransaction(ctx, func(tx pgx.Tx) error {
+		return tx.QueryRow(ctx, `SELECT password FROM users WHERE id = $1`, userID).Scan(&currentHash)
+	})
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{
 			"error":   "internal_error",
@@ -944,7 +1024,10 @@ func (h *AuthHandler) ChangePassword(c *gin.Context) {
 	}
 
 	// Update password
-	_, err = h.db.Exec(ctx, `UPDATE users SET password = $1, updated_at = NOW() WHERE id = $2`, newHash, userID)
+	err = h.db.SuperAdminTransaction(ctx, func(tx pgx.Tx) error {
+		_, err := tx.Exec(ctx, `UPDATE users SET password = $1, updated_at = NOW() WHERE id = $2`, newHash, userID)
+		return err
+	})
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{
 			"error":   "internal_error",
@@ -1049,7 +1132,9 @@ func (h *AuthHandler) SendMagicLink(c *gin.Context) {
 
 	// Get user's tenant_id
 	var tenantID uuid.UUID
-	err = h.db.QueryRow(ctx, `SELECT tenant_id FROM users WHERE id = $1`, user.ID).Scan(&tenantID)
+	err = h.db.SuperAdminTransaction(ctx, func(tx pgx.Tx) error {
+		return tx.QueryRow(ctx, `SELECT tenant_id FROM users WHERE id = $1`, user.ID).Scan(&tenantID)
+	})
 	if err != nil {
 		log.Error().Err(err).Msg("Failed to get user tenant")
 		return
@@ -1120,9 +1205,11 @@ func (h *AuthHandler) VerifyMagicLink(c *gin.Context) {
 
 	// Get user info for response
 	var user userRecord
-	err = h.db.QueryRow(ctx, `
-		SELECT id, tenant_id, email, name, role FROM users WHERE id = $1 AND deleted_at IS NULL
-	`, userID).Scan(&user.ID, &user.TenantID, &user.Email, &user.Name, &user.Role)
+	err = h.db.SuperAdminTransaction(ctx, func(tx pgx.Tx) error {
+		return tx.QueryRow(ctx, `
+			SELECT id, tenant_id, email, name, role FROM users WHERE id = $1 AND deleted_at IS NULL
+		`, userID).Scan(&user.ID, &user.TenantID, &user.Email, &user.Name, &user.Role)
+	})
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{
 			"error":   "internal_error",
@@ -1183,8 +1270,10 @@ func (h *AuthHandler) storeMagicLinkToken(ctx context.Context, tenantID, userID 
 		INSERT INTO magic_link_tokens (id, tenant_id, user_id, token_hash, expires_at, ip_address)
 		VALUES ($1, $2, $3, $4, $5, $6)
 	`
-	_, err := h.db.Exec(ctx, query, uuid.New(), tenantID, userID, tokenHash, expiresAt, ipAddress)
-	return err
+	return h.db.SuperAdminTransaction(ctx, func(tx pgx.Tx) error {
+		_, err := tx.Exec(ctx, query, uuid.New(), tenantID, userID, tokenHash, expiresAt, ipAddress)
+		return err
+	})
 }
 
 func (h *AuthHandler) validateMagicLinkToken(ctx context.Context, tokenHash string) (uuid.UUID, uuid.UUID, error) {
@@ -1195,8 +1284,14 @@ func (h *AuthHandler) validateMagicLinkToken(ctx context.Context, tokenHash stri
 		AND used_at IS NULL
 	`
 	var userID, tenantID uuid.UUID
-	err := h.db.QueryRow(ctx, query, tokenHash).Scan(&userID, &tenantID)
-	if err != nil {
+	var qErr error
+	if err := h.db.SuperAdminTransaction(ctx, func(tx pgx.Tx) error {
+		qErr = tx.QueryRow(ctx, query, tokenHash).Scan(&userID, &tenantID)
+		return nil
+	}); err != nil {
+		return uuid.Nil, uuid.Nil, err
+	}
+	if qErr != nil {
 		return uuid.Nil, uuid.Nil, errors.New("invalid or expired token")
 	}
 	return userID, tenantID, nil
@@ -1204,8 +1299,10 @@ func (h *AuthHandler) validateMagicLinkToken(ctx context.Context, tokenHash stri
 
 func (h *AuthHandler) markMagicLinkTokenUsed(ctx context.Context, tokenHash string) error {
 	query := `UPDATE magic_link_tokens SET used_at = NOW() WHERE token_hash = $1`
-	_, err := h.db.Exec(ctx, query, tokenHash)
-	return err
+	return h.db.SuperAdminTransaction(ctx, func(tx pgx.Tx) error {
+		_, err := tx.Exec(ctx, query, tokenHash)
+		return err
+	})
 }
 
 // ============================================================================
@@ -1226,7 +1323,9 @@ func (h *AuthHandler) Setup2FA(c *gin.Context) {
 
 	// Check if 2FA is already enabled
 	var existingSecret *string
-	err := h.db.QueryRow(ctx, `SELECT totp_secret FROM users WHERE id = $1`, userID).Scan(&existingSecret)
+	err := h.db.SuperAdminTransaction(ctx, func(tx pgx.Tx) error {
+		return tx.QueryRow(ctx, `SELECT totp_secret FROM users WHERE id = $1`, userID).Scan(&existingSecret)
+	})
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{
 			"error":   "internal_error",
@@ -1245,7 +1344,9 @@ func (h *AuthHandler) Setup2FA(c *gin.Context) {
 
 	// Get user email for TOTP account name
 	var email string
-	err = h.db.QueryRow(ctx, `SELECT email FROM users WHERE id = $1`, userID).Scan(&email)
+	err = h.db.SuperAdminTransaction(ctx, func(tx pgx.Tx) error {
+		return tx.QueryRow(ctx, `SELECT email FROM users WHERE id = $1`, userID).Scan(&email)
+	})
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{
 			"error":   "internal_error",
@@ -1268,7 +1369,10 @@ func (h *AuthHandler) Setup2FA(c *gin.Context) {
 	// Store the secret temporarily (user must verify before it's active)
 	// We'll store it with a "pending_" prefix until verified
 	pendingSecret := "pending_" + secret
-	_, err = h.db.Exec(ctx, `UPDATE users SET totp_secret = $1, updated_at = NOW() WHERE id = $2`, pendingSecret, userID)
+	err = h.db.SuperAdminTransaction(ctx, func(tx pgx.Tx) error {
+		_, err := tx.Exec(ctx, `UPDATE users SET totp_secret = $1, updated_at = NOW() WHERE id = $2`, pendingSecret, userID)
+		return err
+	})
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{
 			"error":   "internal_error",
@@ -1321,7 +1425,9 @@ func (h *AuthHandler) Verify2FA(c *gin.Context) {
 
 	// Get user's TOTP secret
 	var totpSecret *string
-	err := h.db.QueryRow(ctx, `SELECT totp_secret FROM users WHERE id = $1`, userID).Scan(&totpSecret)
+	err := h.db.SuperAdminTransaction(ctx, func(tx pgx.Tx) error {
+		return tx.QueryRow(ctx, `SELECT totp_secret FROM users WHERE id = $1`, userID).Scan(&totpSecret)
+	})
 	if err != nil || totpSecret == nil || *totpSecret == "" {
 		c.JSON(http.StatusBadRequest, gin.H{
 			"error":   "2fa_not_setup",
@@ -1346,7 +1452,10 @@ func (h *AuthHandler) Verify2FA(c *gin.Context) {
 
 	// If pending, activate 2FA
 	if isPending {
-		_, err = h.db.Exec(ctx, `UPDATE users SET totp_secret = $1, updated_at = NOW() WHERE id = $2`, secret, userID)
+		err = h.db.SuperAdminTransaction(ctx, func(tx pgx.Tx) error {
+			_, err := tx.Exec(ctx, `UPDATE users SET totp_secret = $1, updated_at = NOW() WHERE id = $2`, secret, userID)
+			return err
+		})
 		if err != nil {
 			c.JSON(http.StatusInternalServerError, gin.H{
 				"error":   "internal_error",
@@ -1380,7 +1489,10 @@ func (h *AuthHandler) Disable2FA(c *gin.Context) {
 	ctx := c.Request.Context()
 
 	// Clear TOTP secret and backup codes
-	_, err := h.db.Exec(ctx, `UPDATE users SET totp_secret = NULL, updated_at = NOW() WHERE id = $1`, userID)
+	err := h.db.SuperAdminTransaction(ctx, func(tx pgx.Tx) error {
+		_, err := tx.Exec(ctx, `UPDATE users SET totp_secret = NULL, updated_at = NOW() WHERE id = $1`, userID)
+		return err
+	})
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{
 			"error":   "internal_error",
@@ -1390,7 +1502,10 @@ func (h *AuthHandler) Disable2FA(c *gin.Context) {
 	}
 
 	// Delete all backup codes
-	_, err = h.db.Exec(ctx, `DELETE FROM totp_backup_codes WHERE user_id = $1`, userID)
+	err = h.db.SuperAdminTransaction(ctx, func(tx pgx.Tx) error {
+		_, err := tx.Exec(ctx, `DELETE FROM totp_backup_codes WHERE user_id = $1`, userID)
+		return err
+	})
 	if err != nil {
 		log.Error().Err(err).Msg("Failed to delete backup codes")
 	}
@@ -1408,7 +1523,9 @@ func (h *AuthHandler) GenerateBackupCodes(c *gin.Context) {
 
 	// Check if 2FA is enabled
 	var totpSecret *string
-	err := h.db.QueryRow(ctx, `SELECT totp_secret FROM users WHERE id = $1`, userID).Scan(&totpSecret)
+	err := h.db.SuperAdminTransaction(ctx, func(tx pgx.Tx) error {
+		return tx.QueryRow(ctx, `SELECT totp_secret FROM users WHERE id = $1`, userID).Scan(&totpSecret)
+	})
 	if err != nil || totpSecret == nil || *totpSecret == "" || strings.HasPrefix(*totpSecret, "pending_") {
 		c.JSON(http.StatusBadRequest, gin.H{
 			"error":   "2fa_not_enabled",
@@ -1418,7 +1535,10 @@ func (h *AuthHandler) GenerateBackupCodes(c *gin.Context) {
 	}
 
 	// Delete existing backup codes
-	_, err = h.db.Exec(ctx, `DELETE FROM totp_backup_codes WHERE user_id = $1`, userID)
+	err = h.db.SuperAdminTransaction(ctx, func(tx pgx.Tx) error {
+		_, err := tx.Exec(ctx, `DELETE FROM totp_backup_codes WHERE user_id = $1`, userID)
+		return err
+	})
 	if err != nil {
 		log.Error().Err(err).Msg("Failed to delete existing backup codes")
 	}
@@ -1493,10 +1613,12 @@ func (h *AuthHandler) VerifyBackupCode(c *gin.Context) {
 	// Verify backup code
 	codeHash := hashTokenString(normalizeBackupCode(req.BackupCode))
 	var codeID uuid.UUID
-	err = h.db.QueryRow(ctx, `
-		SELECT id FROM totp_backup_codes
-		WHERE user_id = $1 AND code_hash = $2 AND used_at IS NULL
-	`, user.ID, codeHash).Scan(&codeID)
+	err = h.db.SuperAdminTransaction(ctx, func(tx pgx.Tx) error {
+		return tx.QueryRow(ctx, `
+			SELECT id FROM totp_backup_codes
+			WHERE user_id = $1 AND code_hash = $2 AND used_at IS NULL
+		`, user.ID, codeHash).Scan(&codeID)
+	})
 	if err != nil {
 		c.JSON(http.StatusUnauthorized, gin.H{
 			"error":   "invalid_credentials",
@@ -1506,14 +1628,20 @@ func (h *AuthHandler) VerifyBackupCode(c *gin.Context) {
 	}
 
 	// Mark code as used
-	_, err = h.db.Exec(ctx, `UPDATE totp_backup_codes SET used_at = NOW() WHERE id = $1`, codeID)
+	err = h.db.SuperAdminTransaction(ctx, func(tx pgx.Tx) error {
+		_, err := tx.Exec(ctx, `UPDATE totp_backup_codes SET used_at = NOW() WHERE id = $1`, codeID)
+		return err
+	})
 	if err != nil {
 		log.Error().Err(err).Msg("Failed to mark backup code as used")
 	}
 
 	// Count remaining codes
 	var remainingCodes int
-	if err := h.db.QueryRow(ctx, `SELECT COUNT(*) FROM totp_backup_codes WHERE user_id = $1 AND used_at IS NULL`, user.ID).Scan(&remainingCodes); err != nil {
+	err = h.db.SuperAdminTransaction(ctx, func(tx pgx.Tx) error {
+		return tx.QueryRow(ctx, `SELECT COUNT(*) FROM totp_backup_codes WHERE user_id = $1 AND used_at IS NULL`, user.ID).Scan(&remainingCodes)
+	})
+	if err != nil {
 		log.Warn().Err(err).Str("user_id", user.ID.String()).Msg("Failed to count remaining backup codes")
 		remainingCodes = 0 // Default to 0 on error, login can still proceed
 	}
@@ -1561,26 +1689,32 @@ func (h *AuthHandler) VerifyBackupCode(c *gin.Context) {
 func (h *AuthHandler) generateBackupCodes(ctx context.Context, userID uuid.UUID) ([]string, error) {
 	codes := make([]string, 10)
 
-	for i := 0; i < 10; i++ {
-		// Generate 8-character alphanumeric code (format: XXXX-XXXX)
-		codeBytes := make([]byte, 4)
-		if _, err := rand.Read(codeBytes); err != nil {
-			return nil, err
-		}
-		code := fmt.Sprintf("%s-%s",
-			strings.ToUpper(hex.EncodeToString(codeBytes[:2])),
-			strings.ToUpper(hex.EncodeToString(codeBytes[2:])))
-		codes[i] = code
+	err := h.db.SuperAdminTransaction(ctx, func(tx pgx.Tx) error {
+		for i := 0; i < 10; i++ {
+			// Generate 8-character alphanumeric code (format: XXXX-XXXX)
+			codeBytes := make([]byte, 4)
+			if _, err := rand.Read(codeBytes); err != nil {
+				return err
+			}
+			code := fmt.Sprintf("%s-%s",
+				strings.ToUpper(hex.EncodeToString(codeBytes[:2])),
+				strings.ToUpper(hex.EncodeToString(codeBytes[2:])))
+			codes[i] = code
 
-		// Store hashed code
-		codeHash := hashTokenString(normalizeBackupCode(code))
-		_, err := h.db.Exec(ctx, `
-			INSERT INTO totp_backup_codes (id, user_id, code_hash)
-			VALUES ($1, $2, $3)
-		`, uuid.New(), userID, codeHash)
-		if err != nil {
-			return nil, err
+			// Store hashed code
+			codeHash := hashTokenString(normalizeBackupCode(code))
+			_, err := tx.Exec(ctx, `
+				INSERT INTO totp_backup_codes (id, user_id, code_hash)
+				VALUES ($1, $2, $3)
+			`, uuid.New(), userID, codeHash)
+			if err != nil {
+				return err
+			}
 		}
+		return nil
+	})
+	if err != nil {
+		return nil, err
 	}
 
 	return codes, nil
@@ -1824,10 +1958,16 @@ func (h *AuthHandler) validateInviteToken(ctx context.Context, token string) (*i
 		AND deleted_at IS NULL
 	`
 	var user inviteUserRecord
-	err := h.db.QueryRow(ctx, query, token).Scan(
-		&user.ID, &user.TenantID, &user.Email, &user.Name, &user.Role,
-	)
-	if err != nil {
+	var qErr error
+	if err := h.db.SuperAdminTransaction(ctx, func(tx pgx.Tx) error {
+		qErr = tx.QueryRow(ctx, query, token).Scan(
+			&user.ID, &user.TenantID, &user.Email, &user.Name, &user.Role,
+		)
+		return nil
+	}); err != nil {
+		return nil, err
+	}
+	if qErr != nil {
 		return nil, errors.New("invalid or expired invite token")
 	}
 	return &user, nil
@@ -1844,8 +1984,10 @@ func (h *AuthHandler) acceptInvite(ctx context.Context, userID uuid.UUID, passwo
 		    updated_at = NOW()
 		WHERE id = $3
 	`
-	_, err := h.db.Exec(ctx, query, passwordHash, name, userID)
-	return err
+	return h.db.SuperAdminTransaction(ctx, func(tx pgx.Tx) error {
+		_, err := tx.Exec(ctx, query, passwordHash, name, userID)
+		return err
+	})
 }
 
 // ============================================================================
@@ -1883,9 +2025,11 @@ func (h *AuthHandler) RevokeTokenFamily(c *gin.Context) {
 
 	// Verify the family belongs to the current user (security check)
 	var familyUserID uuid.UUID
-	err = h.db.QueryRow(ctx, `
-		SELECT user_id FROM refresh_tokens WHERE family = $1 LIMIT 1
-	`, familyUUID).Scan(&familyUserID)
+	err = h.db.SuperAdminTransaction(ctx, func(tx pgx.Tx) error {
+		return tx.QueryRow(ctx, `
+			SELECT user_id FROM refresh_tokens WHERE family = $1 LIMIT 1
+		`, familyUUID).Scan(&familyUserID)
+	})
 	if err != nil {
 		c.JSON(http.StatusNotFound, gin.H{
 			"error":   "not_found",

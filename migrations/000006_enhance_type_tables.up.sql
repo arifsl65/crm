@@ -58,5 +58,6 @@ CREATE POLICY document_types_update ON document_types FOR UPDATE
 CREATE POLICY document_types_delete ON document_types FOR DELETE
     USING (tenant_id = current_setting('app.tenant_id', true)::uuid OR current_setting('app.role', true) = 'super_admin');
 
--- Update schema version
-INSERT INTO schema_version (version, description) VALUES (6, 'Enhanced service_types and document_types tables');
+-- Update schema migrations
+INSERT INTO schema_migrations (version, dirty) VALUES (6, false)
+ON CONFLICT (version) DO UPDATE SET dirty = false;

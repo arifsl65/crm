@@ -75,8 +75,15 @@ type UpdateDocumentTypeRequest struct {
 // List returns all document types for the tenant
 // GET /api/v1/document-types
 func (h *DocumentTypeHandler) List(c *gin.Context) {
-	ctx := c.Request.Context()
 	tenantID, _ := middleware.GetTenantID(c)
+
+	// Get TenantDB for RLS-protected operations
+	tenantDB, ok := middleware.GetTenantDB(c)
+	if !ok {
+		log.Error().Msg("TenantDB not found in context")
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "internal_error"})
+		return
+	}
 
 	// Pagination
 	limit, _ := strconv.Atoi(c.DefaultQuery("limit", "50"))
@@ -136,16 +143,8 @@ func (h *DocumentTypeHandler) List(c *gin.Context) {
 	query.WriteString(strconv.Itoa(argNum))
 	args = append(args, offset)
 
-	rows, err := h.db.Query(ctx, query.String(), args...)
-	if err != nil {
-		log.Error().Err(err).Msg("Failed to list document types")
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to fetch document types"})
-		return
-	}
-	defer rows.Close()
-
 	var documentTypes []DocumentType
-	for rows.Next() {
+	err := tenantDB.Query(c, query.String(), args, func(rows pgx.Rows) error {
 		var dt DocumentType
 		err := rows.Scan(
 			&dt.ID, &dt.TenantID, &dt.Name, &dt.Category, &dt.Description,
@@ -154,10 +153,16 @@ func (h *DocumentTypeHandler) List(c *gin.Context) {
 			&dt.CreatedAt, &dt.UpdatedAt, &dt.DocumentCount,
 		)
 		if err != nil {
-			log.Error().Err(err).Msg("Failed to scan document type")
-			continue
+			return err
 		}
 		documentTypes = append(documentTypes, dt)
+		return nil
+	})
+
+	if err != nil {
+		log.Error().Err(err).Msg("Failed to list document types")
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to fetch document types"})
+		return
 	}
 
 	if documentTypes == nil {
@@ -173,9 +178,16 @@ func (h *DocumentTypeHandler) List(c *gin.Context) {
 // Get returns a single document type
 // GET /api/v1/document-types/:id
 func (h *DocumentTypeHandler) Get(c *gin.Context) {
-	ctx := c.Request.Context()
 	tenantID, _ := middleware.GetTenantID(c)
 	id := c.Param("id")
+
+	// Get TenantDB for RLS-protected operations
+	tenantDB, ok := middleware.GetTenantDB(c)
+	if !ok {
+		log.Error().Msg("TenantDB not found in context")
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "internal_error"})
+		return
+	}
 
 	dtID, err := uuid.Parse(id)
 	if err != nil {
@@ -194,12 +206,12 @@ func (h *DocumentTypeHandler) Get(c *gin.Context) {
 	`
 
 	var dt DocumentType
-	err = h.db.QueryRow(ctx, query, dtID, tenantID).Scan(
+	err = tenantDB.QueryRowScan(c, []interface{}{
 		&dt.ID, &dt.TenantID, &dt.Name, &dt.Category, &dt.Description,
 		&dt.AllowedMimeTypes, &dt.MaxFileSizeMB, &dt.RetentionDays,
 		&dt.RequiresApproval, &dt.ExpiryRequired, &dt.IsActive, &dt.SortOrder,
 		&dt.CreatedAt, &dt.UpdatedAt, &dt.DocumentCount,
-	)
+	}, query, dtID, tenantID)
 
 	if err == pgx.ErrNoRows {
 		c.JSON(http.StatusNotFound, gin.H{"error": "Document type not found"})
@@ -220,6 +232,14 @@ func (h *DocumentTypeHandler) Create(c *gin.Context) {
 	ctx := c.Request.Context()
 	tenantID, _ := middleware.GetTenantID(c)
 	userID, _ := middleware.GetUserID(c)
+
+	// Get tenant-scoped DB for RLS enforcement
+	tenantDB, ok := middleware.GetTenantDB(c)
+	if !ok {
+		log.Error().Msg("TenantDB not found in context")
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "internal_error"})
+		return
+	}
 
 	var req CreateDocumentTypeRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
@@ -244,25 +264,7 @@ func (h *DocumentTypeHandler) Create(c *gin.Context) {
 		allowedMimeTypes = []string{"application/pdf", "image/jpeg", "image/png"}
 	}
 
-	// Get max sort order
-	var maxOrder int
-	err := h.db.QueryRow(ctx, `
-		SELECT COALESCE(MAX(sort_order), 0) FROM document_types WHERE tenant_id = $1
-	`, tenantID).Scan(&maxOrder)
-	if err != nil {
-		log.Error().Err(err).Msg("Failed to get max sort order")
-	}
-
 	id := uuid.New()
-	query := `
-		INSERT INTO document_types (
-			id, tenant_id, name, category, description, allowed_mime_types,
-			max_file_size_mb, retention_days, requires_approval, expiry_required,
-			is_active, sort_order, created_at, updated_at
-		) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, true, $11, NOW(), NOW())
-		RETURNING id, created_at, updated_at
-	`
-
 	var dt DocumentType
 	dt.ID = id
 	dt.TenantID = tenantID
@@ -275,12 +277,31 @@ func (h *DocumentTypeHandler) Create(c *gin.Context) {
 	dt.RequiresApproval = requiresApproval
 	dt.ExpiryRequired = expiryRequired
 	dt.IsActive = true
-	dt.SortOrder = maxOrder + 1
 
-	err = h.db.QueryRow(ctx, query,
-		id, tenantID, req.Name, req.Category, req.Description, allowedMimeTypes,
-		req.MaxFileSizeMB, req.RetentionDays, requiresApproval, expiryRequired, maxOrder+1,
-	).Scan(&dt.ID, &dt.CreatedAt, &dt.UpdatedAt)
+	err := tenantDB.Transaction(c, func(tx pgx.Tx) error {
+		// Get max sort order
+		var maxOrder int
+		err := tx.QueryRow(ctx, `
+			SELECT COALESCE(MAX(sort_order), 0) FROM document_types WHERE tenant_id = $1
+		`, tenantID).Scan(&maxOrder)
+		if err != nil {
+			log.Error().Err(err).Msg("Failed to get max sort order")
+		}
+		dt.SortOrder = maxOrder + 1
+
+		query := `
+			INSERT INTO document_types (
+				id, tenant_id, name, category, description, allowed_mime_types,
+				max_file_size_mb, retention_days, requires_approval, expiry_required,
+				is_active, sort_order, created_at, updated_at
+			) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, true, $11, NOW(), NOW())
+			RETURNING id, created_at, updated_at
+		`
+		return tx.QueryRow(ctx, query,
+			id, tenantID, req.Name, req.Category, req.Description, allowedMimeTypes,
+			req.MaxFileSizeMB, req.RetentionDays, requiresApproval, expiryRequired, dt.SortOrder,
+		).Scan(&dt.ID, &dt.CreatedAt, &dt.UpdatedAt)
+	})
 
 	if err != nil {
 		log.Error().Err(err).Msg("Failed to create document type")
@@ -304,6 +325,14 @@ func (h *DocumentTypeHandler) Update(c *gin.Context) {
 	tenantID, _ := middleware.GetTenantID(c)
 	userID, _ := middleware.GetUserID(c)
 	id := c.Param("id")
+
+	// Get tenant-scoped DB for RLS enforcement
+	tenantDB, ok := middleware.GetTenantDB(c)
+	if !ok {
+		log.Error().Msg("TenantDB not found in context")
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "internal_error"})
+		return
+	}
 
 	dtID, err := uuid.Parse(id)
 	if err != nil {
@@ -389,12 +418,14 @@ func (h *DocumentTypeHandler) Update(c *gin.Context) {
 	args = append(args, dtID, tenantID)
 
 	var dt DocumentType
-	err = h.db.QueryRow(ctx, query, args...).Scan(
-		&dt.ID, &dt.TenantID, &dt.Name, &dt.Category, &dt.Description,
-		&dt.AllowedMimeTypes, &dt.MaxFileSizeMB, &dt.RetentionDays,
-		&dt.RequiresApproval, &dt.ExpiryRequired, &dt.IsActive, &dt.SortOrder,
-		&dt.CreatedAt, &dt.UpdatedAt,
-	)
+	err = tenantDB.Transaction(c, func(tx pgx.Tx) error {
+		return tx.QueryRow(ctx, query, args...).Scan(
+			&dt.ID, &dt.TenantID, &dt.Name, &dt.Category, &dt.Description,
+			&dt.AllowedMimeTypes, &dt.MaxFileSizeMB, &dt.RetentionDays,
+			&dt.RequiresApproval, &dt.ExpiryRequired, &dt.IsActive, &dt.SortOrder,
+			&dt.CreatedAt, &dt.UpdatedAt,
+		)
+	})
 
 	if err == pgx.ErrNoRows {
 		c.JSON(http.StatusNotFound, gin.H{"error": "Document type not found"})
@@ -420,53 +451,68 @@ func (h *DocumentTypeHandler) Delete(c *gin.Context) {
 	userID, _ := middleware.GetUserID(c)
 	id := c.Param("id")
 
+	// Get tenant-scoped DB for RLS enforcement
+	tenantDB, ok := middleware.GetTenantDB(c)
+	if !ok {
+		log.Error().Msg("TenantDB not found in context")
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "internal_error"})
+		return
+	}
+
 	dtID, err := uuid.Parse(id)
 	if err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid document type ID"})
 		return
 	}
 
-	// Check if any documents are using this type
 	var documentCount int
-	err = h.db.QueryRow(ctx, `
-		SELECT COUNT(*) FROM documents WHERE type_id = $1 AND tenant_id = $2
-	`, dtID, tenantID).Scan(&documentCount)
+	var rowsAffected int64
+	var softDelete bool
+
+	err = tenantDB.Transaction(c, func(tx pgx.Tx) error {
+		// Check if any documents are using this type
+		err := tx.QueryRow(ctx, `
+			SELECT COUNT(*) FROM documents WHERE type_id = $1 AND tenant_id = $2
+		`, dtID, tenantID).Scan(&documentCount)
+		if err != nil {
+			return err
+		}
+
+		if documentCount > 0 {
+			// Soft delete - just deactivate
+			softDelete = true
+			_, err = tx.Exec(ctx, `
+				UPDATE document_types SET is_active = false, updated_at = NOW()
+				WHERE id = $1 AND tenant_id = $2
+			`, dtID, tenantID)
+			return err
+		}
+
+		// Hard delete - no documents using it
+		result, err := tx.Exec(ctx, `
+			DELETE FROM document_types WHERE id = $1 AND tenant_id = $2
+		`, dtID, tenantID)
+		if err != nil {
+			return err
+		}
+		rowsAffected = result.RowsAffected()
+		return nil
+	})
+
 	if err != nil {
-		log.Error().Err(err).Msg("Failed to check document type usage")
+		log.Error().Err(err).Msg("Failed to delete document type")
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to delete document type"})
 		return
 	}
 
-	if documentCount > 0 {
-		// Soft delete - just deactivate
-		_, err = h.db.Exec(ctx, `
-			UPDATE document_types SET is_active = false, updated_at = NOW()
-			WHERE id = $1 AND tenant_id = $2
-		`, dtID, tenantID)
-		if err != nil {
-			log.Error().Err(err).Msg("Failed to deactivate document type")
-			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to delete document type"})
-			return
-		}
-	} else {
-		// Hard delete - no documents using it
-		result, err := h.db.Exec(ctx, `
-			DELETE FROM document_types WHERE id = $1 AND tenant_id = $2
-		`, dtID, tenantID)
-		if err != nil {
-			log.Error().Err(err).Msg("Failed to delete document type")
-			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to delete document type"})
-			return
-		}
-		if result.RowsAffected() == 0 {
-			c.JSON(http.StatusNotFound, gin.H{"error": "Document type not found"})
-			return
-		}
+	if !softDelete && rowsAffected == 0 {
+		c.JSON(http.StatusNotFound, gin.H{"error": "Document type not found"})
+		return
 	}
 
 	// Audit log
 	h.audit.LogEntity(ctx, audit.ActionDocumentTypeDelete, &userID, &tenantID, "document_type", &dtID, c.ClientIP(), map[string]interface{}{
-		"soft_delete": documentCount > 0,
+		"soft_delete": softDelete,
 	})
 
 	c.JSON(http.StatusOK, gin.H{"message": "Document type deleted"})
@@ -475,8 +521,15 @@ func (h *DocumentTypeHandler) Delete(c *gin.Context) {
 // GetCategories returns distinct categories for document types
 // GET /api/v1/document-types/categories
 func (h *DocumentTypeHandler) GetCategories(c *gin.Context) {
-	ctx := c.Request.Context()
 	tenantID, _ := middleware.GetTenantID(c)
+
+	// Get TenantDB for RLS-protected operations
+	tenantDB, ok := middleware.GetTenantDB(c)
+	if !ok {
+		log.Error().Msg("TenantDB not found in context")
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "internal_error"})
+		return
+	}
 
 	query := `
 		SELECT DISTINCT category FROM document_types
@@ -484,21 +537,20 @@ func (h *DocumentTypeHandler) GetCategories(c *gin.Context) {
 		ORDER BY category ASC
 	`
 
-	rows, err := h.db.Query(ctx, query, tenantID)
+	var categories []string
+	err := tenantDB.Query(c, query, []interface{}{tenantID}, func(rows pgx.Rows) error {
+		var cat string
+		if err := rows.Scan(&cat); err != nil {
+			return err
+		}
+		categories = append(categories, cat)
+		return nil
+	})
+
 	if err != nil {
 		log.Error().Err(err).Msg("Failed to get categories")
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to fetch categories"})
 		return
-	}
-	defer rows.Close()
-
-	var categories []string
-	for rows.Next() {
-		var cat string
-		if err := rows.Scan(&cat); err != nil {
-			continue
-		}
-		categories = append(categories, cat)
 	}
 
 	if categories == nil {

@@ -27,7 +27,7 @@ DROP FUNCTION IF EXISTS update_service_docs_count();
 DROP FUNCTION IF EXISTS check_staff_client_same_tenant();
 
 -- Drop tables in reverse dependency order
-DROP TABLE IF EXISTS schema_version;
+DROP TABLE IF EXISTS schema_migrations;
 DROP TABLE IF EXISTS outbox;
 DROP TABLE IF EXISTS deletion_audit;
 DROP TABLE IF EXISTS ai_jobs;

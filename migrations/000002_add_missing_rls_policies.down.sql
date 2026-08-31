@@ -25,5 +25,5 @@ DROP POLICY IF EXISTS tenant_isolation_tenant_subscriptions ON tenant_subscripti
 DROP POLICY IF EXISTS tenant_isolation_upload_tokens ON upload_tokens;
 DROP POLICY IF EXISTS user_isolation_totp_backup_codes ON totp_backup_codes;
 
--- Revert schema version
-UPDATE schema_version SET version = 1, applied_at = CURRENT_TIMESTAMP WHERE version = 2;
+-- Revert schema migration
+DELETE FROM schema_migrations WHERE version = 2;

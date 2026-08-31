@@ -2,6 +2,7 @@ package handlers
 
 import (
 	"context"
+	"fmt"
 	"net/http"
 	"time"
 
@@ -75,18 +76,38 @@ func (h *TenantHandler) List(c *gin.Context) {
 	role, _ := middleware.GetRole(c)
 	tenantID, _ := middleware.GetTenantID(c)
 
-	var tenants []Tenant
+	tenants := []Tenant{}
 
 	if role == "super_admin" {
-		// Super admins can see all tenants
-		rows, err := h.db.Query(ctx, `
-			SELECT id, name, domain, custom_domain, plan, logo_url, favicon_url,
-			       primary_color, secondary_color, timezone, is_active,
-			       COALESCE(settings::text, '{}'), created_at, updated_at
-			FROM tenants
-			WHERE deleted_at IS NULL
-			ORDER BY created_at DESC
-		`)
+		// Super admins can see all tenants; use SuperAdminTransaction so RLS
+		// policies see app.role='super_admin' and allow cross-tenant reads.
+		err := h.db.SuperAdminTransaction(ctx, func(tx pgx.Tx) error {
+			rows, err := tx.Query(ctx, `
+				SELECT id, name, domain, custom_domain, plan, logo_url, favicon_url,
+				       primary_color, secondary_color, timezone, is_active,
+				       COALESCE(settings::text, '{}'), created_at, updated_at
+				FROM tenants
+				WHERE deleted_at IS NULL
+				ORDER BY created_at DESC
+			`)
+			if err != nil {
+				return err
+			}
+			defer rows.Close()
+
+			for rows.Next() {
+				var t Tenant
+				if err := rows.Scan(
+					&t.ID, &t.Name, &t.Domain, &t.CustomDomain, &t.Plan,
+					&t.LogoURL, &t.FaviconURL, &t.PrimaryColor, &t.SecondaryColor,
+					&t.Timezone, &t.IsActive, &t.Settings, &t.CreatedAt, &t.UpdatedAt,
+				); err != nil {
+					return err
+				}
+				tenants = append(tenants, t)
+			}
+			return rows.Err()
+		})
 		if err != nil {
 			c.JSON(http.StatusInternalServerError, gin.H{
 				"error":   "database_error",
@@ -94,37 +115,30 @@ func (h *TenantHandler) List(c *gin.Context) {
 			})
 			return
 		}
-		defer rows.Close()
-
-		for rows.Next() {
-			var t Tenant
-			if err := rows.Scan(
-				&t.ID, &t.Name, &t.Domain, &t.CustomDomain, &t.Plan,
-				&t.LogoURL, &t.FaviconURL, &t.PrimaryColor, &t.SecondaryColor,
-				&t.Timezone, &t.IsActive, &t.Settings, &t.CreatedAt, &t.UpdatedAt,
-			); err != nil {
-				c.JSON(http.StatusInternalServerError, gin.H{
-					"error":   "scan_error",
-					"message": "Failed to parse tenant data",
-				})
-				return
-			}
-			tenants = append(tenants, t)
-		}
 	} else {
-		// Non-super_admins only see their own tenant
+		// Non-super_admins only see their own tenant; use TenantDB so RLS
+		// policies see the correct app.tenant_id.
+		tenantDB, ok := middleware.GetTenantDB(c)
+		if !ok {
+			c.JSON(http.StatusInternalServerError, gin.H{
+				"error":   "internal_error",
+				"message": "Database context not available",
+			})
+			return
+		}
+
 		var t Tenant
-		err := h.db.QueryRow(ctx, `
+		err := tenantDB.QueryRowScan(c, []interface{}{
+			&t.ID, &t.Name, &t.Domain, &t.CustomDomain, &t.Plan,
+			&t.LogoURL, &t.FaviconURL, &t.PrimaryColor, &t.SecondaryColor,
+			&t.Timezone, &t.IsActive, &t.Settings, &t.CreatedAt, &t.UpdatedAt,
+		}, `
 			SELECT id, name, domain, custom_domain, plan, logo_url, favicon_url,
 			       primary_color, secondary_color, timezone, is_active,
 			       COALESCE(settings::text, '{}'), created_at, updated_at
 			FROM tenants
 			WHERE id = $1 AND deleted_at IS NULL
-		`, tenantID).Scan(
-			&t.ID, &t.Name, &t.Domain, &t.CustomDomain, &t.Plan,
-			&t.LogoURL, &t.FaviconURL, &t.PrimaryColor, &t.SecondaryColor,
-			&t.Timezone, &t.IsActive, &t.Settings, &t.CreatedAt, &t.UpdatedAt,
-		)
+		`, tenantID)
 		if err != nil {
 			if err == pgx.ErrNoRows {
 				c.JSON(http.StatusNotFound, gin.H{
@@ -161,26 +175,6 @@ func (h *TenantHandler) Create(c *gin.Context) {
 		return
 	}
 
-	// Check if domain already exists
-	var exists bool
-	err := h.db.QueryRow(ctx, `
-		SELECT EXISTS(SELECT 1 FROM tenants WHERE domain = $1 AND deleted_at IS NULL)
-	`, req.Domain).Scan(&exists)
-	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{
-			"error":   "database_error",
-			"message": "Failed to check domain uniqueness",
-		})
-		return
-	}
-	if exists {
-		c.JSON(http.StatusConflict, gin.H{
-			"error":   "domain_exists",
-			"message": "A tenant with this domain already exists",
-		})
-		return
-	}
-
 	// Set defaults
 	id := uuid.New()
 	plan := req.Plan
@@ -192,27 +186,46 @@ func (h *TenantHandler) Create(c *gin.Context) {
 		timezone = "Europe/London"
 	}
 
-	_, err = h.db.Exec(ctx, `
-		INSERT INTO tenants (id, name, domain, custom_domain, plan, logo_url, favicon_url,
-		                     primary_color, secondary_color, timezone, is_active, created_at, updated_at)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, true, NOW(), NOW())
-	`, id, req.Name, req.Domain, req.CustomDomain, plan,
-		req.LogoURL, req.FaviconURL, req.PrimaryColor, req.SecondaryColor, timezone)
+	var tenant *Tenant
+	err := h.db.SuperAdminTransaction(ctx, func(tx pgx.Tx) error {
+		// Check if domain already exists
+		var exists bool
+		err := tx.QueryRow(ctx, `
+			SELECT EXISTS(SELECT 1 FROM tenants WHERE domain = $1 AND deleted_at IS NULL)
+		`, req.Domain).Scan(&exists)
+		if err != nil {
+			return err
+		}
+		if exists {
+			return fmt.Errorf("domain_exists")
+		}
+
+		_, err = tx.Exec(ctx, `
+			INSERT INTO tenants (id, name, domain, custom_domain, plan, logo_url, favicon_url,
+			                     primary_color, secondary_color, timezone, is_active, created_at, updated_at)
+			VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, true, NOW(), NOW())
+		`, id, req.Name, req.Domain, req.CustomDomain, plan,
+			req.LogoURL, req.FaviconURL, req.PrimaryColor, req.SecondaryColor, timezone)
+		if err != nil {
+			return err
+		}
+
+		// Fetch the created tenant
+		tenant, err = h.getTenantByIDTx(ctx, tx, id)
+		return err
+	})
 
 	if err != nil {
+		if err.Error() == "domain_exists" {
+			c.JSON(http.StatusConflict, gin.H{
+				"error":   "domain_exists",
+				"message": "A tenant with this domain already exists",
+			})
+			return
+		}
 		c.JSON(http.StatusInternalServerError, gin.H{
 			"error":   "create_error",
 			"message": "Failed to create tenant",
-		})
-		return
-	}
-
-	// Fetch the created tenant
-	tenant, err := h.getTenantByID(ctx, id)
-	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{
-			"error":   "fetch_error",
-			"message": "Tenant created but failed to fetch",
 		})
 		return
 	}
@@ -301,74 +314,88 @@ func (h *TenantHandler) Update(c *gin.Context) {
 		return
 	}
 
-	// Check if tenant exists
-	var exists bool
-	err = h.db.QueryRow(ctx, `
-		SELECT EXISTS(SELECT 1 FROM tenants WHERE id = $1 AND deleted_at IS NULL)
-	`, id).Scan(&exists)
-	if err != nil || !exists {
-		c.JSON(http.StatusNotFound, gin.H{
-			"error":   "not_found",
-			"message": "Tenant not found",
+	tenantDB, ok := middleware.GetTenantDB(c)
+	if !ok {
+		c.JSON(http.StatusInternalServerError, gin.H{
+			"error":   "internal_error",
+			"message": "Database context not available",
 		})
 		return
 	}
 
-	// Check domain uniqueness if being changed
-	if req.Domain != nil {
-		var domainExists bool
-		err = h.db.QueryRow(ctx, `
-			SELECT EXISTS(SELECT 1 FROM tenants WHERE domain = $1 AND id != $2 AND deleted_at IS NULL)
-		`, *req.Domain, id).Scan(&domainExists)
+	var tenant *Tenant
+	err = tenantDB.Transaction(c, func(tx pgx.Tx) error {
+		// Check if tenant exists
+		var exists bool
+		err := tx.QueryRow(ctx, `
+			SELECT EXISTS(SELECT 1 FROM tenants WHERE id = $1 AND deleted_at IS NULL)
+		`, id).Scan(&exists)
 		if err != nil {
-			c.JSON(http.StatusInternalServerError, gin.H{
-				"error":   "database_error",
-				"message": "Failed to check domain uniqueness",
+			return err
+		}
+		if !exists {
+			return pgx.ErrNoRows
+		}
+
+		// Check domain uniqueness if being changed
+		if req.Domain != nil {
+			var domainExists bool
+			err = tx.QueryRow(ctx, `
+				SELECT EXISTS(SELECT 1 FROM tenants WHERE domain = $1 AND id != $2 AND deleted_at IS NULL)
+			`, *req.Domain, id).Scan(&domainExists)
+			if err != nil {
+				return err
+			}
+			if domainExists {
+				return fmt.Errorf("domain_exists")
+			}
+		}
+
+		// Build dynamic update query
+		_, err = tx.Exec(ctx, `
+			UPDATE tenants SET
+				name = COALESCE($2, name),
+				domain = COALESCE($3, domain),
+				custom_domain = COALESCE($4, custom_domain),
+				plan = COALESCE($5, plan),
+				logo_url = COALESCE($6, logo_url),
+				favicon_url = COALESCE($7, favicon_url),
+				primary_color = COALESCE($8, primary_color),
+				secondary_color = COALESCE($9, secondary_color),
+				timezone = COALESCE($10, timezone),
+				is_active = COALESCE($11, is_active),
+				updated_at = NOW()
+			WHERE id = $1 AND deleted_at IS NULL
+		`, id, req.Name, req.Domain, req.CustomDomain, req.Plan,
+			req.LogoURL, req.FaviconURL, req.PrimaryColor, req.SecondaryColor,
+			req.Timezone, req.IsActive)
+		if err != nil {
+			return err
+		}
+
+		// Fetch the updated tenant
+		tenant, err = h.getTenantByIDTx(ctx, tx, id)
+		return err
+	})
+
+	if err != nil {
+		if err == pgx.ErrNoRows {
+			c.JSON(http.StatusNotFound, gin.H{
+				"error":   "not_found",
+				"message": "Tenant not found",
 			})
 			return
 		}
-		if domainExists {
+		if err.Error() == "domain_exists" {
 			c.JSON(http.StatusConflict, gin.H{
 				"error":   "domain_exists",
 				"message": "A tenant with this domain already exists",
 			})
 			return
 		}
-	}
-
-	// Build dynamic update query
-	_, err = h.db.Exec(ctx, `
-		UPDATE tenants SET
-			name = COALESCE($2, name),
-			domain = COALESCE($3, domain),
-			custom_domain = COALESCE($4, custom_domain),
-			plan = COALESCE($5, plan),
-			logo_url = COALESCE($6, logo_url),
-			favicon_url = COALESCE($7, favicon_url),
-			primary_color = COALESCE($8, primary_color),
-			secondary_color = COALESCE($9, secondary_color),
-			timezone = COALESCE($10, timezone),
-			is_active = COALESCE($11, is_active),
-			updated_at = NOW()
-		WHERE id = $1 AND deleted_at IS NULL
-	`, id, req.Name, req.Domain, req.CustomDomain, req.Plan,
-		req.LogoURL, req.FaviconURL, req.PrimaryColor, req.SecondaryColor,
-		req.Timezone, req.IsActive)
-
-	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{
 			"error":   "update_error",
 			"message": "Failed to update tenant",
-		})
-		return
-	}
-
-	// Fetch the updated tenant
-	tenant, err := h.getTenantByID(ctx, id)
-	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{
-			"error":   "fetch_error",
-			"message": "Tenant updated but failed to fetch",
 		})
 		return
 	}
@@ -391,32 +418,44 @@ func (h *TenantHandler) Delete(c *gin.Context) {
 		return
 	}
 
-	// Check if tenant exists
-	var exists bool
-	err = h.db.QueryRow(ctx, `
-		SELECT EXISTS(SELECT 1 FROM tenants WHERE id = $1 AND deleted_at IS NULL)
-	`, id).Scan(&exists)
-	if err != nil {
+	tenantDB, ok := middleware.GetTenantDB(c)
+	if !ok {
 		c.JSON(http.StatusInternalServerError, gin.H{
-			"error":   "database_error",
-			"message": "Failed to check tenant existence",
-		})
-		return
-	}
-	if !exists {
-		c.JSON(http.StatusNotFound, gin.H{
-			"error":   "not_found",
-			"message": "Tenant not found",
+			"error":   "internal_error",
+			"message": "Database context not available",
 		})
 		return
 	}
 
-	// Soft delete the tenant
-	_, err = h.db.Exec(ctx, `
-		UPDATE tenants SET deleted_at = NOW(), is_active = false, updated_at = NOW()
-		WHERE id = $1 AND deleted_at IS NULL
-	`, id)
+	err = tenantDB.Transaction(c, func(tx pgx.Tx) error {
+		// Check if tenant exists
+		var exists bool
+		err := tx.QueryRow(ctx, `
+			SELECT EXISTS(SELECT 1 FROM tenants WHERE id = $1 AND deleted_at IS NULL)
+		`, id).Scan(&exists)
+		if err != nil {
+			return err
+		}
+		if !exists {
+			return pgx.ErrNoRows
+		}
+
+		// Soft delete the tenant
+		_, err = tx.Exec(ctx, `
+			UPDATE tenants SET deleted_at = NOW(), is_active = false, updated_at = NOW()
+			WHERE id = $1 AND deleted_at IS NULL
+		`, id)
+		return err
+	})
+
 	if err != nil {
+		if err == pgx.ErrNoRows {
+			c.JSON(http.StatusNotFound, gin.H{
+				"error":   "not_found",
+				"message": "Tenant not found",
+			})
+			return
+		}
 		c.JSON(http.StatusInternalServerError, gin.H{
 			"error":   "delete_error",
 			"message": "Failed to delete tenant",
@@ -431,8 +470,22 @@ func (h *TenantHandler) Delete(c *gin.Context) {
 
 // getTenantByID is a helper function to fetch a tenant by ID
 func (h *TenantHandler) getTenantByID(ctx context.Context, id uuid.UUID) (*Tenant, error) {
+	var t *Tenant
+	err := h.db.SuperAdminTransaction(ctx, func(tx pgx.Tx) error {
+		var err error
+		t, err = h.getTenantByIDTx(ctx, tx, id)
+		return err
+	})
+	if err != nil {
+		return nil, err
+	}
+	return t, nil
+}
+
+// getTenantByIDTx fetches a tenant by ID within an existing transaction.
+func (h *TenantHandler) getTenantByIDTx(ctx context.Context, tx pgx.Tx, id uuid.UUID) (*Tenant, error) {
 	var t Tenant
-	err := h.db.QueryRow(ctx, `
+	err := tx.QueryRow(ctx, `
 		SELECT id, name, domain, custom_domain, plan, logo_url, favicon_url,
 		       primary_color, secondary_color, timezone, is_active,
 		       COALESCE(settings::text, '{}'), created_at, updated_at

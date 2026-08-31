@@ -71,11 +71,12 @@ export function GlobalSearch({
           setResults(searchResults);
         } else {
           // Demo results if no search handler provided
-          setResults([
+          const demoResults: SearchResult[] = [
             { id: '1', type: 'client', title: 'Acme Corp', subtitle: 'Client', url: '/clients/1' },
             { id: '2', type: 'invoice', title: 'INV-2024-001', subtitle: 'Invoice - $5,000', url: '/invoices/1' },
             { id: '3', type: 'document', title: 'Contract.pdf', subtitle: 'Document', url: '/documents/1' },
-          ].filter(
+          ];
+          setResults(demoResults.filter(
             (r) =>
               r.title.toLowerCase().includes(searchQuery.toLowerCase()) ||
               r.subtitle?.toLowerCase().includes(searchQuery.toLowerCase())

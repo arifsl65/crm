@@ -124,6 +124,25 @@ func (c *Client) CacheDelete(ctx context.Context, key string) error {
 	return c.Del(ctx, key).Err()
 }
 
+// BlockToken adds a token JTI to the revocation blocklist with a TTL.
+func (c *Client) BlockToken(ctx context.Context, jti string, ttl time.Duration) error {
+	key := fmt.Sprintf("token:blocklist:%s", jti)
+	return c.Set(ctx, key, "1", ttl).Err()
+}
+
+// IsTokenBlocked checks whether a token JTI has been revoked.
+func (c *Client) IsTokenBlocked(ctx context.Context, jti string) (bool, error) {
+	key := fmt.Sprintf("token:blocklist:%s", jti)
+	val, err := c.Get(ctx, key).Result()
+	if err == redis.Nil {
+		return false, nil
+	}
+	if err != nil {
+		return false, fmt.Errorf("token blocklist check failed: %w", err)
+	}
+	return val == "1", nil
+}
+
 // Stats returns Redis connection pool statistics.
 func (c *Client) Stats() *redis.PoolStats {
 	return c.PoolStats()

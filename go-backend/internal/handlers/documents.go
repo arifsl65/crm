@@ -156,13 +156,29 @@ type UpdateDocumentRequest struct {
 	Status      *string `json:"status,omitempty"`
 }
 
+type GenerateUploadURLRequest struct {
+	ClientID    *string `json:"client_id,omitempty"`
+	ServiceID   *string `json:"service_id,omitempty"`
+	TypeID      *string `json:"type_id,omitempty"`
+	Name        string  `json:"name" binding:"required"`
+	ExpiryDate  *string `json:"expiry_date,omitempty"`
+	RequestNote *string `json:"request_note,omitempty"`
+}
+
 // List returns all documents for the tenant (staff-scoped)
 // GET /api/v1/documents
 func (h *DocumentHandler) List(c *gin.Context) {
-	ctx := c.Request.Context()
 	tenantID, _ := middleware.GetTenantID(c)
 	userID, _ := middleware.GetUserID(c)
 	role, _ := c.Get(middleware.AuthRole)
+
+	// Get TenantDB for RLS-protected operations
+	tenantDB, ok := middleware.GetTenantDB(c)
+	if !ok {
+		log.Error().Msg("TenantDB not found in context")
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "internal_error"})
+		return
+	}
 
 	// Pagination
 	limit, _ := strconv.Atoi(c.DefaultQuery("limit", "50"))
@@ -176,6 +192,9 @@ func (h *DocumentHandler) List(c *gin.Context) {
 	clientID := c.Query("client_id")
 	typeID := c.Query("type_id")
 	search := c.Query("search")
+
+	roleStr, _ := role.(string)
+	isSuperAdmin := roleStr == "super_admin"
 
 	var query strings.Builder
 	var args []interface{}
@@ -192,13 +211,18 @@ func (h *DocumentHandler) List(c *gin.Context) {
 		LEFT JOIN clients c ON d.client_id = c.id
 		LEFT JOIN document_types dt ON d.type_id = dt.id
 		LEFT JOIN users u ON d.uploaded_by = u.id
-		WHERE d.tenant_id = $1 AND d.client_id IS NOT NULL
 	`)
-	args = append(args, tenantID)
-	argNum++
+	if isSuperAdmin {
+		query.WriteString(`WHERE d.client_id IS NOT NULL`)
+	} else {
+		query.WriteString(`WHERE d.tenant_id = $`)
+		query.WriteString(strconv.Itoa(argNum))
+		query.WriteString(` AND d.client_id IS NOT NULL`)
+		args = append(args, tenantID)
+		argNum++
+	}
 
 	// Staff scoping - only see documents for assigned clients unless admin
-	roleStr, _ := role.(string)
 	if roleStr == "staff" {
 		query.WriteString(` AND d.client_id IN (SELECT client_id FROM staff_clients WHERE staff_id = $`)
 		query.WriteString(strconv.Itoa(argNum))
@@ -251,16 +275,8 @@ func (h *DocumentHandler) List(c *gin.Context) {
 	query.WriteString(strconv.Itoa(argNum))
 	args = append(args, offset)
 
-	rows, err := h.db.Query(ctx, query.String(), args...)
-	if err != nil {
-		log.Error().Err(err).Msg("Failed to list documents")
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "internal_error"})
-		return
-	}
-	defer rows.Close()
-
 	documents := []Document{}
-	for rows.Next() {
+	err := tenantDB.Query(c, query.String(), args, func(rows pgx.Rows) error {
 		var doc Document
 		var expiryDate *time.Time
 		err := rows.Scan(
@@ -270,14 +286,20 @@ func (h *DocumentHandler) List(c *gin.Context) {
 			&doc.CreatedAt, &doc.UpdatedAt, &doc.ClientName, &doc.TypeName, &doc.UploadedName,
 		)
 		if err != nil {
-			log.Error().Err(err).Msg("Failed to scan document")
-			continue
+			return err
 		}
 		if expiryDate != nil {
 			s := expiryDate.Format("2006-01-02")
 			doc.ExpiryDate = &s
 		}
 		documents = append(documents, doc)
+		return nil
+	})
+
+	if err != nil {
+		log.Error().Err(err).Msg("Failed to list documents")
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "internal_error"})
+		return
 	}
 
 	c.JSON(http.StatusOK, gin.H{
@@ -290,8 +312,15 @@ func (h *DocumentHandler) List(c *gin.Context) {
 // Get returns a single document by ID
 // GET /api/v1/documents/:id
 func (h *DocumentHandler) Get(c *gin.Context) {
-	ctx := c.Request.Context()
 	tenantID, _ := middleware.GetTenantID(c)
+
+	// Get TenantDB for RLS-protected operations
+	tenantDB, ok := middleware.GetTenantDB(c)
+	if !ok {
+		log.Error().Msg("TenantDB not found in context")
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "internal_error"})
+		return
+	}
 
 	documentID, err := uuid.Parse(c.Param("id"))
 	if err != nil {
@@ -301,7 +330,14 @@ func (h *DocumentHandler) Get(c *gin.Context) {
 
 	var doc Document
 	var expiryDate *time.Time
-	err = h.db.QueryRow(ctx, `
+	err = tenantDB.QueryRowScan(c, []interface{}{
+		&doc.ID, &doc.TenantID, &doc.ClientID, &doc.ServiceID, &doc.UploadedBy, &doc.TypeID,
+		&doc.Name, &doc.OriginalName, &doc.FilePath, &doc.FileSize, &doc.MimeType, &doc.Status, &doc.Access,
+		&doc.Version, &doc.ParentID, &doc.RequestedAt, &expiryDate, &doc.RequestNote,
+		&doc.UploadNote, &doc.ReviewNote, &doc.ReviewedBy, &doc.ReviewedAt,
+		&doc.ChaseCount, &doc.LastChasedAt, &doc.AISummary, &doc.CreatedAt, &doc.UpdatedAt,
+		&doc.ClientName, &doc.TypeName, &doc.UploadedName,
+	}, `
 		SELECT d.id, d.tenant_id, d.client_id, d.service_id, d.uploaded_by, d.type_id,
 		       d.name, d.original_name, d.file_path, d.file_size, d.mime_type, d.status, d.access,
 		       d.version, d.parent_id, d.requested_at, d.expiry_date, d.request_note,
@@ -313,14 +349,7 @@ func (h *DocumentHandler) Get(c *gin.Context) {
 		LEFT JOIN document_types dt ON d.type_id = dt.id
 		LEFT JOIN users u ON d.uploaded_by = u.id
 		WHERE d.id = $1 AND d.tenant_id = $2
-	`, documentID, tenantID).Scan(
-		&doc.ID, &doc.TenantID, &doc.ClientID, &doc.ServiceID, &doc.UploadedBy, &doc.TypeID,
-		&doc.Name, &doc.OriginalName, &doc.FilePath, &doc.FileSize, &doc.MimeType, &doc.Status, &doc.Access,
-		&doc.Version, &doc.ParentID, &doc.RequestedAt, &expiryDate, &doc.RequestNote,
-		&doc.UploadNote, &doc.ReviewNote, &doc.ReviewedBy, &doc.ReviewedAt,
-		&doc.ChaseCount, &doc.LastChasedAt, &doc.AISummary, &doc.CreatedAt, &doc.UpdatedAt,
-		&doc.ClientName, &doc.TypeName, &doc.UploadedName,
-	)
+	`, documentID, tenantID)
 	if err != nil {
 		if err == pgx.ErrNoRows {
 			c.JSON(http.StatusNotFound, gin.H{"error": "document_not_found"})
@@ -656,10 +685,18 @@ func (h *DocumentHandler) GetVersions(c *gin.Context) {
 		return
 	}
 
-	ctx := c.Request.Context()
 	tenantID, _ := middleware.GetTenantID(c)
 
-	rows, err := h.db.Query(ctx, `
+	// Get TenantDB for RLS-protected operations
+	tenantDB, ok := middleware.GetTenantDB(c)
+	if !ok {
+		log.Error().Msg("TenantDB not found in context")
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "internal_error"})
+		return
+	}
+
+	var versions []map[string]interface{}
+	err = tenantDB.Query(c, `
 		WITH RECURSIVE version_chain AS (
 			SELECT id, parent_id, version, name, file_size, created_at, uploaded_by
 			FROM documents
@@ -674,17 +711,7 @@ func (h *DocumentHandler) GetVersions(c *gin.Context) {
 		FROM version_chain vc
 		LEFT JOIN users u ON vc.uploaded_by = u.id
 		ORDER BY vc.version DESC
-	`, documentID, tenantID)
-
-	if err != nil {
-		log.Error().Err(err).Msg("Failed to get document versions")
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "internal_error"})
-		return
-	}
-	defer rows.Close()
-
-	var versions []map[string]interface{}
-	for rows.Next() {
+	`, []interface{}{documentID, tenantID}, func(rows pgx.Rows) error {
 		var id uuid.UUID
 		var version int
 		var name string
@@ -693,7 +720,7 @@ func (h *DocumentHandler) GetVersions(c *gin.Context) {
 		var uploadedByName *string
 
 		if err := rows.Scan(&id, &version, &name, &fileSize, &createdAt, &uploadedByName); err != nil {
-			continue
+			return err
 		}
 
 		versions = append(versions, map[string]interface{}{
@@ -704,6 +731,13 @@ func (h *DocumentHandler) GetVersions(c *gin.Context) {
 			"created_at":       createdAt,
 			"uploaded_by_name": uploadedByName,
 		})
+		return nil
+	})
+
+	if err != nil {
+		log.Error().Err(err).Msg("Failed to get document versions")
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "internal_error"})
+		return
 	}
 
 	c.JSON(http.StatusOK, gin.H{"versions": versions})
@@ -728,11 +762,19 @@ func (h *DocumentHandler) RestoreVersion(c *gin.Context) {
 	tenantID, _ := middleware.GetTenantID(c)
 	userID, _ := middleware.GetUserID(c)
 
+	// Get TenantDB for RLS-protected operations
+	tenantDB, ok := middleware.GetTenantDB(c)
+	if !ok {
+		log.Error().Msg("TenantDB not found in context")
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "internal_error"})
+		return
+	}
+
 	// Get current document version
 	var currentVersion int
-	err = h.db.QueryRow(ctx, `
+	err = tenantDB.QueryRowScan(c, []interface{}{&currentVersion}, `
 		SELECT version FROM documents WHERE id = $1 AND tenant_id = $2
-	`, documentID, tenantID).Scan(&currentVersion)
+	`, documentID, tenantID)
 	if err != nil {
 		c.JSON(http.StatusNotFound, gin.H{"error": "document_not_found"})
 		return
@@ -741,9 +783,9 @@ func (h *DocumentHandler) RestoreVersion(c *gin.Context) {
 	// Get the version to restore
 	var oldFilePath, oldMimeType *string
 	var oldFileSize *int
-	err = h.db.QueryRow(ctx, `
+	err = tenantDB.QueryRowScan(c, []interface{}{&oldFilePath, &oldFileSize, &oldMimeType}, `
 		SELECT file_path, file_size, mime_type FROM documents WHERE id = $1 AND tenant_id = $2
-	`, versionID, tenantID).Scan(&oldFilePath, &oldFileSize, &oldMimeType)
+	`, versionID, tenantID)
 	if err != nil {
 		c.JSON(http.StatusNotFound, gin.H{"error": "version_not_found"})
 		return
@@ -751,17 +793,20 @@ func (h *DocumentHandler) RestoreVersion(c *gin.Context) {
 
 	// Create new version with restored content
 	newID := uuid.New()
-	_, err = h.db.Exec(ctx, `
-		INSERT INTO documents (
-			id, tenant_id, client_id, service_id, uploaded_by, type_id,
-			name, original_name, file_path, file_size, mime_type, status, access,
-			version, parent_id
-		)
-		SELECT $1, tenant_id, client_id, service_id, $2, type_id,
-		       name, original_name, $3, $4, $5, 'uploaded', access,
-		       $6, $7
-		FROM documents WHERE id = $7 AND tenant_id = $8
-	`, newID, userID, oldFilePath, oldFileSize, oldMimeType, currentVersion+1, documentID, tenantID)
+	err = tenantDB.Transaction(c, func(tx pgx.Tx) error {
+		_, err := tx.Exec(ctx, `
+			INSERT INTO documents (
+				id, tenant_id, client_id, service_id, uploaded_by, type_id,
+				name, original_name, file_path, file_size, mime_type, status, access,
+				version, parent_id
+			)
+			SELECT $1, tenant_id, client_id, service_id, $2, type_id,
+			       name, original_name, $3, $4, $5, 'uploaded', access,
+			       $6, $7
+			FROM documents WHERE id = $7 AND tenant_id = $8
+		`, newID, userID, oldFilePath, oldFileSize, oldMimeType, currentVersion+1, documentID, tenantID)
+		return err
+	})
 
 	if err != nil {
 		log.Error().Err(err).Msg("Failed to restore document version")
@@ -785,7 +830,7 @@ func (h *DocumentHandler) RestoreVersion(c *gin.Context) {
 // POST /api/v1/documents/bulk-request
 func (h *DocumentHandler) BulkRequest(c *gin.Context) {
 	var req struct {
-		ClientID string `json:"client_id" binding:"required,uuid"`
+		ClientID string   `json:"client_id" binding:"required,uuid"`
 		TypeIDs  []string `json:"type_ids" binding:"required"`
 		Note     *string  `json:"note,omitempty"`
 	}
@@ -798,6 +843,14 @@ func (h *DocumentHandler) BulkRequest(c *gin.Context) {
 	tenantID, _ := middleware.GetTenantID(c)
 	userID, _ := middleware.GetUserID(c)
 
+	// Get TenantDB for RLS-protected operations
+	tenantDB, ok := middleware.GetTenantDB(c)
+	if !ok {
+		log.Error().Msg("TenantDB not found in context")
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "internal_error"})
+		return
+	}
+
 	clientID, _ := uuid.Parse(req.ClientID)
 	var created []uuid.UUID
 
@@ -809,20 +862,23 @@ func (h *DocumentHandler) BulkRequest(c *gin.Context) {
 
 		// Get type name for document name
 		var typeName string
-		err = h.db.QueryRow(ctx, `SELECT name FROM document_types WHERE id = $1`, typeID).Scan(&typeName)
+		err = tenantDB.QueryRowScan(c, []interface{}{&typeName}, `SELECT name FROM document_types WHERE id = $1`, typeID)
 		if err != nil {
 			continue
 		}
 
 		documentID := uuid.New()
-		_, err = h.db.Exec(ctx, `
-			INSERT INTO documents (
-				id, tenant_id, client_id, uploaded_by, type_id,
-				name, original_name, status, access, request_note, requested_at
-			) VALUES (
-				$1, $2, $3, $4, $5, $6, $6, 'requested', 'all_staff', $7, NOW()
-			)
-		`, documentID, tenantID, clientID, userID, typeID, typeName, req.Note)
+		err = tenantDB.Transaction(c, func(tx pgx.Tx) error {
+			_, err := tx.Exec(ctx, `
+				INSERT INTO documents (
+					id, tenant_id, client_id, uploaded_by, type_id,
+					name, original_name, status, access, request_note, requested_at
+				) VALUES (
+					$1, $2, $3, $4, $5, $6, $6, 'requested', 'all_staff', $7, NOW()
+				)
+			`, documentID, tenantID, clientID, userID, typeID, typeName, req.Note)
+			return err
+		})
 
 		if err != nil {
 			log.Error().Err(err).Str("type_id", typeIDStr).Msg("Failed to create document request")
@@ -834,9 +890,9 @@ func (h *DocumentHandler) BulkRequest(c *gin.Context) {
 
 	// Audit log
 	h.audit.LogEntity(ctx, audit.ActionDocumentCreate, &userID, &tenantID, "document", nil, c.ClientIP(), map[string]interface{}{
-		"bulk":       true,
-		"count":      len(created),
-		"client_id":  req.ClientID,
+		"bulk":      true,
+		"count":     len(created),
+		"client_id": req.ClientID,
 	})
 
 	c.JSON(http.StatusCreated, gin.H{
@@ -861,6 +917,14 @@ func (h *DocumentHandler) BulkApprove(c *gin.Context) {
 	tenantID, _ := middleware.GetTenantID(c)
 	userID, _ := middleware.GetUserID(c)
 
+	// Get TenantDB for RLS-protected operations
+	tenantDB, ok := middleware.GetTenantDB(c)
+	if !ok {
+		log.Error().Msg("TenantDB not found in context")
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "internal_error"})
+		return
+	}
+
 	var documentIDs []uuid.UUID
 	for _, id := range req.DocumentIDs {
 		if uid, err := uuid.Parse(id); err == nil {
@@ -868,7 +932,7 @@ func (h *DocumentHandler) BulkApprove(c *gin.Context) {
 		}
 	}
 
-	result, err := h.db.Exec(ctx, `
+	result, err := tenantDB.Exec(c, `
 		UPDATE documents SET status = 'approved',
 		       reviewed_by = $1, reviewed_at = NOW(), updated_at = NOW()
 		WHERE id = ANY($2) AND tenant_id = $3 AND status = 'pending_review'
@@ -895,10 +959,17 @@ func (h *DocumentHandler) BulkApprove(c *gin.Context) {
 // ListFirm returns firm-level documents (no client_id)
 // GET /api/v1/documents/firm
 func (h *DocumentHandler) ListFirm(c *gin.Context) {
-	ctx := c.Request.Context()
 	tenantID, _ := middleware.GetTenantID(c)
 	userID, _ := middleware.GetUserID(c)
 	role, _ := c.Get(middleware.AuthRole)
+
+	// Get TenantDB for RLS-protected operations
+	tenantDB, ok := middleware.GetTenantDB(c)
+	if !ok {
+		log.Error().Msg("TenantDB not found in context")
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "internal_error"})
+		return
+	}
 
 	limit, _ := strconv.Atoi(c.DefaultQuery("limit", "50"))
 	offset, _ := strconv.Atoi(c.DefaultQuery("offset", "0"))
@@ -940,16 +1011,8 @@ func (h *DocumentHandler) ListFirm(c *gin.Context) {
 	query.WriteString(strconv.Itoa(argNum))
 	args = append(args, offset)
 
-	rows, err := h.db.Query(ctx, query.String(), args...)
-	if err != nil {
-		log.Error().Err(err).Msg("Failed to list firm documents")
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "internal_error"})
-		return
-	}
-	defer rows.Close()
-
 	var documents []map[string]interface{}
-	for rows.Next() {
+	err := tenantDB.Query(c, query.String(), args, func(rows pgx.Rows) error {
 		var id uuid.UUID
 		var name, originalName, status, access string
 		var fileSize *int
@@ -958,7 +1021,7 @@ func (h *DocumentHandler) ListFirm(c *gin.Context) {
 
 		if err := rows.Scan(&id, &name, &originalName, &fileSize, &mimeType, &status, &access,
 			&createdAt, &updatedAt, &uploadedByName); err != nil {
-			continue
+			return err
 		}
 
 		documents = append(documents, map[string]interface{}{
@@ -973,6 +1036,13 @@ func (h *DocumentHandler) ListFirm(c *gin.Context) {
 			"updated_at":       updatedAt,
 			"uploaded_by_name": uploadedByName,
 		})
+		return nil
+	})
+
+	if err != nil {
+		log.Error().Err(err).Msg("Failed to list firm documents")
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "internal_error"})
+		return
 	}
 
 	c.JSON(http.StatusOK, gin.H{
@@ -982,14 +1052,90 @@ func (h *DocumentHandler) ListFirm(c *gin.Context) {
 	})
 }
 
+// GenerateUploadURL creates a pending document record and returns an upload URL.
+// POST /api/v1/documents/upload-url
+func (h *DocumentHandler) GenerateUploadURL(c *gin.Context) {
+	ctx := c.Request.Context()
+	tenantID, _ := middleware.GetTenantID(c)
+	userID, _ := middleware.GetUserID(c)
+
+	tenantDB, ok := middleware.GetTenantDB(c)
+	if !ok {
+		log.Error().Msg("TenantDB not found in context")
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "internal_error"})
+		return
+	}
+
+	var req GenerateUploadURLRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid_request", "message": err.Error()})
+		return
+	}
+
+	var clientID, serviceID, typeID *uuid.UUID
+	if req.ClientID != nil {
+		id, err := uuid.Parse(*req.ClientID)
+		if err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "invalid_client_id"})
+			return
+		}
+		clientID = &id
+	}
+	if req.ServiceID != nil {
+		id, err := uuid.Parse(*req.ServiceID)
+		if err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "invalid_service_id"})
+			return
+		}
+		serviceID = &id
+	}
+	if req.TypeID != nil {
+		id, err := uuid.Parse(*req.TypeID)
+		if err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "invalid_type_id"})
+			return
+		}
+		typeID = &id
+	}
+
+	docID := uuid.New()
+	var doc Document
+	err := tenantDB.Transaction(c, func(tx pgx.Tx) error {
+		return tx.QueryRow(ctx, `
+			INSERT INTO documents (id, tenant_id, client_id, service_id, type_id, name, original_name, status, access, requested_at, request_note, expiry_date, uploaded_by)
+			VALUES ($1, $2, $3, $4, $5, $6, $6, 'pending_upload', 'private', NOW(), $7, $8, $9)
+			RETURNING id, tenant_id, client_id, service_id, type_id, name, original_name, status, access, version, requested_at, request_note, expiry_date, created_at, updated_at
+		`, docID, tenantID, clientID, serviceID, typeID, req.Name, req.RequestNote, req.ExpiryDate, userID).Scan(
+			&doc.ID, &doc.TenantID, &doc.ClientID, &doc.ServiceID, &doc.TypeID, &doc.Name, &doc.OriginalName,
+			&doc.Status, &doc.Access, &doc.Version, &doc.RequestedAt, &doc.RequestNote, &doc.ExpiryDate, &doc.CreatedAt, &doc.UpdatedAt,
+		)
+	})
+
+	if err != nil {
+		log.Error().Err(err).Msg("Failed to create pending document")
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "internal_error"})
+		return
+	}
+
+	h.audit.LogEntity(ctx, audit.ActionDocumentCreate, &userID, &tenantID, "document", &doc.ID, c.ClientIP(), map[string]interface{}{
+		"name":   req.Name,
+		"status": "pending_upload",
+	})
+
+	c.JSON(http.StatusCreated, gin.H{
+		"document":   doc,
+		"upload_url": fmt.Sprintf("/api/v1/documents/%s/upload", doc.ID.String()),
+	})
+}
+
 // GenerateQRToken generates a secure upload token for QR code
 // POST /api/v1/documents/qr
 func (h *DocumentHandler) GenerateQRToken(c *gin.Context) {
 	var req struct {
-		ClientID string   `json:"client_id" binding:"required,uuid"`
-		TypeIDs  []string `json:"type_ids,omitempty"`
-		Note     *string  `json:"note,omitempty"`
-		ExpiresIn *int    `json:"expires_in,omitempty"` // minutes
+		ClientID  string   `json:"client_id" binding:"required,uuid"`
+		TypeIDs   []string `json:"type_ids,omitempty"`
+		Note      *string  `json:"note,omitempty"`
+		ExpiresIn *int     `json:"expires_in,omitempty"` // minutes
 	}
 	if err := c.ShouldBindJSON(&req); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "validation_error", "message": err.Error()})
@@ -999,6 +1145,14 @@ func (h *DocumentHandler) GenerateQRToken(c *gin.Context) {
 	ctx := c.Request.Context()
 	tenantID, _ := middleware.GetTenantID(c)
 	userID, _ := middleware.GetUserID(c)
+
+	// Get TenantDB for RLS-protected operations
+	tenantDB, ok := middleware.GetTenantDB(c)
+	if !ok {
+		log.Error().Msg("TenantDB not found in context")
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "internal_error"})
+		return
+	}
 
 	clientID, _ := uuid.Parse(req.ClientID)
 
@@ -1017,10 +1171,13 @@ func (h *DocumentHandler) GenerateQRToken(c *gin.Context) {
 	}
 
 	tokenID := uuid.New()
-	_, err := h.db.Exec(ctx, `
-		INSERT INTO upload_tokens (id, tenant_id, client_id, token, created_by, note, expires_at)
-		VALUES ($1, $2, $3, $4, $5, $6, NOW() + $7 * INTERVAL '1 minute')
-	`, tokenID, tenantID, clientID, token, userID, req.Note, expiresIn)
+	err := tenantDB.Transaction(c, func(tx pgx.Tx) error {
+		_, err := tx.Exec(ctx, `
+			INSERT INTO upload_tokens (id, tenant_id, client_id, token, created_by, note, expires_at)
+			VALUES ($1, $2, $3, $4, $5, $6, NOW() + $7 * INTERVAL '1 minute')
+		`, tokenID, tenantID, clientID, token, userID, req.Note, expiresIn)
+		return err
+	})
 
 	if err != nil {
 		log.Error().Err(err).Msg("Failed to create upload token")
@@ -1077,6 +1234,14 @@ func (h *DocumentHandler) Upload(c *gin.Context) {
 	ctx := c.Request.Context()
 	tenantID, _ := middleware.GetTenantID(c)
 	userID, _ := middleware.GetUserID(c)
+
+	// Get tenant-scoped DB for RLS enforcement
+	tenantDB, ok := middleware.GetTenantDB(c)
+	if !ok {
+		log.Error().Msg("TenantDB not found in context")
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "internal_error"})
+		return
+	}
 
 	// Check file size limit (50MB)
 	c.Request.Body = http.MaxBytesReader(c.Writer, c.Request.Body, MaxUploadSize)
@@ -1137,9 +1302,9 @@ func (h *DocumentHandler) Upload(c *gin.Context) {
 
 	// Verify document exists and belongs to tenant
 	var currentStatus string
-	err = h.db.QueryRow(ctx, `
+	err = tenantDB.QueryRowScan(c, []interface{}{&currentStatus}, `
 		SELECT status FROM documents WHERE id = $1 AND tenant_id = $2
-	`, documentID, tenantID).Scan(&currentStatus)
+	`, documentID, tenantID)
 	if err != nil {
 		if err == pgx.ErrNoRows {
 			c.JSON(http.StatusNotFound, gin.H{"error": "document_not_found"})
@@ -1184,14 +1349,6 @@ func (h *DocumentHandler) Upload(c *gin.Context) {
 	// TODO: Upload to OSS when configured
 	// For now, store file path metadata but don't persist the actual file
 	// This stub allows the API to work while OSS is being set up
-
-	// Get tenant-scoped DB for RLS enforcement
-	tenantDB, ok := middleware.GetTenantDB(c)
-	if !ok {
-		log.Error().Msg("TenantDB not found in context")
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "internal_error"})
-		return
-	}
 
 	fileSize := len(fileContent)
 	originalName := header.Filename

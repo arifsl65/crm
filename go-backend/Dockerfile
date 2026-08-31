@@ -5,9 +5,9 @@
 # -----------------------------------------------------------------------------
 # Development Stage
 # -----------------------------------------------------------------------------
-FROM golang:1.22-alpine AS development
+FROM golang:1.26-alpine AS development
 
-ENV GOTOOLCHAIN=auto
+ENV GOTOOLCHAIN=local
 
 WORKDIR /app
 
@@ -33,9 +33,9 @@ CMD ["air", "-c", ".air.toml"]
 # -----------------------------------------------------------------------------
 # Builder Stage
 # -----------------------------------------------------------------------------
-FROM golang:1.22-alpine AS builder
+FROM golang:1.26-alpine AS builder
 
-ENV GOTOOLCHAIN=auto
+ENV GOTOOLCHAIN=local
 
 WORKDIR /app
 

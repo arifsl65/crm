@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5"
 	"github.com/rs/zerolog/log"
 
 	"github.com/accountant-crm/go-backend/internal/database"
@@ -68,54 +69,85 @@ func NewLogger(db *database.Pool) *Logger {
 	return &Logger{db: db}
 }
 
+// Severity levels for audit logs
+type Severity string
+
+const (
+	SeverityInfo    Severity = "info"
+	SeverityWarning Severity = "warning"
+	SeverityError   Severity = "error"
+)
+
 // LogEntry represents an audit log entry.
 type LogEntry struct {
-	TenantID    *uuid.UUID
-	UserID      *uuid.UUID
-	Action      Action
-	EntityType  string            // e.g., "user", "client", "document"
-	EntityID    *uuid.UUID        // ID of the affected entity
-	IPAddress   string
-	UserAgent   string
-	Metadata    map[string]interface{} // Additional context
-	Success     bool
-	ErrorMsg    string
+	TenantID   *uuid.UUID
+	UserID     *uuid.UUID
+	Action     Action
+	EntityType string            // e.g., "user", "client", "document"
+	EntityID   *uuid.UUID        // ID of the affected entity
+	OldValue   map[string]interface{} // Previous state (for updates)
+	NewValue   map[string]interface{} // New state (for creates/updates)
+	Metadata   map[string]interface{} // Additional context
+	IPAddress  string
+	UserAgent  string
+	Severity   Severity
 }
 
 // Log writes an audit entry to the database.
 func (l *Logger) Log(ctx context.Context, entry LogEntry) error {
-	var metadataJSON []byte
+	// Marshal JSON fields
+	metadataJSON := []byte("{}")
+	oldValueJSON := []byte(nil)
+	newValueJSON := []byte(nil)
 	var err error
+
 	if entry.Metadata != nil {
 		metadataJSON, err = json.Marshal(entry.Metadata)
 		if err != nil {
 			log.Error().Err(err).Msg("Failed to marshal audit metadata")
 			metadataJSON = []byte("{}")
 		}
-	} else {
-		metadataJSON = []byte("{}")
+	}
+	if entry.OldValue != nil {
+		oldValueJSON, _ = json.Marshal(entry.OldValue)
+	}
+	if entry.NewValue != nil {
+		newValueJSON, _ = json.Marshal(entry.NewValue)
+	}
+
+	// Default severity to info
+	severity := entry.Severity
+	if severity == "" {
+		severity = SeverityInfo
 	}
 
 	query := `
 		INSERT INTO audit_logs (
-			tenant_id, user_id, action, entity_type, entity_id,
-			ip_address, user_agent, metadata, success, error_message, created_at
-		) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+			id, tenant_id, user_id, action, entity_type, entity_id,
+			old_value, new_value, metadata, ip_address, user_agent, severity, created_at
+		) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
 	`
 
-	_, err = l.db.Exec(ctx, query,
-		entry.TenantID,
-		entry.UserID,
-		string(entry.Action),
-		entry.EntityType,
-		entry.EntityID,
-		entry.IPAddress,
-		entry.UserAgent,
-		metadataJSON,
-		entry.Success,
-		entry.ErrorMsg,
-		time.Now(),
-	)
+	// Audit logs must bypass RLS because they may be written from unauthenticated
+	// contexts (e.g., failed login) or across tenants.
+	err = l.db.SuperAdminTransaction(ctx, func(tx pgx.Tx) error {
+		_, err = tx.Exec(ctx, query,
+			uuid.New(), // id
+			entry.TenantID,
+			entry.UserID,
+			string(entry.Action),
+			entry.EntityType,
+			entry.EntityID,
+			oldValueJSON,
+			newValueJSON,
+			metadataJSON,
+			entry.IPAddress,
+			entry.UserAgent,
+			string(severity),
+			time.Now(),
+		)
+		return err
+	})
 
 	if err != nil {
 		log.Error().Err(err).
@@ -127,7 +159,7 @@ func (l *Logger) Log(ctx context.Context, entry LogEntry) error {
 	// Also log to structured log for real-time monitoring
 	logEvent := log.Info().
 		Str("audit_action", string(entry.Action)).
-		Bool("success", entry.Success)
+		Str("severity", string(severity))
 
 	if entry.UserID != nil {
 		logEvent = logEvent.Str("user_id", entry.UserID.String())
@@ -144,9 +176,6 @@ func (l *Logger) Log(ctx context.Context, entry LogEntry) error {
 	if entry.IPAddress != "" {
 		logEvent = logEvent.Str("ip_address", entry.IPAddress)
 	}
-	if !entry.Success && entry.ErrorMsg != "" {
-		logEvent = logEvent.Str("error", entry.ErrorMsg)
-	}
 
 	logEvent.Msg("Audit event")
 
@@ -155,6 +184,18 @@ func (l *Logger) Log(ctx context.Context, entry LogEntry) error {
 
 // LogAuth is a convenience method for auth-related events.
 func (l *Logger) LogAuth(ctx context.Context, action Action, userID *uuid.UUID, tenantID *uuid.UUID, ip, userAgent string, success bool, errorMsg string) {
+	severity := SeverityInfo
+	if !success {
+		severity = SeverityWarning
+	}
+
+	metadata := map[string]interface{}{
+		"success": success,
+	}
+	if errorMsg != "" {
+		metadata["error"] = errorMsg
+	}
+
 	_ = l.Log(ctx, LogEntry{
 		TenantID:   tenantID,
 		UserID:     userID,
@@ -163,8 +204,8 @@ func (l *Logger) LogAuth(ctx context.Context, action Action, userID *uuid.UUID, 
 		EntityID:   userID,
 		IPAddress:  ip,
 		UserAgent:  userAgent,
-		Success:    success,
-		ErrorMsg:   errorMsg,
+		Severity:   severity,
+		Metadata:   metadata,
 	})
 }
 
@@ -178,65 +219,78 @@ func (l *Logger) LogEntity(ctx context.Context, action Action, userID, tenantID 
 		EntityID:   entityID,
 		IPAddress:  ip,
 		Metadata:   metadata,
-		Success:    true,
+		Severity:   SeverityInfo,
 	})
 }
 
 // GetUserAuditLogs retrieves audit logs for a specific user.
 func (l *Logger) GetUserAuditLogs(ctx context.Context, userID uuid.UUID, limit, offset int) ([]map[string]interface{}, error) {
 	query := `
-		SELECT id, action, entity_type, entity_id, ip_address, success, error_message, created_at
+		SELECT id, action, entity_type, entity_id, ip_address, severity, metadata, created_at
 		FROM audit_logs
 		WHERE user_id = $1
 		ORDER BY created_at DESC
 		LIMIT $2 OFFSET $3
 	`
 
-	rows, err := l.db.Query(ctx, query, userID, limit, offset)
-	if err != nil {
+	var logs []map[string]interface{}
+	var qErr error
+	if err := l.db.SuperAdminTransaction(ctx, func(tx pgx.Tx) error {
+		rows, err := tx.Query(ctx, query, userID, limit, offset)
+		if err != nil {
+			return err
+		}
+		defer rows.Close()
+
+		for rows.Next() {
+			var (
+				id         uuid.UUID
+				action     string
+				entityType *string
+				entityID   *uuid.UUID
+				ipAddress  *string
+				severity   *string
+				metadata   []byte
+				createdAt  time.Time
+			)
+
+			err := rows.Scan(&id, &action, &entityType, &entityID, &ipAddress, &severity, &metadata, &createdAt)
+			if err != nil {
+				return err
+			}
+
+			entry := map[string]interface{}{
+				"id":         id.String(),
+				"action":     action,
+				"created_at": createdAt,
+			}
+			if entityType != nil {
+				entry["entity_type"] = *entityType
+			}
+			if entityID != nil {
+				entry["entity_id"] = entityID.String()
+			}
+			if ipAddress != nil {
+				entry["ip_address"] = *ipAddress
+			}
+			if severity != nil {
+				entry["severity"] = *severity
+			}
+			if len(metadata) > 0 {
+				var meta map[string]interface{}
+				if json.Unmarshal(metadata, &meta) == nil {
+					entry["metadata"] = meta
+				}
+			}
+
+			logs = append(logs, entry)
+		}
+
+		qErr = rows.Err()
+		return nil
+	}); err != nil {
 		return nil, err
 	}
-	defer rows.Close()
 
-	var logs []map[string]interface{}
-	for rows.Next() {
-		var (
-			id         uuid.UUID
-			action     string
-			entityType *string
-			entityID   *uuid.UUID
-			ipAddress  *string
-			success    bool
-			errorMsg   *string
-			createdAt  time.Time
-		)
-
-		err := rows.Scan(&id, &action, &entityType, &entityID, &ipAddress, &success, &errorMsg, &createdAt)
-		if err != nil {
-			return nil, err
-		}
-
-		entry := map[string]interface{}{
-			"id":         id.String(),
-			"action":     action,
-			"success":    success,
-			"created_at": createdAt,
-		}
-		if entityType != nil {
-			entry["entity_type"] = *entityType
-		}
-		if entityID != nil {
-			entry["entity_id"] = entityID.String()
-		}
-		if ipAddress != nil {
-			entry["ip_address"] = *ipAddress
-		}
-		if errorMsg != nil {
-			entry["error_message"] = *errorMsg
-		}
-
-		logs = append(logs, entry)
-	}
-
-	return logs, rows.Err()
+	return logs, qErr
 }

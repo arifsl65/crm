@@ -1,6 +1,9 @@
 # =============================================================================
 # Accountant CRM - Terraform Outputs
 # =============================================================================
+# Updated: 2026-08-29
+# Architecture: Single ECS + Docker Compose (~$17/month)
+# =============================================================================
 
 # =============================================================================
 # Network Outputs
@@ -12,8 +15,6 @@ output "network" {
     vpc_id              = alicloud_vpc.main.id
     public_vswitch_ids  = alicloud_vswitch.public[*].id
     private_vswitch_ids = alicloud_vswitch.private[*].id
-    nat_gateway_ids     = alicloud_nat_gateway.main[*].id
-    nat_eips            = alicloud_eip_address.nat[*].ip_address
   }
 }
 
@@ -32,73 +33,6 @@ output "oss" {
 }
 
 # =============================================================================
-# MNS Outputs - DISABLED (MNS service not activated)
-# =============================================================================
-
-# output "mns" {
-#   description = "MNS topic configuration"
-#   value = {
-#     topics   = { for k, v in alicloud_mns_topic.topics : k => v.name }
-#     dlq_name = alicloud_mns_queue.dlq.name
-#   }
-# }
-
-# =============================================================================
-# Redis Outputs
-# =============================================================================
-
-output "redis" {
-  description = "Redis configuration"
-  value = {
-    instance_id       = alicloud_kvstore_instance.redis.id
-    connection_string = alicloud_kvstore_instance.redis.connection_domain
-    port              = 6379
-  }
-  sensitive = true
-}
-
-# =============================================================================
-# ACR Outputs - DISABLED (ACR requires console activation)
-# =============================================================================
-
-# output "acr" {
-#   description = "Container Registry configuration"
-#   value = {
-#     instance_id     = alicloud_cr_ee_instance.main.id
-#     namespace       = alicloud_cr_ee_namespace.main.name
-#     go_backend_repo = alicloud_cr_ee_repo.go_backend.name
-#     python_ai_repo  = alicloud_cr_ee_repo.python_ai.name
-#   }
-# }
-
-# =============================================================================
-# ALB Outputs
-# =============================================================================
-
-output "alb" {
-  description = "Application Load Balancer configuration"
-  value = {
-    id       = alicloud_alb_load_balancer.main.id
-    dns_name = alicloud_alb_load_balancer.main.dns_name
-    edition  = alicloud_alb_load_balancer.main.load_balancer_edition
-  }
-}
-
-# =============================================================================
-# ECS Outputs
-# =============================================================================
-
-# NOTE: Kubernetes cluster not provisioned in Week 1
-# output "ecs" {
-#   description = "ECS cluster configuration"
-#   value = {
-#     cluster_id       = alicloud_cs_managed_kubernetes.main.id
-#     cluster_name     = alicloud_cs_managed_kubernetes.main.name
-#     security_group_id = alicloud_security_group.ecs.id
-#   }
-# }
-
-# =============================================================================
 # Summary Output
 # =============================================================================
 
@@ -110,18 +44,25 @@ output "summary" {
     Accountant CRM - ${var.environment} Deployment
     ============================================
 
+    Architecture: Single ECS + Docker Compose
     Region: ${var.region}
     VPC ID: ${alicloud_vpc.main.id}
 
-    Endpoints:
-    - ALB DNS: ${alicloud_alb_load_balancer.main.dns_name}
-    - Frontend: https://${var.oss_frontend_bucket}.${var.region}.aliyuncs.com
-    - Redis: ${alicloud_kvstore_instance.redis.connection_domain}:6379
+    Live Endpoints (per cloud.md):
+    - Frontend: https://crm.irislondonshoes.com
+    - API: https://api.irislondonshoes.com
 
-    Pending Activation (Console Required):
-    - ACR (Container Registry)
-    - MNS (Message Service)
-    - PVTZ (Private Zone / CloudMap)
+    Docker Services (on ECS at 8.211.195.17):
+    - nginx:alpine (ports 80, 443)
+    - accountant-go-backend:latest (port 8080)
+    - accountant-python-ai:latest (port 8000)
+    - redis:7-alpine (port 6379)
+
+    External Services (FREE tier):
+    - PostgreSQL: Neon
+    - MongoDB: Atlas
+    - DNS: Cloudflare
+    - SSL: Let's Encrypt
 
     ============================================
   EOT

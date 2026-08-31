@@ -35,8 +35,10 @@ services:
       # Neon PostgreSQL (external - FREE tier)
       - POSTGRES_HOST=${NEON_HOST}
       - POSTGRES_PORT=5432
-      - POSTGRES_USER=${NEON_USER}
-      - POSTGRES_PASSWORD=${NEON_PASSWORD}
+      # IMPORTANT: Use app_user (NOBYPASSRLS) for RLS enforcement.
+      # Fallback to NEON_USER only if POSTGRES_USER is not set.
+      - POSTGRES_USER=${POSTGRES_USER:-${NEON_USER}}
+      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD:-${NEON_PASSWORD}}
       - POSTGRES_DB=${NEON_DATABASE}
       - POSTGRES_SSLMODE=require
       # Redis (local container)
@@ -46,6 +48,8 @@ services:
       - REDIS_TLS_ENABLED=false
       # Security
       - JWT_SECRET_KEY=${JWT_SECRET_KEY}
+      - CORS_ALLOWED_ORIGINS=${CORS_ALLOWED_ORIGINS}
+      - FRONTEND_URL=${FRONTEND_URL:-https://crm.irislondonshoes.com}
       # Python AI service (internal)
       - PYTHON_AI_URL=http://python-ai:8000
       - PYTHON_AI_TIMEOUT=30s
@@ -72,8 +76,10 @@ services:
       # Neon PostgreSQL (external - FREE tier) - shared with Go backend
       - POSTGRES_HOST=${NEON_HOST}
       - POSTGRES_PORT=5432
-      - POSTGRES_USER=${NEON_USER}
-      - POSTGRES_PASSWORD=${NEON_PASSWORD}
+      # IMPORTANT: Use app_user (NOBYPASSRLS) for RLS enforcement.
+      # Fallback to NEON_USER only if POSTGRES_USER is not set.
+      - POSTGRES_USER=${POSTGRES_USER:-${NEON_USER}}
+      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD:-${NEON_PASSWORD}}
       - POSTGRES_DATABASE=${NEON_DATABASE}
       - POSTGRES_SSLMODE=require
       # MongoDB Atlas (external - FREE tier)

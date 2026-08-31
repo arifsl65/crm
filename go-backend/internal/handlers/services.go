@@ -9,6 +9,7 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/rs/zerolog/log"
 
 	"github.com/accountant-crm/go-backend/internal/audit"
@@ -84,10 +85,17 @@ type UpdateServiceRequest struct {
 // List returns all services for the tenant (staff-scoped)
 // GET /api/v1/services
 func (h *ServiceHandler) List(c *gin.Context) {
-	ctx := c.Request.Context()
 	tenantID, _ := middleware.GetTenantID(c)
 	userID, _ := middleware.GetUserID(c)
 	role, _ := c.Get(middleware.AuthRole)
+
+	// Get TenantDB for RLS-protected operations
+	tenantDB, ok := middleware.GetTenantDB(c)
+	if !ok {
+		log.Error().Msg("TenantDB not found in context")
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "internal_error"})
+		return
+	}
 
 	// Pagination
 	limit, _ := strconv.Atoi(c.DefaultQuery("limit", "50"))
@@ -102,6 +110,9 @@ func (h *ServiceHandler) List(c *gin.Context) {
 	clientID := c.Query("client_id")
 	search := c.Query("search")
 
+	roleStr, _ := role.(string)
+	isSuperAdmin := roleStr == "super_admin"
+
 	var query strings.Builder
 	var args []interface{}
 	argNum := 1
@@ -115,13 +126,17 @@ func (h *ServiceHandler) List(c *gin.Context) {
 		FROM services s
 		LEFT JOIN clients c ON s.client_id = c.id
 		LEFT JOIN users u ON s.staff_id = u.id
-		WHERE s.tenant_id = $1
 	`)
-	args = append(args, tenantID)
-	argNum++
+	if isSuperAdmin {
+		query.WriteString(`WHERE 1=1`)
+	} else {
+		query.WriteString(`WHERE s.tenant_id = $`)
+		query.WriteString(strconv.Itoa(argNum))
+		args = append(args, tenantID)
+		argNum++
+	}
 
 	// Staff scoping - only see services for assigned clients unless admin
-	roleStr, _ := role.(string)
 	if roleStr == "staff" {
 		query.WriteString(` AND s.client_id IN (SELECT client_id FROM staff_clients WHERE staff_id = $`)
 		query.WriteString(strconv.Itoa(argNum))
@@ -174,16 +189,8 @@ func (h *ServiceHandler) List(c *gin.Context) {
 	query.WriteString(strconv.Itoa(argNum))
 	args = append(args, offset)
 
-	rows, err := h.db.Query(ctx, query.String(), args...)
-	if err != nil {
-		log.Error().Err(err).Msg("Failed to list services")
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "internal_error"})
-		return
-	}
-	defer rows.Close()
-
 	services := []Service{}
-	for rows.Next() {
+	err := tenantDB.Query(c, query.String(), args, func(rows pgx.Rows) error {
 		var service Service
 		var deadline *time.Time
 		err := rows.Scan(
@@ -194,14 +201,20 @@ func (h *ServiceHandler) List(c *gin.Context) {
 			&service.Version, &service.CreatedAt, &service.UpdatedAt, &service.ClientName, &service.StaffName,
 		)
 		if err != nil {
-			log.Error().Err(err).Msg("Failed to scan service")
-			continue
+			return err
 		}
 		if deadline != nil {
 			s := deadline.Format("2006-01-02")
 			service.Deadline = &s
 		}
 		services = append(services, service)
+		return nil
+	})
+
+	if err != nil {
+		log.Error().Err(err).Msg("Failed to list services")
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "internal_error"})
+		return
 	}
 
 	c.JSON(http.StatusOK, gin.H{
@@ -214,8 +227,15 @@ func (h *ServiceHandler) List(c *gin.Context) {
 // Get returns a single service by ID
 // GET /api/v1/services/:id
 func (h *ServiceHandler) Get(c *gin.Context) {
-	ctx := c.Request.Context()
 	tenantID, _ := middleware.GetTenantID(c)
+
+	// Get TenantDB for RLS-protected operations
+	tenantDB, ok := middleware.GetTenantDB(c)
+	if !ok {
+		log.Error().Msg("TenantDB not found in context")
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "internal_error"})
+		return
+	}
 
 	serviceID, err := uuid.Parse(c.Param("id"))
 	if err != nil {
@@ -225,7 +245,13 @@ func (h *ServiceHandler) Get(c *gin.Context) {
 
 	var service Service
 	var deadline *time.Time
-	err = h.db.QueryRow(ctx, `
+	err = tenantDB.QueryRowScan(c, []interface{}{
+		&service.ID, &service.TenantID, &service.ClientID, &service.StaffID, &service.TypeID,
+		&service.Name, &service.Period, &service.Status, &service.Priority, &service.RiskLevel,
+		&deadline, &service.KanbanPosition, &service.DocsRequired, &service.DocsReceived,
+		&service.HMRCReference, &service.FiledAt, &service.CompletedAt, &service.CompletionNotes,
+		&service.Version, &service.CreatedAt, &service.UpdatedAt, &service.ClientName, &service.StaffName,
+	}, `
 		SELECT s.id, s.tenant_id, s.client_id, s.staff_id, s.type_id, s.name, s.period,
 		       s.status, s.priority, s.risk_level, s.deadline, s.kanban_position,
 		       s.docs_required, s.docs_received, s.hmrc_reference, s.filed_at,
@@ -235,13 +261,7 @@ func (h *ServiceHandler) Get(c *gin.Context) {
 		LEFT JOIN clients c ON s.client_id = c.id
 		LEFT JOIN users u ON s.staff_id = u.id
 		WHERE s.id = $1 AND s.tenant_id = $2
-	`, serviceID, tenantID).Scan(
-		&service.ID, &service.TenantID, &service.ClientID, &service.StaffID, &service.TypeID,
-		&service.Name, &service.Period, &service.Status, &service.Priority, &service.RiskLevel,
-		&deadline, &service.KanbanPosition, &service.DocsRequired, &service.DocsReceived,
-		&service.HMRCReference, &service.FiledAt, &service.CompletedAt, &service.CompletionNotes,
-		&service.Version, &service.CreatedAt, &service.UpdatedAt, &service.ClientName, &service.StaffName,
-	)
+	`, serviceID, tenantID)
 	if err != nil {
 		if err == pgx.ErrNoRows {
 			c.JSON(http.StatusNotFound, gin.H{"error": "service_not_found"})
@@ -272,6 +292,14 @@ func (h *ServiceHandler) Create(c *gin.Context) {
 	ctx := c.Request.Context()
 	tenantID, _ := middleware.GetTenantID(c)
 	userID, _ := middleware.GetUserID(c)
+
+	// Get TenantDB for RLS-protected operations
+	tenantDB, ok := middleware.GetTenantDB(c)
+	if !ok {
+		log.Error().Msg("TenantDB not found in context")
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "internal_error"})
+		return
+	}
 
 	clientID, _ := uuid.Parse(req.ClientID)
 	serviceID := uuid.New()
@@ -306,15 +334,18 @@ func (h *ServiceHandler) Create(c *gin.Context) {
 		docsRequired = *req.DocsRequired
 	}
 
-	_, err := h.db.Exec(ctx, `
-		INSERT INTO services (
-			id, tenant_id, client_id, staff_id, type_id, name, period,
-			status, priority, risk_level, deadline, docs_required
-		) VALUES (
-			$1, $2, $3, $4, $5, $6, $7, 'not_started', $8, $9, $10, $11
-		)
-	`, serviceID, tenantID, clientID, staffID, typeID, req.Name, req.Period,
-		priority, req.RiskLevel, deadline, docsRequired)
+	err := tenantDB.Transaction(c, func(tx pgx.Tx) error {
+		_, err := tx.Exec(ctx, `
+			INSERT INTO services (
+				id, tenant_id, client_id, staff_id, type_id, name, period,
+				status, priority, risk_level, deadline, docs_required
+			) VALUES (
+				$1, $2, $3, $4, $5, $6, $7, 'not_started', $8, $9, $10, $11
+			)
+		`, serviceID, tenantID, clientID, staffID, typeID, req.Name, req.Period,
+			priority, req.RiskLevel, deadline, docsRequired)
+		return err
+	})
 
 	if err != nil {
 		log.Error().Err(err).Msg("Failed to create service")
@@ -429,14 +460,31 @@ func (h *ServiceHandler) Update(c *gin.Context) {
 		" WHERE id = $" + strconv.Itoa(argNum) + " AND tenant_id = $" + strconv.Itoa(argNum+1)
 	args = append(args, serviceID, tenantID)
 
-	result, err := h.db.Exec(ctx, query, args...)
+	// Get TenantDB for RLS-protected operations
+	tenantDB, ok := middleware.GetTenantDB(c)
+	if !ok {
+		log.Error().Msg("TenantDB not found in context")
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "internal_error"})
+		return
+	}
+
+	var rowsAffected int64
+	err = tenantDB.Transaction(c, func(tx pgx.Tx) error {
+		result, err := tx.Exec(ctx, query, args...)
+		if err != nil {
+			return err
+		}
+		rowsAffected = result.RowsAffected()
+		return nil
+	})
+
 	if err != nil {
 		log.Error().Err(err).Msg("Failed to update service")
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "internal_error"})
 		return
 	}
 
-	if result.RowsAffected() == 0 {
+	if rowsAffected == 0 {
 		c.JSON(http.StatusNotFound, gin.H{"error": "service_not_found"})
 		return
 	}
@@ -478,15 +526,23 @@ func (h *ServiceHandler) UpdateStatus(c *gin.Context) {
 	tenantID, _ := middleware.GetTenantID(c)
 	userID, _ := middleware.GetUserID(c)
 
+	// Get TenantDB for RLS-protected operations
+	tenantDB, ok := middleware.GetTenantDB(c)
+	if !ok {
+		log.Error().Msg("TenantDB not found in context")
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "internal_error"})
+		return
+	}
+
 	// Set completed_at if transitioning to completed
-	var result pgx.CommandTag
+	var result pgconn.CommandTag
 	if req.Status == "completed" {
-		result, err = h.db.Exec(ctx, `
+		result, err = tenantDB.Exec(c, `
 			UPDATE services SET status = $1, completed_at = NOW(), version = version + 1, updated_at = NOW()
 			WHERE id = $2 AND tenant_id = $3
 		`, req.Status, serviceID, tenantID)
 	} else {
-		result, err = h.db.Exec(ctx, `
+		result, err = tenantDB.Exec(c, `
 			UPDATE services SET status = $1, version = version + 1, updated_at = NOW()
 			WHERE id = $2 AND tenant_id = $3
 		`, req.Status, serviceID, tenantID)
@@ -523,13 +579,20 @@ func (h *ServiceHandler) Reorder(c *gin.Context) {
 		return
 	}
 
-	ctx := c.Request.Context()
 	tenantID, _ := middleware.GetTenantID(c)
+
+	// Get TenantDB for RLS-protected operations
+	tenantDB, ok := middleware.GetTenantDB(c)
+	if !ok {
+		log.Error().Msg("TenantDB not found in context")
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "internal_error"})
+		return
+	}
 
 	// Update each service's position
 	for _, item := range req.Items {
 		serviceID, _ := uuid.Parse(item.ID)
-		_, err := h.db.Exec(ctx, `
+		_, err := tenantDB.Exec(c, `
 			UPDATE services SET kanban_position = $1, updated_at = NOW()
 			WHERE id = $2 AND tenant_id = $3
 		`, item.KanbanPosition, serviceID, tenantID)
@@ -559,7 +622,15 @@ func (h *ServiceHandler) Complete(c *gin.Context) {
 	tenantID, _ := middleware.GetTenantID(c)
 	userID, _ := middleware.GetUserID(c)
 
-	result, err := h.db.Exec(ctx, `
+	// Get TenantDB for RLS-protected operations
+	tenantDB, ok := middleware.GetTenantDB(c)
+	if !ok {
+		log.Error().Msg("TenantDB not found in context")
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "internal_error"})
+		return
+	}
+
+	result, err := tenantDB.Exec(c, `
 		UPDATE services SET status = 'completed', completed_at = NOW(),
 		       completion_notes = $1, version = version + 1, updated_at = NOW()
 		WHERE id = $2 AND tenant_id = $3
@@ -585,10 +656,17 @@ func (h *ServiceHandler) Complete(c *gin.Context) {
 // GetDeadlines returns services sorted by deadline
 // GET /api/v1/services/deadlines
 func (h *ServiceHandler) GetDeadlines(c *gin.Context) {
-	ctx := c.Request.Context()
 	tenantID, _ := middleware.GetTenantID(c)
 	userID, _ := middleware.GetUserID(c)
 	role, _ := c.Get(middleware.AuthRole)
+
+	// Get TenantDB for RLS-protected operations
+	tenantDB, ok := middleware.GetTenantDB(c)
+	if !ok {
+		log.Error().Msg("TenantDB not found in context")
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "internal_error"})
+		return
+	}
 
 	limit, _ := strconv.Atoi(c.DefaultQuery("limit", "50"))
 	if limit > 100 {
@@ -625,23 +703,15 @@ func (h *ServiceHandler) GetDeadlines(c *gin.Context) {
 	query.WriteString(strconv.Itoa(argNum))
 	args = append(args, limit)
 
-	rows, err := h.db.Query(ctx, query.String(), args...)
-	if err != nil {
-		log.Error().Err(err).Msg("Failed to get service deadlines")
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "internal_error"})
-		return
-	}
-	defer rows.Close()
-
 	var services []map[string]interface{}
-	for rows.Next() {
+	err := tenantDB.Query(c, query.String(), args, func(rows pgx.Rows) error {
 		var id, clientID uuid.UUID
 		var name, status, priority string
 		var deadline time.Time
 		var clientName *string
 
 		if err := rows.Scan(&id, &name, &status, &priority, &deadline, &clientID, &clientName); err != nil {
-			continue
+			return err
 		}
 
 		services = append(services, map[string]interface{}{
@@ -653,6 +723,13 @@ func (h *ServiceHandler) GetDeadlines(c *gin.Context) {
 			"client_id":   clientID,
 			"client_name": clientName,
 		})
+		return nil
+	})
+
+	if err != nil {
+		log.Error().Err(err).Msg("Failed to get service deadlines")
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "internal_error"})
+		return
 	}
 
 	c.JSON(http.StatusOK, gin.H{"services": services})
@@ -661,10 +738,17 @@ func (h *ServiceHandler) GetDeadlines(c *gin.Context) {
 // GetAlerts returns at-risk and overdue services
 // GET /api/v1/services/alerts
 func (h *ServiceHandler) GetAlerts(c *gin.Context) {
-	ctx := c.Request.Context()
 	tenantID, _ := middleware.GetTenantID(c)
 	userID, _ := middleware.GetUserID(c)
 	role, _ := c.Get(middleware.AuthRole)
+
+	// Get TenantDB for RLS-protected operations
+	tenantDB, ok := middleware.GetTenantDB(c)
+	if !ok {
+		log.Error().Msg("TenantDB not found in context")
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "internal_error"})
+		return
+	}
 
 	var query strings.Builder
 	var args []interface{}
@@ -703,16 +787,8 @@ func (h *ServiceHandler) GetAlerts(c *gin.Context) {
 
 	query.WriteString(` ORDER BY s.deadline ASC NULLS LAST LIMIT 100`)
 
-	rows, err := h.db.Query(ctx, query.String(), args...)
-	if err != nil {
-		log.Error().Err(err).Msg("Failed to get service alerts")
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "internal_error"})
-		return
-	}
-	defer rows.Close()
-
 	var overdue, dueSoon, highRisk []map[string]interface{}
-	for rows.Next() {
+	err := tenantDB.Query(c, query.String(), args, func(rows pgx.Rows) error {
 		var id, clientID uuid.UUID
 		var name, status, priority string
 		var deadline *time.Time
@@ -720,7 +796,7 @@ func (h *ServiceHandler) GetAlerts(c *gin.Context) {
 		var alertType string
 
 		if err := rows.Scan(&id, &name, &status, &priority, &deadline, &riskLevel, &clientID, &clientName, &alertType); err != nil {
-			continue
+			return err
 		}
 
 		item := map[string]interface{}{
@@ -744,6 +820,13 @@ func (h *ServiceHandler) GetAlerts(c *gin.Context) {
 		case "high_risk":
 			highRisk = append(highRisk, item)
 		}
+		return nil
+	})
+
+	if err != nil {
+		log.Error().Err(err).Msg("Failed to get service alerts")
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "internal_error"})
+		return
 	}
 
 	c.JSON(http.StatusOK, gin.H{
@@ -765,11 +848,40 @@ func (h *ServiceHandler) Delete(c *gin.Context) {
 	ctx := c.Request.Context()
 	tenantID, _ := middleware.GetTenantID(c)
 	userID, _ := middleware.GetUserID(c)
+	role, _ := middleware.GetRole(c)
 
-	result, err := h.db.Exec(ctx, `
-		UPDATE services SET status = 'cancelled', version = version + 1, updated_at = NOW()
-		WHERE id = $1 AND tenant_id = $2
-	`, serviceID, tenantID)
+	// Get TenantDB for RLS-protected operations
+	tenantDB, ok := middleware.GetTenantDB(c)
+	if !ok {
+		log.Error().Msg("TenantDB not found in context")
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "internal_error"})
+		return
+	}
+
+	var rowsAffected int64
+	err = tenantDB.Transaction(c, func(tx pgx.Tx) error {
+		var sql string
+		var args []interface{}
+		if role == "super_admin" {
+			sql = `
+				UPDATE services SET status = 'cancelled', version = version + 1, updated_at = NOW()
+				WHERE id = $1
+			`
+			args = []interface{}{serviceID}
+		} else {
+			sql = `
+				UPDATE services SET status = 'cancelled', version = version + 1, updated_at = NOW()
+				WHERE id = $1 AND tenant_id = $2
+			`
+			args = []interface{}{serviceID, tenantID}
+		}
+		result, err := tx.Exec(ctx, sql, args...)
+		if err != nil {
+			return err
+		}
+		rowsAffected = result.RowsAffected()
+		return nil
+	})
 
 	if err != nil {
 		log.Error().Err(err).Msg("Failed to cancel service")
@@ -777,7 +889,7 @@ func (h *ServiceHandler) Delete(c *gin.Context) {
 		return
 	}
 
-	if result.RowsAffected() == 0 {
+	if rowsAffected == 0 {
 		c.JSON(http.StatusNotFound, gin.H{"error": "service_not_found"})
 		return
 	}
@@ -805,10 +917,17 @@ func (h *ServiceHandler) MarkHMRC(c *gin.Context) {
 		return
 	}
 
-	ctx := c.Request.Context()
 	tenantID, _ := middleware.GetTenantID(c)
 
-	result, err := h.db.Exec(ctx, `
+	// Get TenantDB for RLS-protected operations
+	tenantDB, ok := middleware.GetTenantDB(c)
+	if !ok {
+		log.Error().Msg("TenantDB not found in context")
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "internal_error"})
+		return
+	}
+
+	result, err := tenantDB.Exec(c, `
 		UPDATE services SET hmrc_reference = $1, filed_at = NOW(), version = version + 1, updated_at = NOW()
 		WHERE id = $2 AND tenant_id = $3
 	`, req.Reference, serviceID, tenantID)
@@ -844,6 +963,14 @@ func (h *ServiceHandler) BulkUpdate(c *gin.Context) {
 	ctx := c.Request.Context()
 	tenantID, _ := middleware.GetTenantID(c)
 	userID, _ := middleware.GetUserID(c)
+
+	// Get TenantDB for RLS-protected operations
+	tenantDB, ok := middleware.GetTenantDB(c)
+	if !ok {
+		log.Error().Msg("TenantDB not found in context")
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "internal_error"})
+		return
+	}
 
 	// Build update query
 	var setClauses []string
@@ -891,7 +1018,7 @@ func (h *ServiceHandler) BulkUpdate(c *gin.Context) {
 		" WHERE id = ANY($" + strconv.Itoa(argNum) + ") AND tenant_id = $" + strconv.Itoa(argNum+1)
 	args = append(args, serviceIDs, tenantID)
 
-	result, err := h.db.Exec(ctx, query, args...)
+	result, err := tenantDB.Exec(c, query, args...)
 	if err != nil {
 		log.Error().Err(err).Msg("Failed to bulk update services")
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "internal_error"})

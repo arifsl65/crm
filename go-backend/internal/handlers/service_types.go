@@ -81,8 +81,15 @@ type UpdateServiceTypeRequest struct {
 // List returns all service types for the tenant
 // GET /api/v1/service-types
 func (h *ServiceTypeHandler) List(c *gin.Context) {
-	ctx := c.Request.Context()
 	tenantID, _ := middleware.GetTenantID(c)
+
+	// Get TenantDB for RLS-protected operations
+	tenantDB, ok := middleware.GetTenantDB(c)
+	if !ok {
+		log.Error().Msg("TenantDB not found in context")
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "internal_error"})
+		return
+	}
 
 	// Pagination
 	limit, _ := strconv.Atoi(c.DefaultQuery("limit", "50"))
@@ -143,16 +150,8 @@ func (h *ServiceTypeHandler) List(c *gin.Context) {
 	query.WriteString(strconv.Itoa(argNum))
 	args = append(args, offset)
 
-	rows, err := h.db.Query(ctx, query.String(), args...)
-	if err != nil {
-		log.Error().Err(err).Msg("Failed to list service types")
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to fetch service types"})
-		return
-	}
-	defer rows.Close()
-
 	var serviceTypes []ServiceType
-	for rows.Next() {
+	err := tenantDB.Query(c, query.String(), args, func(rows pgx.Rows) error {
 		var st ServiceType
 		err := rows.Scan(
 			&st.ID, &st.TenantID, &st.Name, &st.Category, &st.Description,
@@ -162,10 +161,16 @@ func (h *ServiceTypeHandler) List(c *gin.Context) {
 			&st.CreatedAt, &st.UpdatedAt, &st.ServiceCount,
 		)
 		if err != nil {
-			log.Error().Err(err).Msg("Failed to scan service type")
-			continue
+			return err
 		}
 		serviceTypes = append(serviceTypes, st)
+		return nil
+	})
+
+	if err != nil {
+		log.Error().Err(err).Msg("Failed to list service types")
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to fetch service types"})
+		return
 	}
 
 	if serviceTypes == nil {
@@ -181,9 +186,16 @@ func (h *ServiceTypeHandler) List(c *gin.Context) {
 // Get returns a single service type
 // GET /api/v1/service-types/:id
 func (h *ServiceTypeHandler) Get(c *gin.Context) {
-	ctx := c.Request.Context()
 	tenantID, _ := middleware.GetTenantID(c)
 	id := c.Param("id")
+
+	// Get TenantDB for RLS-protected operations
+	tenantDB, ok := middleware.GetTenantDB(c)
+	if !ok {
+		log.Error().Msg("TenantDB not found in context")
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "internal_error"})
+		return
+	}
 
 	stID, err := uuid.Parse(id)
 	if err != nil {
@@ -203,13 +215,13 @@ func (h *ServiceTypeHandler) Get(c *gin.Context) {
 	`
 
 	var st ServiceType
-	err = h.db.QueryRow(ctx, query, stID, tenantID).Scan(
+	err = tenantDB.QueryRowScan(c, []interface{}{
 		&st.ID, &st.TenantID, &st.Name, &st.Category, &st.Description,
 		&st.DefaultPriority, &st.DefaultDeadlineDays, &st.RequiredDocs,
 		&st.ChecklistTemplate, &st.IsRecurring, &st.RecurrencePattern,
 		&st.HMRCRelevant, &st.IsActive, &st.SortOrder,
 		&st.CreatedAt, &st.UpdatedAt, &st.ServiceCount,
-	)
+	}, query, stID, tenantID)
 
 	if err == pgx.ErrNoRows {
 		c.JSON(http.StatusNotFound, gin.H{"error": "Service type not found"})
@@ -230,6 +242,14 @@ func (h *ServiceTypeHandler) Create(c *gin.Context) {
 	ctx := c.Request.Context()
 	tenantID, _ := middleware.GetTenantID(c)
 	userID, _ := middleware.GetUserID(c)
+
+	// Get tenant-scoped DB for RLS enforcement
+	tenantDB, ok := middleware.GetTenantDB(c)
+	if !ok {
+		log.Error().Msg("TenantDB not found in context")
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "internal_error"})
+		return
+	}
 
 	var req CreateServiceTypeRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
@@ -253,26 +273,7 @@ func (h *ServiceTypeHandler) Create(c *gin.Context) {
 		hmrcRelevant = *req.HMRCRelevant
 	}
 
-	// Get max sort order
-	var maxOrder int
-	err := h.db.QueryRow(ctx, `
-		SELECT COALESCE(MAX(sort_order), 0) FROM service_types WHERE tenant_id = $1
-	`, tenantID).Scan(&maxOrder)
-	if err != nil {
-		log.Error().Err(err).Msg("Failed to get max sort order")
-	}
-
 	id := uuid.New()
-	query := `
-		INSERT INTO service_types (
-			id, tenant_id, name, category, description, default_priority,
-			default_deadline_days, required_docs, checklist_template,
-			is_recurring, recurrence_pattern, hmrc_relevant, is_active, sort_order,
-			created_at, updated_at
-		) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, true, $13, NOW(), NOW())
-		RETURNING id, created_at, updated_at
-	`
-
 	var st ServiceType
 	st.ID = id
 	st.TenantID = tenantID
@@ -287,13 +288,33 @@ func (h *ServiceTypeHandler) Create(c *gin.Context) {
 	st.RecurrencePattern = req.RecurrencePattern
 	st.HMRCRelevant = hmrcRelevant
 	st.IsActive = true
-	st.SortOrder = maxOrder + 1
 
-	err = h.db.QueryRow(ctx, query,
-		id, tenantID, req.Name, req.Category, req.Description, defaultPriority,
-		req.DefaultDeadlineDays, req.RequiredDocs, req.ChecklistTemplate,
-		isRecurring, req.RecurrencePattern, hmrcRelevant, maxOrder+1,
-	).Scan(&st.ID, &st.CreatedAt, &st.UpdatedAt)
+	err := tenantDB.Transaction(c, func(tx pgx.Tx) error {
+		// Get max sort order
+		var maxOrder int
+		err := tx.QueryRow(ctx, `
+			SELECT COALESCE(MAX(sort_order), 0) FROM service_types WHERE tenant_id = $1
+		`, tenantID).Scan(&maxOrder)
+		if err != nil {
+			log.Error().Err(err).Msg("Failed to get max sort order")
+		}
+		st.SortOrder = maxOrder + 1
+
+		query := `
+			INSERT INTO service_types (
+				id, tenant_id, name, category, description, default_priority,
+				default_deadline_days, required_docs, checklist_template,
+				is_recurring, recurrence_pattern, hmrc_relevant, is_active, sort_order,
+				created_at, updated_at
+			) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, true, $13, NOW(), NOW())
+			RETURNING id, created_at, updated_at
+		`
+		return tx.QueryRow(ctx, query,
+			id, tenantID, req.Name, req.Category, req.Description, defaultPriority,
+			req.DefaultDeadlineDays, req.RequiredDocs, req.ChecklistTemplate,
+			isRecurring, req.RecurrencePattern, hmrcRelevant, st.SortOrder,
+		).Scan(&st.ID, &st.CreatedAt, &st.UpdatedAt)
+	})
 
 	if err != nil {
 		log.Error().Err(err).Msg("Failed to create service type")
@@ -317,6 +338,14 @@ func (h *ServiceTypeHandler) Update(c *gin.Context) {
 	tenantID, _ := middleware.GetTenantID(c)
 	userID, _ := middleware.GetUserID(c)
 	id := c.Param("id")
+
+	// Get tenant-scoped DB for RLS enforcement
+	tenantDB, ok := middleware.GetTenantDB(c)
+	if !ok {
+		log.Error().Msg("TenantDB not found in context")
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "internal_error"})
+		return
+	}
 
 	stID, err := uuid.Parse(id)
 	if err != nil {
@@ -412,13 +441,15 @@ func (h *ServiceTypeHandler) Update(c *gin.Context) {
 	args = append(args, stID, tenantID)
 
 	var st ServiceType
-	err = h.db.QueryRow(ctx, query, args...).Scan(
-		&st.ID, &st.TenantID, &st.Name, &st.Category, &st.Description,
-		&st.DefaultPriority, &st.DefaultDeadlineDays, &st.RequiredDocs,
-		&st.ChecklistTemplate, &st.IsRecurring, &st.RecurrencePattern,
-		&st.HMRCRelevant, &st.IsActive, &st.SortOrder,
-		&st.CreatedAt, &st.UpdatedAt,
-	)
+	err = tenantDB.Transaction(c, func(tx pgx.Tx) error {
+		return tx.QueryRow(ctx, query, args...).Scan(
+			&st.ID, &st.TenantID, &st.Name, &st.Category, &st.Description,
+			&st.DefaultPriority, &st.DefaultDeadlineDays, &st.RequiredDocs,
+			&st.ChecklistTemplate, &st.IsRecurring, &st.RecurrencePattern,
+			&st.HMRCRelevant, &st.IsActive, &st.SortOrder,
+			&st.CreatedAt, &st.UpdatedAt,
+		)
+	})
 
 	if err == pgx.ErrNoRows {
 		c.JSON(http.StatusNotFound, gin.H{"error": "Service type not found"})
@@ -444,53 +475,68 @@ func (h *ServiceTypeHandler) Delete(c *gin.Context) {
 	userID, _ := middleware.GetUserID(c)
 	id := c.Param("id")
 
+	// Get tenant-scoped DB for RLS enforcement
+	tenantDB, ok := middleware.GetTenantDB(c)
+	if !ok {
+		log.Error().Msg("TenantDB not found in context")
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "internal_error"})
+		return
+	}
+
 	stID, err := uuid.Parse(id)
 	if err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid service type ID"})
 		return
 	}
 
-	// Check if any services are using this type
 	var serviceCount int
-	err = h.db.QueryRow(ctx, `
-		SELECT COUNT(*) FROM services WHERE type_id = $1 AND tenant_id = $2
-	`, stID, tenantID).Scan(&serviceCount)
+	var rowsAffected int64
+	var softDelete bool
+
+	err = tenantDB.Transaction(c, func(tx pgx.Tx) error {
+		// Check if any services are using this type
+		err := tx.QueryRow(ctx, `
+			SELECT COUNT(*) FROM services WHERE type_id = $1 AND tenant_id = $2
+		`, stID, tenantID).Scan(&serviceCount)
+		if err != nil {
+			return err
+		}
+
+		if serviceCount > 0 {
+			// Soft delete - just deactivate
+			softDelete = true
+			_, err = tx.Exec(ctx, `
+				UPDATE service_types SET is_active = false, updated_at = NOW()
+				WHERE id = $1 AND tenant_id = $2
+			`, stID, tenantID)
+			return err
+		}
+
+		// Hard delete - no services using it
+		result, err := tx.Exec(ctx, `
+			DELETE FROM service_types WHERE id = $1 AND tenant_id = $2
+		`, stID, tenantID)
+		if err != nil {
+			return err
+		}
+		rowsAffected = result.RowsAffected()
+		return nil
+	})
+
 	if err != nil {
-		log.Error().Err(err).Msg("Failed to check service type usage")
+		log.Error().Err(err).Msg("Failed to delete service type")
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to delete service type"})
 		return
 	}
 
-	if serviceCount > 0 {
-		// Soft delete - just deactivate
-		_, err = h.db.Exec(ctx, `
-			UPDATE service_types SET is_active = false, updated_at = NOW()
-			WHERE id = $1 AND tenant_id = $2
-		`, stID, tenantID)
-		if err != nil {
-			log.Error().Err(err).Msg("Failed to deactivate service type")
-			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to delete service type"})
-			return
-		}
-	} else {
-		// Hard delete - no services using it
-		result, err := h.db.Exec(ctx, `
-			DELETE FROM service_types WHERE id = $1 AND tenant_id = $2
-		`, stID, tenantID)
-		if err != nil {
-			log.Error().Err(err).Msg("Failed to delete service type")
-			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to delete service type"})
-			return
-		}
-		if result.RowsAffected() == 0 {
-			c.JSON(http.StatusNotFound, gin.H{"error": "Service type not found"})
-			return
-		}
+	if !softDelete && rowsAffected == 0 {
+		c.JSON(http.StatusNotFound, gin.H{"error": "Service type not found"})
+		return
 	}
 
 	// Audit log
 	h.audit.LogEntity(ctx, audit.ActionServiceTypeDelete, &userID, &tenantID, "service_type", &stID, c.ClientIP(), map[string]interface{}{
-		"soft_delete": serviceCount > 0,
+		"soft_delete": softDelete,
 	})
 
 	c.JSON(http.StatusOK, gin.H{"message": "Service type deleted"})
@@ -499,8 +545,15 @@ func (h *ServiceTypeHandler) Delete(c *gin.Context) {
 // GetCategories returns distinct categories for service types
 // GET /api/v1/service-types/categories
 func (h *ServiceTypeHandler) GetCategories(c *gin.Context) {
-	ctx := c.Request.Context()
 	tenantID, _ := middleware.GetTenantID(c)
+
+	// Get TenantDB for RLS-protected operations
+	tenantDB, ok := middleware.GetTenantDB(c)
+	if !ok {
+		log.Error().Msg("TenantDB not found in context")
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "internal_error"})
+		return
+	}
 
 	query := `
 		SELECT DISTINCT category FROM service_types
@@ -508,21 +561,20 @@ func (h *ServiceTypeHandler) GetCategories(c *gin.Context) {
 		ORDER BY category ASC
 	`
 
-	rows, err := h.db.Query(ctx, query, tenantID)
+	var categories []string
+	err := tenantDB.Query(c, query, []interface{}{tenantID}, func(rows pgx.Rows) error {
+		var cat string
+		if err := rows.Scan(&cat); err != nil {
+			return err
+		}
+		categories = append(categories, cat)
+		return nil
+	})
+
 	if err != nil {
 		log.Error().Err(err).Msg("Failed to get categories")
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to fetch categories"})
 		return
-	}
-	defer rows.Close()
-
-	var categories []string
-	for rows.Next() {
-		var cat string
-		if err := rows.Scan(&cat); err != nil {
-			continue
-		}
-		categories = append(categories, cat)
 	}
 
 	if categories == nil {
@@ -535,8 +587,15 @@ func (h *ServiceTypeHandler) GetCategories(c *gin.Context) {
 // Reorder updates the sort order of service types
 // PATCH /api/v1/service-types/reorder
 func (h *ServiceTypeHandler) Reorder(c *gin.Context) {
-	ctx := c.Request.Context()
 	tenantID, _ := middleware.GetTenantID(c)
+
+	// Get TenantDB for RLS-protected operations
+	tenantDB, ok := middleware.GetTenantDB(c)
+	if !ok {
+		log.Error().Msg("TenantDB not found in context")
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "internal_error"})
+		return
+	}
 
 	var req struct {
 		Items []struct {
@@ -553,7 +612,7 @@ func (h *ServiceTypeHandler) Reorder(c *gin.Context) {
 	// Update each item's sort order
 	for _, item := range req.Items {
 		stID, _ := uuid.Parse(item.ID)
-		_, err := h.db.Exec(ctx, `
+		_, err := tenantDB.Exec(c, `
 			UPDATE service_types SET sort_order = $1, updated_at = NOW()
 			WHERE id = $2 AND tenant_id = $3
 		`, item.SortOrder, stID, tenantID)
@@ -573,6 +632,14 @@ func (h *ServiceTypeHandler) Clone(c *gin.Context) {
 	userID, _ := middleware.GetUserID(c)
 	id := c.Param("id")
 
+	// Get TenantDB for RLS-protected operations
+	tenantDB, ok := middleware.GetTenantDB(c)
+	if !ok {
+		log.Error().Msg("TenantDB not found in context")
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "internal_error"})
+		return
+	}
+
 	stID, err := uuid.Parse(id)
 	if err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid service type ID"})
@@ -581,17 +648,17 @@ func (h *ServiceTypeHandler) Clone(c *gin.Context) {
 
 	// Get original service type
 	var original ServiceType
-	err = h.db.QueryRow(ctx, `
-		SELECT id, tenant_id, name, category, description, default_priority,
-		       default_deadline_days, required_docs, checklist_template,
-		       is_recurring, recurrence_pattern, hmrc_relevant
-		FROM service_types WHERE id = $1 AND tenant_id = $2
-	`, stID, tenantID).Scan(
+	err = tenantDB.QueryRowScan(c, []interface{}{
 		&original.ID, &original.TenantID, &original.Name, &original.Category,
 		&original.Description, &original.DefaultPriority, &original.DefaultDeadlineDays,
 		&original.RequiredDocs, &original.ChecklistTemplate,
 		&original.IsRecurring, &original.RecurrencePattern, &original.HMRCRelevant,
-	)
+	}, `
+		SELECT id, tenant_id, name, category, description, default_priority,
+		       default_deadline_days, required_docs, checklist_template,
+		       is_recurring, recurrence_pattern, hmrc_relevant
+		FROM service_types WHERE id = $1 AND tenant_id = $2
+	`, stID, tenantID)
 
 	if err == pgx.ErrNoRows {
 		c.JSON(http.StatusNotFound, gin.H{"error": "Service type not found"})
@@ -603,39 +670,41 @@ func (h *ServiceTypeHandler) Clone(c *gin.Context) {
 		return
 	}
 
-	// Get max sort order
-	var maxOrder int
-	_ = h.db.QueryRow(ctx, `
-		SELECT COALESCE(MAX(sort_order), 0) FROM service_types WHERE tenant_id = $1
-	`, tenantID).Scan(&maxOrder)
-
-	// Create clone
+	// Create clone within transaction
 	newID := uuid.New()
 	newName := original.Name + " (Copy)"
 
 	var cloned ServiceType
-	err = h.db.QueryRow(ctx, `
-		INSERT INTO service_types (
-			id, tenant_id, name, category, description, default_priority,
-			default_deadline_days, required_docs, checklist_template,
-			is_recurring, recurrence_pattern, hmrc_relevant, is_active, sort_order,
-			created_at, updated_at
-		) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, true, $13, NOW(), NOW())
-		RETURNING id, tenant_id, name, category, description, default_priority,
-		          default_deadline_days, required_docs, checklist_template,
-		          is_recurring, recurrence_pattern, hmrc_relevant, is_active, sort_order,
-		          created_at, updated_at
-	`, newID, tenantID, newName, original.Category, original.Description,
-		original.DefaultPriority, original.DefaultDeadlineDays, original.RequiredDocs,
-		original.ChecklistTemplate, original.IsRecurring, original.RecurrencePattern,
-		original.HMRCRelevant, maxOrder+1,
-	).Scan(
-		&cloned.ID, &cloned.TenantID, &cloned.Name, &cloned.Category,
-		&cloned.Description, &cloned.DefaultPriority, &cloned.DefaultDeadlineDays,
-		&cloned.RequiredDocs, &cloned.ChecklistTemplate,
-		&cloned.IsRecurring, &cloned.RecurrencePattern, &cloned.HMRCRelevant,
-		&cloned.IsActive, &cloned.SortOrder, &cloned.CreatedAt, &cloned.UpdatedAt,
-	)
+	err = tenantDB.Transaction(c, func(tx pgx.Tx) error {
+		// Get max sort order
+		var maxOrder int
+		_ = tx.QueryRow(ctx, `
+			SELECT COALESCE(MAX(sort_order), 0) FROM service_types WHERE tenant_id = $1
+		`, tenantID).Scan(&maxOrder)
+
+		return tx.QueryRow(ctx, `
+			INSERT INTO service_types (
+				id, tenant_id, name, category, description, default_priority,
+				default_deadline_days, required_docs, checklist_template,
+				is_recurring, recurrence_pattern, hmrc_relevant, is_active, sort_order,
+				created_at, updated_at
+			) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, true, $13, NOW(), NOW())
+			RETURNING id, tenant_id, name, category, description, default_priority,
+			          default_deadline_days, required_docs, checklist_template,
+			          is_recurring, recurrence_pattern, hmrc_relevant, is_active, sort_order,
+			          created_at, updated_at
+		`, newID, tenantID, newName, original.Category, original.Description,
+			original.DefaultPriority, original.DefaultDeadlineDays, original.RequiredDocs,
+			original.ChecklistTemplate, original.IsRecurring, original.RecurrencePattern,
+			original.HMRCRelevant, maxOrder+1,
+		).Scan(
+			&cloned.ID, &cloned.TenantID, &cloned.Name, &cloned.Category,
+			&cloned.Description, &cloned.DefaultPriority, &cloned.DefaultDeadlineDays,
+			&cloned.RequiredDocs, &cloned.ChecklistTemplate,
+			&cloned.IsRecurring, &cloned.RecurrencePattern, &cloned.HMRCRelevant,
+			&cloned.IsActive, &cloned.SortOrder, &cloned.CreatedAt, &cloned.UpdatedAt,
+		)
+	})
 
 	if err != nil {
 		log.Error().Err(err).Msg("Failed to clone service type")

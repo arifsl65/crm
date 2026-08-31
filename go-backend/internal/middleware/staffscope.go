@@ -12,6 +12,12 @@ import (
 // 1. Has a valid tenant_id (not a super_admin operating without tenant context)
 // 2. Has one of the allowed roles
 //
+// Valid roles (from schema): super_admin, tenant_admin, staff, client
+// - super_admin: Global admin, bypasses tenant checks (handled separately)
+// - tenant_admin: Admin within a specific tenant
+// - staff: Staff member within a tenant
+// - client: Client portal access within a tenant
+//
 // This is used for tenant-specific operations like managing clients,
 // uploading documents, or viewing service details.
 func StaffScope(allowedRoles ...string) gin.HandlerFunc {
@@ -21,10 +27,9 @@ func StaffScope(allowedRoles ...string) gin.HandlerFunc {
 		allowed[role] = true
 	}
 
-	// Default allowed roles if none specified
+	// Default allowed roles if none specified (tenant_admin and staff)
 	if len(allowed) == 0 {
-		allowed["admin"] = true
-		allowed["manager"] = true
+		allowed["tenant_admin"] = true
 		allowed["staff"] = true
 	}
 
@@ -81,17 +86,39 @@ func StaffScope(allowedRoles ...string) gin.HandlerFunc {
 	}
 }
 
-// AdminOnly is a convenience middleware that restricts to admin roles only.
-func AdminOnly() gin.HandlerFunc {
-	return StaffScope("admin", "super_admin")
+// TenantAdminOnly restricts to tenant_admin role only.
+// Note: super_admin bypasses this check automatically in StaffScope.
+func TenantAdminOnly() gin.HandlerFunc {
+	return StaffScope("tenant_admin")
 }
 
-// ManagerOrAbove restricts to manager, admin, or super_admin roles.
-func ManagerOrAbove() gin.HandlerFunc {
-	return StaffScope("manager", "admin", "super_admin")
+// TenantAdminOrAbove restricts to tenant_admin or super_admin roles.
+// Use this for admin-level operations within a tenant.
+func TenantAdminOrAbove() gin.HandlerFunc {
+	return StaffScope("tenant_admin")
 }
 
-// StaffOrAbove allows all staff roles (staff, manager, admin, super_admin).
+// StaffOrAbove allows staff and tenant_admin roles.
+// Note: super_admin bypasses this check automatically in StaffScope.
+// Use this for general staff operations (most endpoints).
 func StaffOrAbove() gin.HandlerFunc {
-	return StaffScope("staff", "manager", "admin", "super_admin")
+	return StaffScope("staff", "tenant_admin")
+}
+
+// ClientOrAbove allows client, staff, and tenant_admin roles.
+// Use this for read operations that clients can also access.
+func ClientOrAbove() gin.HandlerFunc {
+	return StaffScope("client", "staff", "tenant_admin")
+}
+
+// Deprecated: AdminOnly is deprecated, use TenantAdminOnly instead.
+// Kept for backward compatibility during migration.
+func AdminOnly() gin.HandlerFunc {
+	return TenantAdminOnly()
+}
+
+// Deprecated: ManagerOrAbove is deprecated, use TenantAdminOrAbove instead.
+// The "manager" role does not exist in the schema.
+func ManagerOrAbove() gin.HandlerFunc {
+	return TenantAdminOrAbove()
 }

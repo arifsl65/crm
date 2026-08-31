@@ -100,7 +100,7 @@ func main() {
 	auditLogger := audit.NewLogger(db)
 
 	// Initialize handlers
-	authHandler := handlers.NewAuthHandler(db, jwtManager, sessionManager, emailClient, cfg.FrontendURL, authRateLimiter, auditLogger)
+	authHandler := handlers.NewAuthHandler(db, jwtManager, sessionManager, emailClient, cfg.FrontendURL, authRateLimiter, auditLogger, redis)
 	tenantHandler := handlers.NewTenantHandler(db)
 	userHandler := handlers.NewUserHandler(db)
 	clientHandler := handlers.NewClientHandler(db, auditLogger)
@@ -192,11 +192,8 @@ func setupRouter(cfg *config.Config, db *database.Pool, redis *cache.Client, aiC
 		CacheTTL:         5 * time.Minute,
 	}))
 
-	// Security headers (HSTS, CSP, X-Frame-Options, etc.)
-	router.Use(middleware.SecurityHeadersWithConfig(middleware.SecurityHeadersConfig{
-		EnableHSTS:   cfg.App.Env == "production",
-		AllowFraming: false,
-	}))
+	// Security headers (exact values from API_ENDPOINTS.md)
+	router.Use(middleware.SecurityHeaders())
 
 	// Rate limiting (applied to all routes except health checks)
 	if cfg.RateLimit.Enabled {
@@ -205,6 +202,7 @@ func setupRouter(cfg *config.Config, db *database.Pool, redis *cache.Client, aiC
 
 	// Health endpoints (no auth required)
 	router.GET("/health", healthHandler())
+	router.HEAD("/health", healthHandler())
 	router.GET("/ready", readyHandler(db, redis, aiClient))
 
 	// Metrics endpoint - protected with bearer token (Fix #12)
@@ -231,7 +229,7 @@ func setupRouter(cfg *config.Config, db *database.Pool, redis *cache.Client, aiC
 
 		// Auth routes (protected)
 		authProtected := v1.Group("/auth")
-		authProtected.Use(middleware.JWTAuth(jwtManager))
+		authProtected.Use(middleware.JWTAuth(jwtManager, redis))
 		authProtected.Use(middleware.TenantRLS(db)) // Wire RLS context
 		{
 			authProtected.POST("/logout", authHandler.Logout)
@@ -250,7 +248,7 @@ func setupRouter(cfg *config.Config, db *database.Pool, redis *cache.Client, aiC
 
 		// Protected routes (require authentication)
 		protected := v1.Group("")
-		protected.Use(middleware.JWTAuth(jwtManager))
+		protected.Use(middleware.JWTAuth(jwtManager, redis))
 		protected.Use(middleware.TenantRLS(db)) // Wire RLS context for tenant isolation
 
 		// Tenant routes
@@ -312,6 +310,7 @@ func setupRouter(cfg *config.Config, db *database.Pool, redis *cache.Client, aiC
 			documents.POST("/bulk-request", middleware.RequireRole("super_admin", "tenant_admin", "staff"), documentHandler.BulkRequest)
 			documents.POST("/bulk-approve", middleware.RequireRole("super_admin", "tenant_admin"), documentHandler.BulkApprove)
 			documents.GET("/firm", documentHandler.ListFirm)
+			documents.POST("/upload-url", middleware.RequireRole("super_admin", "tenant_admin", "staff"), documentHandler.GenerateUploadURL)
 			documents.POST("/qr", middleware.RequireRole("super_admin", "tenant_admin", "staff"), documentHandler.GenerateQRToken)
 			documents.GET("/:id", middleware.ValidateUUID("id"), documentHandler.Get)
 			documents.PATCH("/:id", middleware.ValidateUUID("id"), middleware.RequireRole("super_admin", "tenant_admin", "staff"), documentHandler.Update)
@@ -508,7 +507,7 @@ func rateLimiter(cfg config.RateLimitConfig, redis *cache.Client) gin.HandlerFun
 
 			allowed, count := fallbackLimiter.check(clientIP, totalLimit, cfg.Window)
 			if !allowed {
-				c.Header("X-RateLimit-Limit", strconv.Itoa(cfg.RequestsPerIP))
+				c.Header("X-RateLimit-Limit", strconv.Itoa(totalLimit))
 				c.Header("X-RateLimit-Remaining", "0")
 				c.Header("Retry-After", strconv.Itoa(windowSeconds))
 
@@ -525,7 +524,7 @@ func rateLimiter(cfg config.RateLimitConfig, redis *cache.Client) gin.HandlerFun
 				return
 			}
 
-			c.Header("X-RateLimit-Limit", strconv.Itoa(cfg.RequestsPerIP))
+			c.Header("X-RateLimit-Limit", strconv.Itoa(totalLimit))
 			c.Header("X-RateLimit-Remaining", strconv.Itoa(totalLimit-count))
 			c.Next()
 			return
@@ -536,7 +535,7 @@ func rateLimiter(cfg config.RateLimitConfig, redis *cache.Client) gin.HandlerFun
 		if remaining < 0 {
 			remaining = 0
 		}
-		c.Header("X-RateLimit-Limit", strconv.Itoa(cfg.RequestsPerIP))
+		c.Header("X-RateLimit-Limit", strconv.Itoa(totalLimit))
 		c.Header("X-RateLimit-Remaining", strconv.Itoa(remaining))
 
 		// Check if over limit (already incremented atomically)

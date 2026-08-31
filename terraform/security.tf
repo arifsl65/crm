@@ -147,38 +147,21 @@ resource "alicloud_security_group_rule" "ecs_egress" {
 }
 
 # =============================================================================
-# Redis Security Group
+# Redis Security Group - DISABLED
 # =============================================================================
+# Redis now runs as Docker container on ECS, not managed ApsaraDB.
+# The ecs_redis_internal rule above allows Redis traffic within VPC.
+# This section is kept for reference if managed Redis is re-enabled later.
 
-resource "alicloud_security_group" "redis" {
-  name        = "${local.name_prefix}-redis-sg"
-  vpc_id      = alicloud_vpc.main.id
-  description = "Security group for Redis"
-
-  tags = merge(local.common_tags, {
-    Name = "${local.name_prefix}-redis-sg"
-  })
-}
-
-# Allow Redis port from Go Backend ECI containers
-resource "alicloud_security_group_rule" "redis_from_go_backend" {
-  security_group_id        = alicloud_security_group.redis.id
-  type                     = "ingress"
-  ip_protocol              = "tcp"
-  port_range               = "6379/6379"
-  source_security_group_id = alicloud_security_group.go_backend.id
-  description              = "Allow Redis traffic from Go backend"
-}
-
-# Allow Redis port from Python AI ECI containers
-resource "alicloud_security_group_rule" "redis_from_python_ai" {
-  security_group_id        = alicloud_security_group.redis.id
-  type                     = "ingress"
-  ip_protocol              = "tcp"
-  port_range               = "6379/6379"
-  source_security_group_id = alicloud_security_group.python_ai.id
-  description              = "Allow Redis traffic from Python AI"
-}
+# resource "alicloud_security_group" "redis" {
+#   name        = "${local.name_prefix}-redis-sg"
+#   vpc_id      = alicloud_vpc.main.id
+#   description = "Security group for Redis"
+#
+#   tags = merge(local.common_tags, {
+#     Name = "${local.name_prefix}-redis-sg"
+#   })
+# }
 
 # =============================================================================
 # Network ACL for Additional Layer of Security
@@ -308,9 +291,8 @@ resource "alicloud_network_acl" "main" {
 output "security_groups" {
   description = "Security group IDs"
   value = {
-    alb   = alicloud_security_group.alb.id
-    ecs   = alicloud_security_group.ecs.id
-    redis = alicloud_security_group.redis.id
+    alb = alicloud_security_group.alb.id
+    ecs = alicloud_security_group.ecs.id
   }
 }
 

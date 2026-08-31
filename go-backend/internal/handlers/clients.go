@@ -87,10 +87,17 @@ type UpdateClientRequest struct {
 // List returns all clients for the tenant (staff-scoped)
 // GET /api/v1/clients
 func (h *ClientHandler) List(c *gin.Context) {
-	ctx := c.Request.Context()
 	tenantID, _ := middleware.GetTenantID(c)
 	userID, _ := middleware.GetUserID(c)
 	role, _ := c.Get(middleware.AuthRole)
+
+	// Get TenantDB for RLS-protected operations
+	tenantDB, ok := middleware.GetTenantDB(c)
+	if !ok {
+		log.Error().Msg("TenantDB not found in context")
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "internal_error"})
+		return
+	}
 
 	// Pagination
 	limit, _ := strconv.Atoi(c.DefaultQuery("limit", "50"))
@@ -103,6 +110,9 @@ func (h *ClientHandler) List(c *gin.Context) {
 	status := c.Query("status")
 	search := c.Query("search")
 
+	roleStr, _ := role.(string)
+	isSuperAdmin := roleStr == "super_admin"
+
 	var query strings.Builder
 	var args []interface{}
 	argNum := 1
@@ -114,13 +124,18 @@ func (h *ClientHandler) List(c *gin.Context) {
 		       c.status, c.risk_score, c.email_status, c.last_contact_at,
 		       c.created_at, c.updated_at
 		FROM clients c
-		WHERE c.tenant_id = $1
 	`)
-	args = append(args, tenantID)
-	argNum++
+	if isSuperAdmin {
+		// Super admins can list clients across all tenants.
+		query.WriteString(`WHERE 1=1`)
+	} else {
+		query.WriteString(`WHERE c.tenant_id = $`)
+		query.WriteString(strconv.Itoa(argNum))
+		args = append(args, tenantID)
+		argNum++
+	}
 
 	// Staff scoping - only see assigned clients unless admin
-	roleStr, _ := role.(string)
 	if roleStr == "staff" {
 		query.WriteString(` AND c.id IN (SELECT client_id FROM staff_clients WHERE staff_id = $`)
 		query.WriteString(strconv.Itoa(argNum))
@@ -159,16 +174,8 @@ func (h *ClientHandler) List(c *gin.Context) {
 	query.WriteString(strconv.Itoa(argNum))
 	args = append(args, offset)
 
-	rows, err := h.db.Query(ctx, query.String(), args...)
-	if err != nil {
-		log.Error().Err(err).Msg("Failed to list clients")
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "internal_error"})
-		return
-	}
-	defer rows.Close()
-
 	clients := []Client{}
-	for rows.Next() {
+	err := tenantDB.Query(c, query.String(), args, func(rows pgx.Rows) error {
 		var client Client
 		var yearEnd, incDate *time.Time
 		err := rows.Scan(
@@ -179,8 +186,7 @@ func (h *ClientHandler) List(c *gin.Context) {
 			&client.CreatedAt, &client.UpdatedAt,
 		)
 		if err != nil {
-			log.Error().Err(err).Msg("Failed to scan client")
-			continue
+			return err
 		}
 		if yearEnd != nil {
 			s := yearEnd.Format("2006-01-02")
@@ -191,6 +197,13 @@ func (h *ClientHandler) List(c *gin.Context) {
 			client.IncorporationDate = &s
 		}
 		clients = append(clients, client)
+		return nil
+	})
+
+	if err != nil {
+		log.Error().Err(err).Msg("Failed to list clients")
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "internal_error"})
+		return
 	}
 
 	c.JSON(http.StatusOK, gin.H{
@@ -203,8 +216,16 @@ func (h *ClientHandler) List(c *gin.Context) {
 // Get returns a single client by ID
 // GET /api/v1/clients/:id
 func (h *ClientHandler) Get(c *gin.Context) {
-	ctx := c.Request.Context()
 	tenantID, _ := middleware.GetTenantID(c)
+	role, _ := middleware.GetRole(c)
+
+	// Get TenantDB for RLS-protected operations
+	tenantDB, ok := middleware.GetTenantDB(c)
+	if !ok {
+		log.Error().Msg("TenantDB not found in context")
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "internal_error"})
+		return
+	}
 
 	clientID, err := uuid.Parse(c.Param("id"))
 	if err != nil {
@@ -214,21 +235,38 @@ func (h *ClientHandler) Get(c *gin.Context) {
 
 	var client Client
 	var yearEnd, incDate *time.Time
-	err = h.db.QueryRow(ctx, `
-		SELECT id, tenant_id, user_id, company_name, contact_name,
-		       email, phone, address, year_end, utr, company_number,
-		       company_type, incorporation_date, vat_number, vat_quarter,
-		       status, risk_score, email_status, last_contact_at,
-		       created_at, updated_at
-		FROM clients
-		WHERE id = $1 AND tenant_id = $2
-	`, clientID, tenantID).Scan(
+	var sql string
+	var args []interface{}
+	if role == "super_admin" {
+		sql = `
+			SELECT id, tenant_id, user_id, company_name, contact_name,
+			       email, phone, address, year_end, utr, company_number,
+			       company_type, incorporation_date, vat_number, vat_quarter,
+			       status, risk_score, email_status, last_contact_at,
+			       created_at, updated_at
+			FROM clients
+			WHERE id = $1
+		`
+		args = []interface{}{clientID}
+	} else {
+		sql = `
+			SELECT id, tenant_id, user_id, company_name, contact_name,
+			       email, phone, address, year_end, utr, company_number,
+			       company_type, incorporation_date, vat_number, vat_quarter,
+			       status, risk_score, email_status, last_contact_at,
+			       created_at, updated_at
+			FROM clients
+			WHERE id = $1 AND tenant_id = $2
+		`
+		args = []interface{}{clientID, tenantID}
+	}
+	err = tenantDB.QueryRowScan(c, []interface{}{
 		&client.ID, &client.TenantID, &client.UserID, &client.CompanyName, &client.ContactName,
 		&client.Email, &client.Phone, &client.Address, &yearEnd, &client.UTR, &client.CompanyNumber,
 		&client.CompanyType, &incDate, &client.VATNumber, &client.VATQuarter,
 		&client.Status, &client.RiskScore, &client.EmailStatus, &client.LastContactAt,
 		&client.CreatedAt, &client.UpdatedAt,
-	)
+	}, sql, args...)
 	if err != nil {
 		if err == pgx.ErrNoRows {
 			c.JSON(http.StatusNotFound, gin.H{"error": "client_not_found"})
@@ -264,6 +302,14 @@ func (h *ClientHandler) Create(c *gin.Context) {
 	tenantID, _ := middleware.GetTenantID(c)
 	userID, _ := middleware.GetUserID(c)
 
+	// Get TenantDB for RLS-protected operations
+	tenantDB, ok := middleware.GetTenantDB(c)
+	if !ok {
+		log.Error().Msg("TenantDB not found in context")
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "internal_error"})
+		return
+	}
+
 	clientID := uuid.New()
 
 	// Parse dates if provided
@@ -281,17 +327,21 @@ func (h *ClientHandler) Create(c *gin.Context) {
 		}
 	}
 
-	_, err := h.db.Exec(ctx, `
-		INSERT INTO clients (
-			id, tenant_id, company_name, contact_name, email, phone, address,
-			year_end, utr, company_number, company_type, incorporation_date,
-			vat_number, vat_quarter, status, email_status
-		) VALUES (
-			$1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, 'active', 'active'
-		)
-	`, clientID, tenantID, req.CompanyName, req.ContactName, strings.ToLower(req.Email),
-		req.Phone, req.Address, yearEnd, req.UTR, req.CompanyNumber, req.CompanyType,
-		incDate, req.VATNumber, req.VATQuarter)
+	// Use TenantDB.Transaction for RLS-protected insert
+	err := tenantDB.Transaction(c, func(tx pgx.Tx) error {
+		_, err := tx.Exec(ctx, `
+			INSERT INTO clients (
+				id, tenant_id, company_name, contact_name, email, phone, address,
+				year_end, utr, company_number, company_type, incorporation_date,
+				vat_number, vat_quarter, status, email_status
+			) VALUES (
+				$1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, 'active', 'active'
+			)
+		`, clientID, tenantID, req.CompanyName, req.ContactName, strings.ToLower(req.Email),
+			req.Phone, req.Address, yearEnd, req.UTR, req.CompanyNumber, req.CompanyType,
+			incDate, req.VATNumber, req.VATQuarter)
+		return err
+	})
 
 	if err != nil {
 		log.Error().Err(err).Msg("Failed to create client")
@@ -326,6 +376,14 @@ func (h *ClientHandler) Update(c *gin.Context) {
 	ctx := c.Request.Context()
 	tenantID, _ := middleware.GetTenantID(c)
 	userID, _ := middleware.GetUserID(c)
+
+	// Get TenantDB for RLS-protected operations
+	tenantDB, ok := middleware.GetTenantDB(c)
+	if !ok {
+		log.Error().Msg("TenantDB not found in context")
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "internal_error"})
+		return
+	}
 
 	// Build dynamic update query
 	var setClauses []string
@@ -394,14 +452,23 @@ func (h *ClientHandler) Update(c *gin.Context) {
 		" WHERE id = $" + strconv.Itoa(argNum) + " AND tenant_id = $" + strconv.Itoa(argNum+1)
 	args = append(args, clientID, tenantID)
 
-	result, err := h.db.Exec(ctx, query, args...)
+	var rowsAffected int64
+	err = tenantDB.Transaction(c, func(tx pgx.Tx) error {
+		result, err := tx.Exec(ctx, query, args...)
+		if err != nil {
+			return err
+		}
+		rowsAffected = result.RowsAffected()
+		return nil
+	})
+
 	if err != nil {
 		log.Error().Err(err).Msg("Failed to update client")
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "internal_error"})
 		return
 	}
 
-	if result.RowsAffected() == 0 {
+	if rowsAffected == 0 {
 		c.JSON(http.StatusNotFound, gin.H{"error": "client_not_found"})
 		return
 	}
@@ -424,11 +491,40 @@ func (h *ClientHandler) Delete(c *gin.Context) {
 	ctx := c.Request.Context()
 	tenantID, _ := middleware.GetTenantID(c)
 	userID, _ := middleware.GetUserID(c)
+	role, _ := middleware.GetRole(c)
 
-	result, err := h.db.Exec(ctx, `
-		UPDATE clients SET status = 'archived', updated_at = NOW()
-		WHERE id = $1 AND tenant_id = $2
-	`, clientID, tenantID)
+	// Get TenantDB for RLS-protected operations
+	tenantDB, ok := middleware.GetTenantDB(c)
+	if !ok {
+		log.Error().Msg("TenantDB not found in context")
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "internal_error"})
+		return
+	}
+
+	var rowsAffected int64
+	err = tenantDB.Transaction(c, func(tx pgx.Tx) error {
+		var sql string
+		var args []interface{}
+		if role == "super_admin" {
+			sql = `
+				UPDATE clients SET status = 'archived', updated_at = NOW()
+				WHERE id = $1
+			`
+			args = []interface{}{clientID}
+		} else {
+			sql = `
+				UPDATE clients SET status = 'archived', updated_at = NOW()
+				WHERE id = $1 AND tenant_id = $2
+			`
+			args = []interface{}{clientID, tenantID}
+		}
+		result, err := tx.Exec(ctx, sql, args...)
+		if err != nil {
+			return err
+		}
+		rowsAffected = result.RowsAffected()
+		return nil
+	})
 
 	if err != nil {
 		log.Error().Err(err).Msg("Failed to archive client")
@@ -436,7 +532,7 @@ func (h *ClientHandler) Delete(c *gin.Context) {
 		return
 	}
 
-	if result.RowsAffected() == 0 {
+	if rowsAffected == 0 {
 		c.JSON(http.StatusNotFound, gin.H{"error": "client_not_found"})
 		return
 	}
@@ -459,10 +555,26 @@ func (h *ClientHandler) Restore(c *gin.Context) {
 	ctx := c.Request.Context()
 	tenantID, _ := middleware.GetTenantID(c)
 
-	result, err := h.db.Exec(ctx, `
-		UPDATE clients SET status = 'active', updated_at = NOW()
-		WHERE id = $1 AND tenant_id = $2 AND status = 'archived'
-	`, clientID, tenantID)
+	// Get TenantDB for RLS-protected operations
+	tenantDB, ok := middleware.GetTenantDB(c)
+	if !ok {
+		log.Error().Msg("TenantDB not found in context")
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "internal_error"})
+		return
+	}
+
+	var rowsAffected int64
+	err = tenantDB.Transaction(c, func(tx pgx.Tx) error {
+		result, err := tx.Exec(ctx, `
+			UPDATE clients SET status = 'active', updated_at = NOW()
+			WHERE id = $1 AND tenant_id = $2 AND status = 'archived'
+		`, clientID, tenantID)
+		if err != nil {
+			return err
+		}
+		rowsAffected = result.RowsAffected()
+		return nil
+	})
 
 	if err != nil {
 		log.Error().Err(err).Msg("Failed to restore client")
@@ -470,7 +582,7 @@ func (h *ClientHandler) Restore(c *gin.Context) {
 		return
 	}
 
-	if result.RowsAffected() == 0 {
+	if rowsAffected == 0 {
 		c.JSON(http.StatusNotFound, gin.H{"error": "client_not_found_or_not_archived"})
 		return
 	}
@@ -487,26 +599,24 @@ func (h *ClientHandler) GetDocuments(c *gin.Context) {
 		return
 	}
 
-	ctx := c.Request.Context()
 	tenantID, _ := middleware.GetTenantID(c)
 
-	rows, err := h.db.Query(ctx, `
+	// Get TenantDB for RLS-protected operations
+	tenantDB, ok := middleware.GetTenantDB(c)
+	if !ok {
+		log.Error().Msg("TenantDB not found in context")
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "internal_error"})
+		return
+	}
+
+	var documents []map[string]interface{}
+	err = tenantDB.Query(c, `
 		SELECT id, name, original_name, file_size, mime_type, status, created_at
 		FROM documents
 		WHERE client_id = $1 AND tenant_id = $2
 		ORDER BY created_at DESC
 		LIMIT 100
-	`, clientID, tenantID)
-
-	if err != nil {
-		log.Error().Err(err).Msg("Failed to get client documents")
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "internal_error"})
-		return
-	}
-	defer rows.Close()
-
-	var documents []map[string]interface{}
-	for rows.Next() {
+	`, []interface{}{clientID, tenantID}, func(rows pgx.Rows) error {
 		var id uuid.UUID
 		var name, originalName, status string
 		var fileSize *int
@@ -514,7 +624,7 @@ func (h *ClientHandler) GetDocuments(c *gin.Context) {
 		var createdAt time.Time
 
 		if err := rows.Scan(&id, &name, &originalName, &fileSize, &mimeType, &status, &createdAt); err != nil {
-			continue
+			return err
 		}
 
 		documents = append(documents, map[string]interface{}{
@@ -526,6 +636,13 @@ func (h *ClientHandler) GetDocuments(c *gin.Context) {
 			"status":        status,
 			"created_at":    createdAt,
 		})
+		return nil
+	})
+
+	if err != nil {
+		log.Error().Err(err).Msg("Failed to get client documents")
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "internal_error"})
+		return
 	}
 
 	c.JSON(http.StatusOK, gin.H{"documents": documents})
@@ -540,26 +657,24 @@ func (h *ClientHandler) GetServices(c *gin.Context) {
 		return
 	}
 
-	ctx := c.Request.Context()
 	tenantID, _ := middleware.GetTenantID(c)
 
-	rows, err := h.db.Query(ctx, `
+	// Get TenantDB for RLS-protected operations
+	tenantDB, ok := middleware.GetTenantDB(c)
+	if !ok {
+		log.Error().Msg("TenantDB not found in context")
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "internal_error"})
+		return
+	}
+
+	var services []map[string]interface{}
+	err = tenantDB.Query(c, `
 		SELECT id, name, status, priority, deadline, docs_required, docs_received, created_at
 		FROM services
 		WHERE client_id = $1 AND tenant_id = $2
 		ORDER BY deadline ASC NULLS LAST, created_at DESC
 		LIMIT 100
-	`, clientID, tenantID)
-
-	if err != nil {
-		log.Error().Err(err).Msg("Failed to get client services")
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "internal_error"})
-		return
-	}
-	defer rows.Close()
-
-	var services []map[string]interface{}
-	for rows.Next() {
+	`, []interface{}{clientID, tenantID}, func(rows pgx.Rows) error {
 		var id uuid.UUID
 		var name, status, priority string
 		var deadline *time.Time
@@ -567,7 +682,7 @@ func (h *ClientHandler) GetServices(c *gin.Context) {
 		var createdAt time.Time
 
 		if err := rows.Scan(&id, &name, &status, &priority, &deadline, &docsRequired, &docsReceived, &createdAt); err != nil {
-			continue
+			return err
 		}
 
 		services = append(services, map[string]interface{}{
@@ -580,6 +695,13 @@ func (h *ClientHandler) GetServices(c *gin.Context) {
 			"docs_received": docsReceived,
 			"created_at":    createdAt,
 		})
+		return nil
+	})
+
+	if err != nil {
+		log.Error().Err(err).Msg("Failed to get client services")
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "internal_error"})
+		return
 	}
 
 	c.JSON(http.StatusOK, gin.H{"services": services})
@@ -607,19 +729,30 @@ func (h *ClientHandler) AssignStaff(c *gin.Context) {
 	ctx := c.Request.Context()
 	tenantID, _ := middleware.GetTenantID(c)
 
-	// If setting as primary, clear existing primary first
-	if req.IsPrimary {
-		_, _ = h.db.Exec(ctx, `
-			UPDATE staff_clients SET is_primary = false
-			WHERE client_id = $1 AND tenant_id = $2
-		`, clientID, tenantID)
+	// Get TenantDB for RLS-protected operations
+	tenantDB, ok := middleware.GetTenantDB(c)
+	if !ok {
+		log.Error().Msg("TenantDB not found in context")
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "internal_error"})
+		return
 	}
 
-	_, err = h.db.Exec(ctx, `
-		INSERT INTO staff_clients (tenant_id, staff_id, client_id, is_primary)
-		VALUES ($1, $2, $3, $4)
-		ON CONFLICT (staff_id, client_id) DO UPDATE SET is_primary = $4
-	`, tenantID, staffID, clientID, req.IsPrimary)
+	err = tenantDB.Transaction(c, func(tx pgx.Tx) error {
+		// If setting as primary, clear existing primary first
+		if req.IsPrimary {
+			_, _ = tx.Exec(ctx, `
+				UPDATE staff_clients SET is_primary = false
+				WHERE client_id = $1 AND tenant_id = $2
+			`, clientID, tenantID)
+		}
+
+		_, err = tx.Exec(ctx, `
+			INSERT INTO staff_clients (tenant_id, staff_id, client_id, is_primary)
+			VALUES ($1, $2, $3, $4)
+			ON CONFLICT (staff_id, client_id) DO UPDATE SET is_primary = $4
+		`, tenantID, staffID, clientID, req.IsPrimary)
+		return err
+	})
 
 	if err != nil {
 		log.Error().Err(err).Msg("Failed to assign staff to client")

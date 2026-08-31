@@ -1,11 +1,14 @@
 package middleware
 
 import (
+	"context"
 	"net/http"
 	"strings"
+	"time"
 
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
+	"github.com/rs/zerolog/log"
 
 	"github.com/accountant-crm/go-backend/internal/auth"
 )
@@ -16,7 +19,13 @@ const (
 	AuthRole     = "auth_role"
 )
 
-func JWTAuth(jwtManager *auth.JWTManager) gin.HandlerFunc {
+// TokenBlocklist allows revoked access tokens to be tracked.
+type TokenBlocklist interface {
+	BlockToken(ctx context.Context, jti string, ttl time.Duration) error
+	IsTokenBlocked(ctx context.Context, jti string) (bool, error)
+}
+
+func JWTAuth(jwtManager *auth.JWTManager, blocklist TokenBlocklist) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		authHeader := c.GetHeader("Authorization")
 		if authHeader == "" {
@@ -58,6 +67,20 @@ func JWTAuth(jwtManager *auth.JWTManager) gin.HandlerFunc {
 				"message": "Invalid token type",
 			})
 			return
+		}
+
+		// Check token blocklist (e.g. after logout)
+		if blocklist != nil && claims.ID != "" {
+			blocked, err := blocklist.IsTokenBlocked(c.Request.Context(), claims.ID)
+			if err != nil {
+				log.Warn().Err(err).Str("jti", claims.ID).Msg("Token blocklist check failed")
+			} else if blocked {
+				c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{
+					"error":   "token_revoked",
+					"message": "Token has been revoked",
+				})
+				return
+			}
 		}
 
 		c.Set(AuthUserID, claims.UserID)

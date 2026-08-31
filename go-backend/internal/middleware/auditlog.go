@@ -4,7 +4,6 @@ package middleware
 import (
 	"bytes"
 	"io"
-	"net/http"
 	"strings"
 	"time"
 
@@ -88,18 +87,11 @@ func AuditLog(cfg AuditLogConfig) gin.HandlerFunc {
 		}
 
 		// Capture request body if enabled
-		var requestBody []byte
 		if cfg.LogRequestBody {
 			body, err := io.ReadAll(c.Request.Body)
 			if err == nil {
 				// Restore body for downstream handlers
 				c.Request.Body = io.NopCloser(bytes.NewBuffer(body))
-				// Truncate for logging
-				if len(body) > cfg.MaxBodyLogSize {
-					requestBody = body[:cfg.MaxBodyLogSize]
-				} else {
-					requestBody = body
-				}
 				// Store for idempotency middleware
 				c.Set("request_body", body)
 			}
@@ -152,6 +144,14 @@ func AuditLog(cfg AuditLogConfig) gin.HandlerFunc {
 			metadata["request_id"] = requestID
 		}
 
+		// Determine severity based on status
+		severity := audit.SeverityInfo
+		if c.Writer.Status() >= 500 {
+			severity = audit.SeverityError
+		} else if c.Writer.Status() >= 400 {
+			severity = audit.SeverityWarning
+		}
+
 		// Log the audit entry
 		entry := audit.LogEntry{
 			TenantID:   tenantID,
@@ -162,7 +162,7 @@ func AuditLog(cfg AuditLogConfig) gin.HandlerFunc {
 			IPAddress:  c.ClientIP(),
 			UserAgent:  c.Request.UserAgent(),
 			Metadata:   metadata,
-			Success:    c.Writer.Status() < 400,
+			Severity:   severity,
 		}
 
 		if err := cfg.Logger.Log(ctx, entry); err != nil {

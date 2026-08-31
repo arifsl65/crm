@@ -61,10 +61,17 @@ func (sm *SessionManager) StoreRefreshToken(ctx context.Context, userID uuid.UUI
 
 	expiresAt := time.Now().Add(sm.refreshTokenExpire)
 	var id uuid.UUID
-	err := sm.db.QueryRow(ctx, query, userID, tenantID, tokenHash, family, ipAddress, userAgent, expiresAt).Scan(&id)
-	if err != nil {
+	var qErr error
+	if err := sm.db.SuperAdminTransaction(ctx, func(tx pgx.Tx) error {
+		qErr = tx.QueryRow(ctx, query, userID, tenantID, tokenHash, family, ipAddress, userAgent, expiresAt).Scan(&id)
+		return nil
+	}); err != nil {
 		log.Error().Err(err).Msg("Failed to store refresh token")
 		return uuid.Nil, err
+	}
+	if qErr != nil {
+		log.Error().Err(qErr).Msg("Failed to store refresh token")
+		return uuid.Nil, qErr
 	}
 
 	return family, nil
@@ -74,33 +81,24 @@ func (sm *SessionManager) StoreRefreshToken(ctx context.Context, userID uuid.UUI
 func (sm *SessionManager) StoreRotatedRefreshToken(ctx context.Context, userID uuid.UUID, tenantID *uuid.UUID, newToken, oldToken, ipAddress, userAgent string, family uuid.UUID) error {
 	newTokenHash := hashToken(newToken)
 	oldTokenHash := hashToken(oldToken)
-
-	// Mark old token as used and store new token in a transaction
-	tx, err := sm.db.Begin(ctx)
-	if err != nil {
-		return err
-	}
-	defer tx.Rollback(ctx)
-
-	// Mark old token as used
-	_, err = tx.Exec(ctx, `
-		UPDATE refresh_tokens SET used_at = NOW() WHERE token_hash = $1
-	`, oldTokenHash)
-	if err != nil {
-		return err
-	}
-
-	// Insert new token
 	expiresAt := time.Now().Add(sm.refreshTokenExpire)
-	_, err = tx.Exec(ctx, `
-		INSERT INTO refresh_tokens (user_id, tenant_id, token_hash, family, parent_token_hash, ip_address, user_agent, expires_at)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
-	`, userID, tenantID, newTokenHash, family, oldTokenHash, ipAddress, userAgent, expiresAt)
-	if err != nil {
-		return err
-	}
 
-	return tx.Commit(ctx)
+	return sm.db.SuperAdminTransaction(ctx, func(tx pgx.Tx) error {
+		// Mark old token as used
+		_, err := tx.Exec(ctx, `
+			UPDATE refresh_tokens SET used_at = NOW() WHERE token_hash = $1
+		`, oldTokenHash)
+		if err != nil {
+			return err
+		}
+
+		// Insert new token
+		_, err = tx.Exec(ctx, `
+			INSERT INTO refresh_tokens (user_id, tenant_id, token_hash, family, parent_token_hash, ip_address, user_agent, expires_at)
+			VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+		`, userID, tenantID, newTokenHash, family, oldTokenHash, ipAddress, userAgent, expiresAt)
+		return err
+	})
 }
 
 // ValidateRefreshToken checks if a refresh token is valid (exists, not revoked, not expired, not used).
@@ -114,16 +112,22 @@ func (sm *SessionManager) ValidateRefreshToken(ctx context.Context, token string
 	`
 
 	var record RefreshTokenRecord
-	err := sm.db.QueryRow(ctx, query, tokenHash).Scan(
-		&record.ID, &record.UserID, &record.TenantID, &record.Family,
-		&record.TokenHash, &record.IPAddress, &record.UserAgent,
-		&record.RevokedAt, &record.UsedAt, &record.CreatedAt, &record.ExpiresAt,
-	)
-	if err != nil {
-		if err == pgx.ErrNoRows {
+	var qErr error
+	if err := sm.db.SuperAdminTransaction(ctx, func(tx pgx.Tx) error {
+		qErr = tx.QueryRow(ctx, query, tokenHash).Scan(
+			&record.ID, &record.UserID, &record.TenantID, &record.Family,
+			&record.TokenHash, &record.IPAddress, &record.UserAgent,
+			&record.RevokedAt, &record.UsedAt, &record.CreatedAt, &record.ExpiresAt,
+		)
+		return nil
+	}); err != nil {
+		return nil, err
+	}
+	if qErr != nil {
+		if qErr == pgx.ErrNoRows {
 			return nil, ErrInvalidToken
 		}
-		return nil, err
+		return nil, qErr
 	}
 
 	// Check if token is revoked
@@ -156,32 +160,43 @@ func (sm *SessionManager) RevokeRefreshToken(ctx context.Context, token string) 
 	tokenHash := hashToken(token)
 
 	query := `UPDATE refresh_tokens SET revoked_at = NOW() WHERE token_hash = $1`
-	_, err := sm.db.Exec(ctx, query, tokenHash)
-	return err
+	return sm.db.SuperAdminTransaction(ctx, func(tx pgx.Tx) error {
+		_, err := tx.Exec(ctx, query, tokenHash)
+		return err
+	})
 }
 
 // RevokeTokenFamily revokes all tokens in a family (for token theft detection).
 func (sm *SessionManager) RevokeTokenFamily(ctx context.Context, family uuid.UUID) error {
 	query := `UPDATE refresh_tokens SET revoked_at = NOW() WHERE family = $1 AND revoked_at IS NULL`
-	_, err := sm.db.Exec(ctx, query, family)
-	if err != nil {
-		log.Error().Err(err).Str("family", family.String()).Msg("Failed to revoke token family")
-	}
-	return err
+	return sm.db.SuperAdminTransaction(ctx, func(tx pgx.Tx) error {
+		_, err := tx.Exec(ctx, query, family)
+		if err != nil {
+			log.Error().Err(err).Str("family", family.String()).Msg("Failed to revoke token family")
+		}
+		return err
+	})
 }
 
 // RevokeAllUserTokens revokes all refresh tokens for a user.
 func (sm *SessionManager) RevokeAllUserTokens(ctx context.Context, userID uuid.UUID) error {
 	query := `UPDATE refresh_tokens SET revoked_at = NOW() WHERE user_id = $1 AND revoked_at IS NULL`
-	result, err := sm.db.Exec(ctx, query, userID)
-	if err != nil {
+	var rowsAffected int64
+	if err := sm.db.SuperAdminTransaction(ctx, func(tx pgx.Tx) error {
+		result, err := tx.Exec(ctx, query, userID)
+		if err != nil {
+			return err
+		}
+		rowsAffected = result.RowsAffected()
+		return nil
+	}); err != nil {
 		log.Error().Err(err).Str("user_id", userID.String()).Msg("Failed to revoke all user tokens")
 		return err
 	}
 
 	log.Info().
 		Str("user_id", userID.String()).
-		Int64("tokens_revoked", result.RowsAffected()).
+		Int64("tokens_revoked", rowsAffected).
 		Msg("Revoked all user tokens")
 	return nil
 }
@@ -195,35 +210,49 @@ func (sm *SessionManager) GetUserActiveSessions(ctx context.Context, userID uuid
 		ORDER BY created_at DESC
 	`
 
-	rows, err := sm.db.Query(ctx, query, userID)
-	if err != nil {
+	var records []RefreshTokenRecord
+	var qErr error
+	if err := sm.db.SuperAdminTransaction(ctx, func(tx pgx.Tx) error {
+		rows, err := tx.Query(ctx, query, userID)
+		if err != nil {
+			return err
+		}
+		defer rows.Close()
+
+		for rows.Next() {
+			var record RefreshTokenRecord
+			if err := rows.Scan(
+				&record.ID, &record.UserID, &record.TenantID, &record.Family,
+				&record.TokenHash, &record.IPAddress, &record.UserAgent,
+				&record.RevokedAt, &record.UsedAt, &record.CreatedAt, &record.ExpiresAt,
+			); err != nil {
+				return err
+			}
+			records = append(records, record)
+		}
+
+		qErr = rows.Err()
+		return nil
+	}); err != nil {
 		return nil, err
 	}
-	defer rows.Close()
 
-	var records []RefreshTokenRecord
-	for rows.Next() {
-		var record RefreshTokenRecord
-		err := rows.Scan(
-			&record.ID, &record.UserID, &record.TenantID, &record.Family,
-			&record.TokenHash, &record.IPAddress, &record.UserAgent,
-			&record.RevokedAt, &record.UsedAt, &record.CreatedAt, &record.ExpiresAt,
-		)
-		if err != nil {
-			return nil, err
-		}
-		records = append(records, record)
-	}
-
-	return records, rows.Err()
+	return records, qErr
 }
 
 // CleanupExpiredTokens removes expired tokens (should be run periodically).
 func (sm *SessionManager) CleanupExpiredTokens(ctx context.Context) (int64, error) {
 	query := `DELETE FROM refresh_tokens WHERE expires_at < NOW() - INTERVAL '7 days'`
-	result, err := sm.db.Exec(ctx, query)
-	if err != nil {
+	var rowsAffected int64
+	if err := sm.db.SuperAdminTransaction(ctx, func(tx pgx.Tx) error {
+		result, err := tx.Exec(ctx, query)
+		if err != nil {
+			return err
+		}
+		rowsAffected = result.RowsAffected()
+		return nil
+	}); err != nil {
 		return 0, err
 	}
-	return result.RowsAffected(), nil
+	return rowsAffected, nil
 }

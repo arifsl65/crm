@@ -5,6 +5,7 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 
 	"github.com/accountant-crm/go-backend/internal/database"
 )
@@ -73,6 +74,108 @@ func (t *TenantDB) Role() string {
 // Note: Direct pool access bypasses RLS - use Transaction() for RLS-protected queries.
 func (t *TenantDB) Pool() *database.Pool {
 	return t.pool
+}
+
+// QueryCollect executes a query with RLS context set and collects all rows.
+// Use this for queries where you want RLS enforced. The callback processes each row.
+func (t *TenantDB) QueryCollect(c *gin.Context, sql string, args []interface{}, scanFn func(pgx.Rows) error) error {
+	ctx := c.Request.Context()
+
+	return t.pool.TenantTransaction(ctx, t.tenantID, t.role, func(tx pgx.Tx) error {
+		rows, err := tx.Query(ctx, sql, args...)
+		if err != nil {
+			return err
+		}
+		defer rows.Close()
+
+		for rows.Next() {
+			if err := scanFn(rows); err != nil {
+				return err
+			}
+		}
+		return rows.Err()
+	})
+}
+
+// QueryRowScan executes a query that returns a single row and scans it into dest.
+// This is the preferred method for single-row queries as it properly handles RLS context.
+func (t *TenantDB) QueryRowScan(c *gin.Context, dest []interface{}, sql string, args ...interface{}) error {
+	ctx := c.Request.Context()
+
+	return t.pool.TenantTransaction(ctx, t.tenantID, t.role, func(tx pgx.Tx) error {
+		return tx.QueryRow(ctx, sql, args...).Scan(dest...)
+	})
+}
+
+// Query executes a query with RLS context and returns rows via a callback.
+// The callback is called for each row and should scan the values.
+// This is the preferred method for multi-row queries.
+func (t *TenantDB) Query(c *gin.Context, sql string, args []interface{}, scanFn func(pgx.Rows) error) error {
+	ctx := c.Request.Context()
+
+	return t.pool.TenantTransaction(ctx, t.tenantID, t.role, func(tx pgx.Tx) error {
+		rows, err := tx.Query(ctx, sql, args...)
+		if err != nil {
+			return err
+		}
+		defer rows.Close()
+
+		for rows.Next() {
+			if err := scanFn(rows); err != nil {
+				return err
+			}
+		}
+		return rows.Err()
+	})
+}
+
+// QueryRow executes a query that returns a single row with RLS context set.
+// DEPRECATED: Use QueryRowScan instead for proper RLS handling.
+func (t *TenantDB) QueryRow(c *gin.Context, sql string, args ...interface{}) pgx.Row {
+	ctx := c.Request.Context()
+
+	// For QueryRow, we need to return a Row interface.
+	// We'll use the pool directly but set RLS context in a transaction wrapper.
+	// This is a limitation - QueryRow doesn't fit well with transaction-based RLS.
+	// For safety, we'll use Transaction internally and return a custom Row.
+
+	var result rlsRow
+	err := t.pool.TenantTransaction(ctx, t.tenantID, t.role, func(tx pgx.Tx) error {
+		row := tx.QueryRow(ctx, sql, args...)
+		result.row = row
+		return nil
+	})
+	if err != nil {
+		result.err = err
+	}
+	return &result
+}
+
+// Exec executes a statement with RLS context set.
+func (t *TenantDB) Exec(c *gin.Context, sql string, args ...interface{}) (pgconn.CommandTag, error) {
+	ctx := c.Request.Context()
+	var tag pgconn.CommandTag
+
+	err := t.pool.TenantTransaction(ctx, t.tenantID, t.role, func(tx pgx.Tx) error {
+		var err error
+		tag, err = tx.Exec(ctx, sql, args...)
+		return err
+	})
+
+	return tag, err
+}
+
+// rlsRow wraps a pgx.Row to handle RLS transaction errors
+type rlsRow struct {
+	row pgx.Row
+	err error
+}
+
+func (r *rlsRow) Scan(dest ...interface{}) error {
+	if r.err != nil {
+		return r.err
+	}
+	return r.row.Scan(dest...)
 }
 
 // GetTenantDB retrieves the TenantDB from the gin context.

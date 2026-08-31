@@ -1,15 +1,17 @@
 /** @type {import('next').NextConfig} */
 const nextConfig = {
-  // Enable static export for OSS deployment
+  // Static export for nginx serving (no Node.js server required)
+  // Dynamic routes like /dashboard/clients/[id] work client-side with
+  // fallback pages. Builds to out/ directory.
   output: 'export',
 
-  // Disable image optimization for static export
+  // Trailing slashes for static hosting compatibility
+  trailingSlash: true,
+
+  // Disable image optimization (no external service)
   images: {
     unoptimized: true,
   },
-
-  // Trailing slashes for static hosting
-  trailingSlash: true,
 
   // Environment variables exposed to the browser
   env: {
@@ -29,28 +31,8 @@ const nextConfig = {
     removeConsole: process.env.NODE_ENV === 'production',
   },
 
-  // Headers for security
-  async headers() {
-    return [
-      {
-        source: '/:path*',
-        headers: [
-          {
-            key: 'X-Frame-Options',
-            value: 'DENY',
-          },
-          {
-            key: 'X-Content-Type-Options',
-            value: 'nosniff',
-          },
-          {
-            key: 'Referrer-Policy',
-            value: 'strict-origin-when-cross-origin',
-          },
-        ],
-      },
-    ];
-  },
+  // Note: Security headers are configured in nginx (see nginx/conf.d/crm.conf)
+  // headers() function doesn't work with static export
 };
 
 module.exports = nextConfig;
