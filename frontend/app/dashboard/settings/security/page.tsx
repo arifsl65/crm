@@ -138,11 +138,10 @@ export default function SecuritySettingsPage() {
 
     try {
       const token = getAuthToken();
-      const res = await fetch(`${API_URL}/api/v1/auth/2fa/disable`, {
-        method: 'POST',
+      const res = await fetch(`${API_URL}/api/v1/auth/2fa`, {
+        method: 'DELETE',
         headers: {
           'Authorization': `Bearer ${token}`,
-          'Content-Type': 'application/json',
         },
       });
 

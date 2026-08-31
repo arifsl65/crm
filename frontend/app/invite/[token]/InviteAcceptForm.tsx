@@ -1,17 +1,20 @@
 'use client';
 
 import { useState } from 'react';
-import { useRouter } from 'next/navigation';
+import { useRouter, useParams } from 'next/navigation';
 import Link from 'next/link';
 
 const API_URL = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8080';
 
 interface InviteAcceptFormProps {
-  token: string;
+  token?: string;
 }
 
-export default function InviteAcceptForm({ token }: InviteAcceptFormProps) {
+export default function InviteAcceptForm({ token: propToken }: InviteAcceptFormProps) {
   const router = useRouter();
+  const params = useParams();
+  // Use URL param if prop is placeholder or missing
+  const token = (propToken && propToken !== 'placeholder') ? propToken : (params?.token as string);
 
   const [name, setName] = useState('');
   const [password, setPassword] = useState('');
