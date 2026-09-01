@@ -28,6 +28,7 @@ import (
 	"github.com/accountant-crm/go-backend/internal/email"
 	"github.com/accountant-crm/go-backend/internal/handlers"
 	"github.com/accountant-crm/go-backend/internal/middleware"
+	"github.com/accountant-crm/go-backend/internal/websocket"
 )
 
 // Application holds all the application dependencies.
@@ -40,6 +41,7 @@ type Application struct {
 	JWT       *auth.JWTManager
 	Audit     *audit.Logger
 	Handlers  *Handlers
+	WSHub     *websocket.Hub
 }
 
 // Handlers holds all HTTP handler instances.
@@ -55,6 +57,7 @@ type Handlers struct {
 	DocumentType   *handlers.DocumentTypeHandler
 	AI             *handlers.AIHandler
 	CompaniesHouse *handlers.CompaniesHouseHandler
+	WebSocket      *websocket.Handler
 }
 
 func main() {
@@ -143,6 +146,10 @@ func main() {
 	// Initialize audit logger
 	auditLogger := audit.NewLogger(db)
 
+	// Initialize WebSocket hub
+	wsHub := websocket.NewHub(redis)
+	go wsHub.Run()
+
 	// Build Application with all dependencies
 	app := &Application{
 		Config:   cfg,
@@ -151,18 +158,20 @@ func main() {
 		AIClient: aiClient,
 		JWT:      jwtManager,
 		Audit:    auditLogger,
+		WSHub:    wsHub,
 		Handlers: &Handlers{
 			Auth:           handlers.NewAuthHandler(db, jwtManager, sessionManager, emailClient, cfg.FrontendURL, authRateLimiter, auditLogger, redis),
 			Tenant:         handlers.NewTenantHandler(db),
 			User:           handlers.NewUserHandler(db, sessionManager),
 			Client:         handlers.NewClientHandler(db, auditLogger),
 			Service:        handlers.NewServiceHandler(db, auditLogger),
-			Document:       handlers.NewDocumentHandler(db, auditLogger),
+			Document:       handlers.NewDocumentHandler(db, auditLogger, redis),
 			Dashboard:      handlers.NewDashboardHandler(db),
 			ServiceType:    handlers.NewServiceTypeHandler(db, auditLogger),
 			DocumentType:   handlers.NewDocumentTypeHandler(db, auditLogger),
 			AI:             handlers.NewAIHandler(aiClient),
 			CompaniesHouse: handlers.NewCompaniesHouseHandler(db, redis, cfg.CompaniesHouse),
+			WebSocket:      websocket.NewHandler(wsHub, jwtManager, redis),
 		},
 	}
 
@@ -266,6 +275,9 @@ func setupRouter(app *Application) *gin.Engine {
 	// Metrics endpoint - protected with bearer token (Fix #12)
 	// Only accessible with X-Metrics-Token header matching METRICS_TOKEN env var
 	router.GET("/metrics", metricsAuthMiddleware(cfg.App), metricsHandler(app.DB, app.Redis))
+
+	// WebSocket endpoint (public - auth via token query param)
+	router.GET("/ws", h.WebSocket.Connect)
 
 	// API v1 routes
 	v1 := router.Group("/api/v1")
@@ -399,6 +411,10 @@ func setupRouter(app *Application) *gin.Engine {
 			documents.POST("/:id/versions/:versionId/restore", middleware.ValidateUUID("id"), h.Document.RestoreVersion)
 			documents.POST("/:id/upload", middleware.ValidateUUID("id"), h.Document.Upload)
 			documents.GET("/:id/download", middleware.ValidateUUID("id"), h.Document.Download)
+			// Document renewal workflow
+			documents.GET("/expiring", h.Document.ListExpiring)
+			documents.POST("/:id/request-renewal", middleware.ValidateUUID("id"), h.Document.RequestRenewal)
+			documents.DELETE("/:id/renewal", middleware.ValidateUUID("id"), h.Document.CancelRenewal)
 		}
 
 		// QR upload routes (public - no auth required)
@@ -507,6 +523,13 @@ func setupRouter(app *Application) *gin.Engine {
 			chRoutes.GET("/company/:number", h.CompaniesHouse.GetCompany)
 			chRoutes.POST("/sync/:clientId", middleware.ValidateUUID("clientId"), h.CompaniesHouse.SyncClient)
 			chRoutes.GET("/status", h.CompaniesHouse.Status)
+		}
+
+		// WebSocket routes (protected)
+		wsRoutes := protected.Group("/ws")
+		{
+			wsRoutes.GET("", h.WebSocket.ConnectAuthenticated)
+			wsRoutes.GET("/stats", middleware.RequireRole("super_admin", "tenant_admin"), h.WebSocket.Stats)
 		}
 	}
 

@@ -18,6 +18,7 @@ import (
 	"github.com/rs/zerolog/log"
 
 	"github.com/accountant-crm/go-backend/internal/audit"
+	"github.com/accountant-crm/go-backend/internal/cache"
 	"github.com/accountant-crm/go-backend/internal/database"
 	"github.com/accountant-crm/go-backend/internal/middleware"
 )
@@ -93,12 +94,14 @@ const MaxUploadSize = 50 * 1024 * 1024
 type DocumentHandler struct {
 	db    *database.Pool
 	audit *audit.Logger
+	redis *cache.Client
 }
 
-func NewDocumentHandler(db *database.Pool, auditLogger *audit.Logger) *DocumentHandler {
+func NewDocumentHandler(db *database.Pool, auditLogger *audit.Logger, redisClient *cache.Client) *DocumentHandler {
 	return &DocumentHandler{
 		db:    db,
 		audit: auditLogger,
+		redis: redisClient,
 	}
 }
 
@@ -613,6 +616,16 @@ func (h *DocumentHandler) Approve(c *gin.Context) {
 	// Audit log
 	h.audit.LogEntity(ctx, audit.ActionDocumentApprove, &userID, &tenantID, "document", &documentID, c.ClientIP(), nil)
 
+	// Publish real-time event
+	if h.redis != nil {
+		event := cache.NewEvent(cache.EventDocApproved, tenantID, "document", &documentID).
+			WithUser(userID).
+			WithData("document_id", documentID.String())
+		if err := h.redis.Publish(ctx, event); err != nil {
+			log.Warn().Err(err).Msg("Failed to publish doc_approved event")
+		}
+	}
+
 	c.JSON(http.StatusOK, gin.H{"message": "Document approved successfully"})
 }
 
@@ -673,7 +686,227 @@ func (h *DocumentHandler) Reject(c *gin.Context) {
 	// Audit log
 	h.audit.LogEntity(ctx, audit.ActionDocumentReject, &userID, &tenantID, "document", &documentID, c.ClientIP(), nil)
 
+	// Publish real-time event
+	if h.redis != nil {
+		event := cache.NewEvent(cache.EventDocRejected, tenantID, "document", &documentID).
+			WithUser(userID).
+			WithData("document_id", documentID.String()).
+			WithData("reason", req.Note)
+		if err := h.redis.Publish(ctx, event); err != nil {
+			log.Warn().Err(err).Msg("Failed to publish doc_rejected event")
+		}
+	}
+
 	c.JSON(http.StatusOK, gin.H{"message": "Document rejected successfully"})
+}
+
+// RequestRenewal requests a renewal for an expiring document
+// POST /api/v1/documents/:id/request-renewal
+func (h *DocumentHandler) RequestRenewal(c *gin.Context) {
+	documentID, err := uuid.Parse(c.Param("id"))
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid_document_id"})
+		return
+	}
+
+	var req struct {
+		Note string `json:"note,omitempty"`
+	}
+	_ = c.ShouldBindJSON(&req)
+
+	ctx := c.Request.Context()
+	tenantID, _ := middleware.GetTenantID(c)
+	userID, _ := middleware.GetUserID(c)
+
+	tenantDB, ok := middleware.GetTenantDB(c)
+	if !ok {
+		log.Error().Msg("TenantDB not found in context")
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "internal_error"})
+		return
+	}
+
+	var rowsAffected int64
+	err = tenantDB.Transaction(c, func(tx pgx.Tx) error {
+		result, err := tx.Exec(ctx, `
+			UPDATE documents SET
+				renewal_requested = true,
+				renewal_requested_at = NOW(),
+				renewal_requested_by = $1,
+				renewal_note = $2,
+				updated_at = NOW()
+			WHERE id = $3 AND tenant_id = $4 AND renewal_requested = false
+		`, userID, req.Note, documentID, tenantID)
+		if err != nil {
+			return err
+		}
+		rowsAffected = result.RowsAffected()
+		return nil
+	})
+
+	if err != nil {
+		log.Error().Err(err).Msg("Failed to request document renewal")
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "internal_error"})
+		return
+	}
+
+	if rowsAffected == 0 {
+		c.JSON(http.StatusNotFound, gin.H{"error": "document_not_found_or_already_requested"})
+		return
+	}
+
+	// Audit log
+	h.audit.LogEntity(ctx, "document_renewal_request", &userID, &tenantID, "document", &documentID, c.ClientIP(), nil)
+
+	// Publish real-time event
+	if h.redis != nil {
+		event := cache.NewEvent(cache.EventDocRenewal, tenantID, "document", &documentID).
+			WithUser(userID).
+			WithData("document_id", documentID.String())
+		if err := h.redis.Publish(ctx, event); err != nil {
+			log.Warn().Err(err).Msg("Failed to publish doc_renewal_requested event")
+		}
+	}
+
+	c.JSON(http.StatusOK, gin.H{"message": "Renewal requested successfully"})
+}
+
+// CancelRenewal cancels a pending renewal request
+// DELETE /api/v1/documents/:id/renewal
+func (h *DocumentHandler) CancelRenewal(c *gin.Context) {
+	documentID, err := uuid.Parse(c.Param("id"))
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid_document_id"})
+		return
+	}
+
+	ctx := c.Request.Context()
+	tenantID, _ := middleware.GetTenantID(c)
+	userID, _ := middleware.GetUserID(c)
+
+	tenantDB, ok := middleware.GetTenantDB(c)
+	if !ok {
+		log.Error().Msg("TenantDB not found in context")
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "internal_error"})
+		return
+	}
+
+	var rowsAffected int64
+	err = tenantDB.Transaction(c, func(tx pgx.Tx) error {
+		result, err := tx.Exec(ctx, `
+			UPDATE documents SET
+				renewal_requested = false,
+				renewal_requested_at = NULL,
+				renewal_requested_by = NULL,
+				renewal_note = NULL,
+				updated_at = NOW()
+			WHERE id = $1 AND tenant_id = $2 AND renewal_requested = true
+		`, documentID, tenantID)
+		if err != nil {
+			return err
+		}
+		rowsAffected = result.RowsAffected()
+		return nil
+	})
+
+	if err != nil {
+		log.Error().Err(err).Msg("Failed to cancel document renewal")
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "internal_error"})
+		return
+	}
+
+	if rowsAffected == 0 {
+		c.JSON(http.StatusNotFound, gin.H{"error": "document_not_found_or_not_pending_renewal"})
+		return
+	}
+
+	// Audit log
+	h.audit.LogEntity(ctx, "document_renewal_cancel", &userID, &tenantID, "document", &documentID, c.ClientIP(), nil)
+
+	c.JSON(http.StatusOK, gin.H{"message": "Renewal cancelled successfully"})
+}
+
+// ListExpiring returns documents that are expiring soon
+// GET /api/v1/documents/expiring
+func (h *DocumentHandler) ListExpiring(c *gin.Context) {
+	tenantID, _ := middleware.GetTenantID(c)
+
+	tenantDB, ok := middleware.GetTenantDB(c)
+	if !ok {
+		log.Error().Msg("TenantDB not found in context")
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "internal_error"})
+		return
+	}
+
+	// Default to 30 days
+	days := 30
+	if d := c.Query("days"); d != "" {
+		if parsed, err := strconv.Atoi(d); err == nil && parsed > 0 && parsed <= 365 {
+			days = parsed
+		}
+	}
+
+	var documents []map[string]interface{}
+	err := tenantDB.Query(c, `
+		SELECT d.id, d.name, d.expiry_date, d.status, d.renewal_requested,
+		       c.id as client_id, c.company_name,
+		       (d.expiry_date - CURRENT_DATE) as days_until_expiry
+		FROM documents d
+		LEFT JOIN clients c ON d.client_id = c.id
+		WHERE d.tenant_id = $1
+		  AND d.expiry_date IS NOT NULL
+		  AND d.expiry_date <= CURRENT_DATE + INTERVAL '1 day' * $2
+		  AND d.expiry_date >= CURRENT_DATE
+		  AND d.status = 'approved'
+		ORDER BY d.expiry_date ASC
+	`, []interface{}{tenantID, days}, func(rows pgx.Rows) error {
+		var id uuid.UUID
+		var name string
+		var expiryDate time.Time
+		var status string
+		var renewalRequested bool
+		var clientID *uuid.UUID
+		var clientName *string
+		var daysUntil int
+
+		if err := rows.Scan(&id, &name, &expiryDate, &status, &renewalRequested,
+			&clientID, &clientName, &daysUntil); err != nil {
+			return err
+		}
+
+		doc := map[string]interface{}{
+			"id":                id,
+			"name":              name,
+			"expiry_date":       expiryDate.Format("2006-01-02"),
+			"status":            status,
+			"renewal_requested": renewalRequested,
+			"days_until_expiry": int(daysUntil),
+		}
+		if clientID != nil {
+			doc["client_id"] = clientID
+		}
+		if clientName != nil {
+			doc["client_name"] = clientName
+		}
+
+		documents = append(documents, doc)
+		return nil
+	})
+
+	if err != nil {
+		log.Error().Err(err).Msg("Failed to list expiring documents")
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "internal_error"})
+		return
+	}
+
+	if documents == nil {
+		documents = []map[string]interface{}{}
+	}
+
+	c.JSON(http.StatusOK, gin.H{
+		"documents": documents,
+		"count":     len(documents),
+		"days":      days,
+	})
 }
 
 // GetVersions returns version history for a document
@@ -1172,10 +1405,17 @@ func (h *DocumentHandler) GenerateQRToken(c *gin.Context) {
 
 	tokenID := uuid.New()
 	err := tenantDB.Transaction(c, func(tx pgx.Tx) error {
-		_, err := tx.Exec(ctx, `
-			INSERT INTO upload_tokens (id, tenant_id, client_id, token, created_by, note, expires_at)
-			VALUES ($1, $2, $3, $4, $5, $6, NOW() + $7 * INTERVAL '1 minute')
-		`, tokenID, tenantID, clientID, token, userID, req.Note, expiresIn)
+		// Get client name for the token (stored for public lookup without join)
+		var clientName string
+		err := tx.QueryRow(ctx, `SELECT company_name FROM clients WHERE id = $1`, clientID).Scan(&clientName)
+		if err != nil {
+			return fmt.Errorf("client not found: %w", err)
+		}
+
+		_, err = tx.Exec(ctx, `
+			INSERT INTO upload_tokens (id, tenant_id, client_id, client_name, token, created_by, note, expires_at)
+			VALUES ($1, $2, $3, $4, $5, $6, $7, NOW() + $8 * INTERVAL '1 minute')
+		`, tokenID, tenantID, clientID, clientName, token, userID, req.Note, expiresIn)
 		return err
 	})
 
@@ -1202,11 +1442,12 @@ func (h *DocumentHandler) GetQRToken(c *gin.Context) {
 	var clientName string
 	var expiresAt time.Time
 	var note *string
+	// Query directly from upload_tokens (client_name stored at creation time)
+	// This avoids RLS issues with cross-table joins for public endpoints
 	err := h.db.QueryRow(ctx, `
-		SELECT c.company_name, ut.expires_at, ut.note
-		FROM upload_tokens ut
-		JOIN clients c ON ut.client_id = c.id
-		WHERE ut.token = $1 AND ut.expires_at > NOW() AND ut.used_at IS NULL
+		SELECT client_name, expires_at, note
+		FROM upload_tokens
+		WHERE token = $1 AND expires_at > NOW() AND used_at IS NULL
 	`, token).Scan(&clientName, &expiresAt, &note)
 
 	if err != nil {
@@ -1380,6 +1621,18 @@ func (h *DocumentHandler) Upload(c *gin.Context) {
 		"mime_type":     detectedMime,
 		"original_name": originalName,
 	})
+
+	// Publish real-time event
+	if h.redis != nil {
+		event := cache.NewEvent(cache.EventDocUploaded, tenantID, "document", &documentID).
+			WithUser(userID).
+			WithData("document_id", documentID.String()).
+			WithData("file_size", fileSize).
+			WithData("mime_type", detectedMime)
+		if err := h.redis.Publish(ctx, event); err != nil {
+			log.Warn().Err(err).Msg("Failed to publish doc_uploaded event")
+		}
+	}
 
 	c.JSON(http.StatusOK, gin.H{
 		"message":       "File uploaded successfully",

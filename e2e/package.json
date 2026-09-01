@@ -1,0 +1,26 @@
+{
+  "name": "accountant-crm-e2e",
+  "version": "1.0.0",
+  "description": "E2E tests for Accountant CRM using Playwright",
+  "scripts": {
+    "test": "playwright test",
+    "test:headed": "playwright test --headed",
+    "test:ui": "playwright test --ui",
+    "test:debug": "playwright test --debug",
+    "test:auth": "playwright test tests/auth.spec.ts",
+    "test:clients": "playwright test tests/clients.spec.ts",
+    "test:ch": "playwright test tests/ch.spec.ts",
+    "report": "playwright show-report",
+    "codegen": "playwright codegen http://localhost:3000"
+  },
+  "devDependencies": {
+    "@playwright/test": "^1.40.0",
+    "@types/node": "^20.10.0"
+  },
+  "keywords": [
+    "e2e",
+    "playwright",
+    "testing",
+    "accountant-crm"
+  ]
+}

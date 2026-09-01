@@ -7,6 +7,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"strings"
 	"sync"
 	"time"
 
@@ -187,6 +188,58 @@ type ConfirmationStatement struct {
 	LastMadeUpTo string `json:"last_made_up_to,omitempty"`
 	NextDue      string `json:"next_due,omitempty"`
 	NextMadeUpTo string `json:"next_made_up_to,omitempty"`
+}
+
+// ============================================================================
+// Companies House Officers API Types (for Directors sync)
+// ============================================================================
+
+// CHOfficersResponse represents the Companies House officers API response.
+type CHOfficersResponse struct {
+	Items          []CHOfficer `json:"items"`
+	TotalResults   int         `json:"total_results"`
+	ActiveCount    int         `json:"active_count"`
+	ResignedCount  int         `json:"resigned_count"`
+	InactiveCount  int         `json:"inactive_count"`
+}
+
+// CHOfficer represents an officer from Companies House.
+type CHOfficer struct {
+	Name          string       `json:"name"`
+	OfficerRole   string       `json:"officer_role"`
+	AppointedOn   string       `json:"appointed_on,omitempty"`
+	ResignedOn    string       `json:"resigned_on,omitempty"`
+	Nationality   string       `json:"nationality,omitempty"`
+	Occupation    string       `json:"occupation,omitempty"`
+	DateOfBirth   *CHDateOfBirth `json:"date_of_birth,omitempty"`
+	Address       *Address     `json:"address,omitempty"`
+}
+
+// CHDateOfBirth represents partial date of birth from CH.
+type CHDateOfBirth struct {
+	Month int `json:"month,omitempty"`
+	Year  int `json:"year,omitempty"`
+}
+
+// ============================================================================
+// Companies House PSC API Types (for Persons with Significant Control sync)
+// ============================================================================
+
+// CHPSCResponse represents the Companies House PSC API response.
+type CHPSCResponse struct {
+	Items        []CHPSC `json:"items"`
+	TotalResults int     `json:"total_results"`
+	ActiveCount  int     `json:"active_count"`
+	CeasedCount  int     `json:"ceased_count"`
+}
+
+// CHPSC represents a Person with Significant Control from Companies House.
+type CHPSC struct {
+	Name             string   `json:"name"`
+	NaturesOfControl []string `json:"natures_of_control,omitempty"`
+	NotifiedOn       string   `json:"notified_on,omitempty"`
+	CeasedOn         string   `json:"ceased_on,omitempty"`
+	Kind             string   `json:"kind,omitempty"`
 }
 
 // CHSearchResponse represents the Companies House search API response.
@@ -532,16 +585,252 @@ func (h *CompaniesHouseHandler) SyncClient(c *gin.Context) {
 		h.redis.CacheSet(c.Request.Context(), cacheKey, string(data), h.cfg.CacheTTL)
 	}
 
+	// Sync directors and PSC in parallel
+	var directorsCount, pscCount int
+	var directorsErr, pscErr error
+
+	// Sync Directors from CH /officers endpoint
+	directorsCount, directorsErr = h.syncDirectors(c, clientID, tenantID, *companyNumber)
+	if directorsErr != nil {
+		log.Warn().Err(directorsErr).Str("company_number", *companyNumber).Msg("Failed to sync directors (non-fatal)")
+	}
+
+	// Sync PSC from CH /persons-with-significant-control endpoint
+	pscCount, pscErr = h.syncPSC(c, clientID, tenantID, *companyNumber)
+	if pscErr != nil {
+		log.Warn().Err(pscErr).Str("company_number", *companyNumber).Msg("Failed to sync PSC (non-fatal)")
+	}
+
 	log.Info().
 		Str("client_id", clientID.String()).
 		Str("company_number", *companyNumber).
 		Str("company_name", profile.CompanyName).
+		Int("directors_synced", directorsCount).
+		Int("psc_synced", pscCount).
 		Msg("Client synced with Companies House")
 
 	c.JSON(http.StatusOK, gin.H{
-		"message": "Client synced successfully",
-		"company": profile,
+		"message":          "Client synced successfully",
+		"company":          profile,
+		"directors_synced": directorsCount,
+		"psc_synced":       pscCount,
 	})
+}
+
+// syncDirectors fetches officers from Companies House and syncs them to the directors table.
+// Returns the count of directors synced and any error.
+func (h *CompaniesHouseHandler) syncDirectors(c *gin.Context, clientID, tenantID uuid.UUID, companyNumber string) (int, error) {
+	ctx := c.Request.Context()
+
+	// Fetch officers from Companies House
+	apiURL := fmt.Sprintf("%s/company/%s/officers", h.cfg.BaseURL, companyNumber)
+	results, err := h.makeRequest(ctx, apiURL)
+	if err != nil {
+		return 0, fmt.Errorf("failed to fetch officers: %w", err)
+	}
+
+	var officersResp CHOfficersResponse
+	if err := json.Unmarshal(results, &officersResp); err != nil {
+		return 0, fmt.Errorf("failed to parse officers response: %w", err)
+	}
+
+	// Get TenantDB for RLS-protected operations
+	tenantDB, ok := middleware.GetTenantDB(c)
+	if !ok {
+		return 0, fmt.Errorf("tenant DB not found")
+	}
+
+	// Mark all existing directors as inactive before sync
+	_, err = tenantDB.Exec(c, `
+		UPDATE directors SET is_active = false
+		WHERE client_id = $1 AND tenant_id = $2
+	`, clientID, tenantID)
+	if err != nil {
+		log.Warn().Err(err).Msg("Failed to mark existing directors as inactive")
+	}
+
+	syncedCount := 0
+	for _, officer := range officersResp.Items {
+		// Only sync directors and secretaries
+		role := "director"
+		if officer.OfficerRole == "secretary" || officer.OfficerRole == "corporate-secretary" {
+			role = "secretary"
+		} else if officer.OfficerRole != "director" && officer.OfficerRole != "corporate-director" {
+			continue // Skip other officer types
+		}
+
+		// Parse dates
+		var appointedDate, resignedDate *time.Time
+		if officer.AppointedOn != "" {
+			if t, err := time.Parse("2006-01-02", officer.AppointedOn); err == nil {
+				appointedDate = &t
+			}
+		}
+		if officer.ResignedOn != "" {
+			if t, err := time.Parse("2006-01-02", officer.ResignedOn); err == nil {
+				resignedDate = &t
+			}
+		}
+
+		// Get DOB month/year
+		var dobMonth, dobYear *int
+		if officer.DateOfBirth != nil {
+			if officer.DateOfBirth.Month > 0 {
+				dobMonth = &officer.DateOfBirth.Month
+			}
+			if officer.DateOfBirth.Year > 0 {
+				dobYear = &officer.DateOfBirth.Year
+			}
+		}
+
+		// Determine if active (no resigned date)
+		isActive := resignedDate == nil
+
+		// Upsert director (ON CONFLICT based on client_id, name, role)
+		_, err := tenantDB.Exec(c, `
+			INSERT INTO directors (tenant_id, client_id, name, role, appointed_date, resigned_date, nationality, dob_month, dob_year, is_active)
+			VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+			ON CONFLICT (client_id, name, role) WHERE is_active = true
+			DO UPDATE SET
+				appointed_date = COALESCE(EXCLUDED.appointed_date, directors.appointed_date),
+				resigned_date = COALESCE(EXCLUDED.resigned_date, directors.resigned_date),
+				nationality = COALESCE(EXCLUDED.nationality, directors.nationality),
+				dob_month = COALESCE(EXCLUDED.dob_month, directors.dob_month),
+				dob_year = COALESCE(EXCLUDED.dob_year, directors.dob_year),
+				is_active = EXCLUDED.is_active
+		`, tenantID, clientID, officer.Name, role, appointedDate, resignedDate, officer.Nationality, dobMonth, dobYear, isActive)
+
+		if err != nil {
+			log.Warn().Err(err).Str("name", officer.Name).Msg("Failed to upsert director")
+			continue
+		}
+		syncedCount++
+	}
+
+	log.Info().
+		Str("client_id", clientID.String()).
+		Str("company_number", companyNumber).
+		Int("total_officers", officersResp.TotalResults).
+		Int("synced", syncedCount).
+		Msg("Directors synced from Companies House")
+
+	return syncedCount, nil
+}
+
+// syncPSC fetches Persons with Significant Control from Companies House and syncs them.
+// Returns the count of PSC records synced and any error.
+func (h *CompaniesHouseHandler) syncPSC(c *gin.Context, clientID, tenantID uuid.UUID, companyNumber string) (int, error) {
+	ctx := c.Request.Context()
+
+	// Fetch PSC from Companies House
+	apiURL := fmt.Sprintf("%s/company/%s/persons-with-significant-control", h.cfg.BaseURL, companyNumber)
+	results, err := h.makeRequest(ctx, apiURL)
+	if err != nil {
+		// PSC endpoint may return 404 for companies without PSC
+		if err.Error() == "not_found" {
+			return 0, nil
+		}
+		return 0, fmt.Errorf("failed to fetch PSC: %w", err)
+	}
+
+	var pscResp CHPSCResponse
+	if err := json.Unmarshal(results, &pscResp); err != nil {
+		return 0, fmt.Errorf("failed to parse PSC response: %w", err)
+	}
+
+	// Get TenantDB for RLS-protected operations
+	tenantDB, ok := middleware.GetTenantDB(c)
+	if !ok {
+		return 0, fmt.Errorf("tenant DB not found")
+	}
+
+	// Mark all existing PSC as inactive before sync
+	_, err = tenantDB.Exec(c, `
+		UPDATE psc SET is_active = false
+		WHERE client_id = $1 AND tenant_id = $2
+	`, clientID, tenantID)
+	if err != nil {
+		log.Warn().Err(err).Msg("Failed to mark existing PSC as inactive")
+	}
+
+	syncedCount := 0
+	for _, psc := range pscResp.Items {
+		// Skip non-individual PSC for now (corporate entities, etc.)
+		if psc.Kind != "" && psc.Kind != "individual-person-with-significant-control" {
+			continue
+		}
+
+		// Parse dates
+		var notifiedDate, ceasedDate *time.Time
+		if psc.NotifiedOn != "" {
+			if t, err := time.Parse("2006-01-02", psc.NotifiedOn); err == nil {
+				notifiedDate = &t
+			}
+		}
+		if psc.CeasedOn != "" {
+			if t, err := time.Parse("2006-01-02", psc.CeasedOn); err == nil {
+				ceasedDate = &t
+			}
+		}
+
+		// Determine ownership percentage from natures_of_control
+		ownershipPct := determineOwnershipPercentage(psc.NaturesOfControl)
+
+		// Determine if active (no ceased date)
+		isActive := ceasedDate == nil
+
+		// Convert natures_of_control to JSONB
+		naturesJSON, _ := json.Marshal(psc.NaturesOfControl)
+
+		// Upsert PSC (ON CONFLICT based on client_id, name)
+		_, err := tenantDB.Exec(c, `
+			INSERT INTO psc (tenant_id, client_id, name, ownership_percentage, notified_date, ceased_date, nature_of_control, is_active)
+			VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+			ON CONFLICT (client_id, name) WHERE is_active = true
+			DO UPDATE SET
+				ownership_percentage = COALESCE(EXCLUDED.ownership_percentage, psc.ownership_percentage),
+				notified_date = COALESCE(EXCLUDED.notified_date, psc.notified_date),
+				ceased_date = COALESCE(EXCLUDED.ceased_date, psc.ceased_date),
+				nature_of_control = COALESCE(EXCLUDED.nature_of_control, psc.nature_of_control),
+				is_active = EXCLUDED.is_active
+		`, tenantID, clientID, psc.Name, ownershipPct, notifiedDate, ceasedDate, naturesJSON, isActive)
+
+		if err != nil {
+			log.Warn().Err(err).Str("name", psc.Name).Msg("Failed to upsert PSC")
+			continue
+		}
+		syncedCount++
+	}
+
+	log.Info().
+		Str("client_id", clientID.String()).
+		Str("company_number", companyNumber).
+		Int("total_psc", pscResp.TotalResults).
+		Int("synced", syncedCount).
+		Msg("PSC synced from Companies House")
+
+	return syncedCount, nil
+}
+
+// determineOwnershipPercentage parses CH natures_of_control to determine ownership percentage.
+// Returns one of: "75%+", "50-75%", "25-50%", or nil if undetermined.
+func determineOwnershipPercentage(naturesOfControl []string) *string {
+	for _, nature := range naturesOfControl {
+		// CH uses strings like "ownership-of-shares-75-to-100-percent"
+		if strings.Contains(nature, "75-to-100") || strings.Contains(nature, "more-than-75") {
+			pct := "75%+"
+			return &pct
+		}
+		if strings.Contains(nature, "50-to-75") {
+			pct := "50-75%"
+			return &pct
+		}
+		if strings.Contains(nature, "25-to-50") {
+			pct := "25-50%"
+			return &pct
+		}
+	}
+	return nil
 }
 
 // makeRequest makes an authenticated request to the Companies House API.

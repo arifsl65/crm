@@ -94,6 +94,7 @@ run_migration 4 000004_add_partitioned_table_fks.up.sql
 run_migration 5 000005_add_counter_triggers.up.sql
 run_migration 6 000006_enhance_type_tables.up.sql
 run_migration 7 000007_force_rls.up.sql
+run_migration 8 000008_add_document_renewal.up.sql
 
 # Show final status
 echo ""

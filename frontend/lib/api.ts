@@ -68,11 +68,15 @@ export interface Document {
   expiry_date?: string;
   chase_count: number;
   ai_summary?: string;
+  review_note?: string;
+  reviewed_by?: string;
+  reviewed_at?: string;
   created_at: string;
   updated_at: string;
   client_name?: string;
   type_name?: string;
   uploaded_by_name?: string;
+  reviewed_by_name?: string;
 }
 
 export interface DashboardStats {
@@ -439,6 +443,73 @@ export async function rejectDocument(id: string, note: string): Promise<void> {
     body: JSON.stringify({ note }),
   });
   if (!res.ok) throw new Error('Failed to reject document');
+}
+
+export interface DocumentVersion {
+  id: string;
+  document_id: string;
+  version: number;
+  file_path?: string;
+  file_size?: number;
+  mime_type?: string;
+  uploaded_by?: string;
+  uploaded_by_name?: string;
+  created_at: string;
+}
+
+export async function getDocumentVersions(id: string): Promise<{ versions: DocumentVersion[] }> {
+  const res = await authFetch(`/api/v1/documents/${id}/versions`);
+  if (!res.ok) throw new Error('Failed to fetch document versions');
+  return res.json();
+}
+
+export async function restoreDocumentVersion(documentId: string, versionId: string): Promise<void> {
+  const res = await authFetch(`/api/v1/documents/${documentId}/versions/${versionId}/restore`, {
+    method: 'POST',
+  });
+  if (!res.ok) throw new Error('Failed to restore document version');
+}
+
+export async function generateQRToken(data: {
+  client_id: string;
+  document_type_id?: string;
+  note?: string;
+  expires_in_minutes?: number;
+}): Promise<{ token: string; expires_at: string; upload_url: string }> {
+  const res = await authFetch('/api/v1/documents/qr', {
+    method: 'POST',
+    body: JSON.stringify(data),
+  });
+  if (!res.ok) {
+    const error = await res.json();
+    throw new Error(error.message || 'Failed to generate QR token');
+  }
+  return res.json();
+}
+
+export async function verifyQRToken(token: string): Promise<{
+  client_name: string;
+  expires_at: string;
+  note?: string;
+}> {
+  const res = await fetch(`${process.env.NEXT_PUBLIC_API_URL || ''}/api/v1/documents/qr/${token}`);
+  if (!res.ok) throw new Error('Invalid or expired token');
+  return res.json();
+}
+
+export async function uploadViaQR(token: string, file: File): Promise<{ id: string; message: string }> {
+  const formData = new FormData();
+  formData.append('file', file);
+
+  const res = await fetch(`${process.env.NEXT_PUBLIC_API_URL || ''}/api/v1/documents/qr/${token}/upload`, {
+    method: 'POST',
+    body: formData,
+  });
+  if (!res.ok) {
+    const error = await res.json();
+    throw new Error(error.message || 'Failed to upload document');
+  }
+  return res.json();
 }
 
 // Service Types

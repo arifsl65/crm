@@ -5,9 +5,9 @@
 # -----------------------------------------------------------------------------
 # Development Stage
 # -----------------------------------------------------------------------------
-FROM golang:1.26-alpine AS development
+FROM golang:1.23-alpine AS development
 
-ENV GOTOOLCHAIN=local
+ENV GOTOOLCHAIN=auto
 
 WORKDIR /app
 
@@ -33,9 +33,9 @@ CMD ["air", "-c", ".air.toml"]
 # -----------------------------------------------------------------------------
 # Builder Stage
 # -----------------------------------------------------------------------------
-FROM golang:1.26-alpine AS builder
+FROM golang:1.23-alpine AS builder
 
-ENV GOTOOLCHAIN=local
+ENV GOTOOLCHAIN=auto
 
 WORKDIR /app
 
@@ -48,6 +48,9 @@ RUN go mod download
 
 # Copy source code
 COPY . .
+
+# Ensure dependencies are synced
+RUN go mod tidy
 
 # Build the binary
 RUN CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build \
