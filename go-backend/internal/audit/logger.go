@@ -58,6 +58,16 @@ const (
 	ActionSettingsUpdate     Action = "settings_update"
 	ActionAPIKeyCreate       Action = "api_key_create"
 	ActionAPIKeyRevoke       Action = "api_key_revoke"
+
+	// Email actions
+	ActionEmailSend           Action = "email_send"
+	ActionEmailTemplateCreate Action = "email_template_create"
+	ActionEmailTemplateUpdate Action = "email_template_update"
+	ActionEmailTemplateDelete Action = "email_template_delete"
+	ActionEmailAccountCreate  Action = "email_account_create"
+	ActionEmailAccountDelete  Action = "email_account_delete"
+	ActionEmailAccountSync    Action = "email_account_sync"
+	ActionChaseCreate         Action = "chase_create"
 )
 
 // Logger handles audit logging to the database.

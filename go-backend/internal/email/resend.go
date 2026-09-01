@@ -51,23 +51,30 @@ type SendResponse struct {
 	ID string `json:"id"`
 }
 
-// Send sends an email via Resend.
+// Send sends an email via Resend and returns the Resend ID.
 func (c *Client) Send(to, subject, html string) error {
+	_, err := c.SendWithID(to, subject, html, "")
+	return err
+}
+
+// SendWithID sends an email via Resend and returns the Resend ID.
+func (c *Client) SendWithID(to, subject, html, text string) (string, error) {
 	req := SendRequest{
 		From:    fmt.Sprintf("%s <%s>", c.fromName, c.fromEmail),
 		To:      []string{to},
 		Subject: subject,
 		HTML:    html,
+		Text:    text,
 	}
 
 	body, err := json.Marshal(req)
 	if err != nil {
-		return fmt.Errorf("failed to marshal request: %w", err)
+		return "", fmt.Errorf("failed to marshal request: %w", err)
 	}
 
 	httpReq, err := http.NewRequest("POST", c.baseURL+"/emails", bytes.NewReader(body))
 	if err != nil {
-		return fmt.Errorf("failed to create request: %w", err)
+		return "", fmt.Errorf("failed to create request: %w", err)
 	}
 
 	httpReq.Header.Set("Content-Type", "application/json")
@@ -75,15 +82,30 @@ func (c *Client) Send(to, subject, html string) error {
 
 	resp, err := c.httpClient.Do(httpReq)
 	if err != nil {
-		return fmt.Errorf("failed to send request: %w", err)
+		return "", fmt.Errorf("failed to send request: %w", err)
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusCreated {
-		return fmt.Errorf("resend API returned status %d", resp.StatusCode)
+		return "", fmt.Errorf("resend API returned status %d", resp.StatusCode)
 	}
 
-	return nil
+	var sendResp SendResponse
+	if err := json.NewDecoder(resp.Body).Decode(&sendResp); err != nil {
+		return "", fmt.Errorf("failed to decode response: %w", err)
+	}
+
+	return sendResp.ID, nil
+}
+
+// GetFromEmail returns the configured from email address.
+func (c *Client) GetFromEmail() string {
+	return c.fromEmail
+}
+
+// GetFromName returns the configured from name.
+func (c *Client) GetFromName() string {
+	return c.fromName
 }
 
 // SendPasswordReset sends a password reset email.
