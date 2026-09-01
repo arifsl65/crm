@@ -175,7 +175,7 @@ class Settings(BaseSettings):
 
     # Groq AI (primary AI provider)
     groq_api_key: str = ""
-    groq_model: str = "llama-3.1-70b-versatile"  # Fast and capable model
+    groq_model: str = "openai/gpt-oss-120b"  # General-purpose large model for document analysis
     groq_max_tokens: int = 4096
     groq_temperature: float = 0.1  # Low for consistent document analysis
 
