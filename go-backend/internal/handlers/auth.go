@@ -1519,7 +1519,7 @@ func (h *AuthHandler) Disable2FA(c *gin.Context) {
 	// Verify password before allowing 2FA disable
 	var passwordHash string
 	err := h.db.SuperAdminTransaction(ctx, func(tx pgx.Tx) error {
-		return tx.QueryRow(ctx, `SELECT password_hash FROM users WHERE id = $1`, userID).Scan(&passwordHash)
+		return tx.QueryRow(ctx, `SELECT password FROM users WHERE id = $1`, userID).Scan(&passwordHash)
 	})
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{
@@ -1529,7 +1529,8 @@ func (h *AuthHandler) Disable2FA(c *gin.Context) {
 		return
 	}
 
-	if !auth.CheckPassword(req.Password, passwordHash) {
+	valid, err := auth.VerifyPassword(req.Password, passwordHash)
+	if err != nil || !valid {
 		c.JSON(http.StatusUnauthorized, gin.H{
 			"error":   "invalid_password",
 			"message": "Incorrect password",
