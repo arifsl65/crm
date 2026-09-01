@@ -1436,19 +1436,20 @@ func (h *DocumentHandler) GenerateQRToken(c *gin.Context) {
 // GET /api/v1/documents/qr/:token
 func (h *DocumentHandler) GetQRToken(c *gin.Context) {
 	token := c.Param("token")
-
 	ctx := c.Request.Context()
 
 	var clientName string
 	var expiresAt time.Time
 	var note *string
-	// Query directly from upload_tokens (client_name stored at creation time)
-	// This avoids RLS issues with cross-table joins for public endpoints
-	err := h.db.QueryRow(ctx, `
-		SELECT client_name, expires_at, note
-		FROM upload_tokens
-		WHERE token = $1 AND expires_at > NOW() AND used_at IS NULL
-	`, token).Scan(&clientName, &expiresAt, &note)
+
+	// Use SuperAdminTransaction to bypass RLS for public endpoint
+	err := h.db.SuperAdminTransaction(ctx, func(tx pgx.Tx) error {
+		return tx.QueryRow(ctx, `
+			SELECT client_name, expires_at, note
+			FROM upload_tokens
+			WHERE token = $1 AND expires_at > NOW() AND used_at IS NULL
+		`, token).Scan(&clientName, &expiresAt, &note)
+	})
 
 	if err != nil {
 		c.JSON(http.StatusNotFound, gin.H{"error": "invalid_or_expired_token"})
@@ -1716,13 +1717,16 @@ func (h *DocumentHandler) UploadViaQR(c *gin.Context) {
 	ctx := c.Request.Context()
 
 	// Validate token and get associated info
+	// Use SuperAdminTransaction to bypass RLS for public endpoint
 	var tokenID, tenantID, clientID, createdBy uuid.UUID
 	var expiresAt time.Time
-	err := h.db.QueryRow(ctx, `
-		SELECT id, tenant_id, client_id, created_by, expires_at
-		FROM upload_tokens
-		WHERE token = $1 AND expires_at > NOW() AND used_at IS NULL
-	`, token).Scan(&tokenID, &tenantID, &clientID, &createdBy, &expiresAt)
+	err := h.db.SuperAdminTransaction(ctx, func(tx pgx.Tx) error {
+		return tx.QueryRow(ctx, `
+			SELECT id, tenant_id, client_id, created_by, expires_at
+			FROM upload_tokens
+			WHERE token = $1 AND expires_at > NOW() AND used_at IS NULL
+		`, token).Scan(&tokenID, &tenantID, &clientID, &createdBy, &expiresAt)
+	})
 
 	if err != nil {
 		c.JSON(http.StatusNotFound, gin.H{"error": "invalid_or_expired_token"})
@@ -1794,25 +1798,31 @@ func (h *DocumentHandler) UploadViaQR(c *gin.Context) {
 	fileSize := len(fileContent)
 	originalName := header.Filename
 
-	// Create document record
-	_, err = h.db.Exec(ctx, `
-		INSERT INTO documents (
-			id, tenant_id, client_id, uploaded_by,
-			name, original_name, file_path, file_size, mime_type,
-			status, access
-		) VALUES (
-			$1, $2, $3, $4, $5, $5, $6, $7, $8, 'pending_review', 'all_staff'
-		)
-	`, documentID, tenantID, clientID, createdBy, originalName, filePath, fileSize, detectedMime)
+	// Create document record using TenantTransaction with the token's tenant context
+	err = h.db.TenantTransaction(ctx, tenantID.String(), "staff", func(tx pgx.Tx) error {
+		_, err := tx.Exec(ctx, `
+			INSERT INTO documents (
+				id, tenant_id, client_id, uploaded_by,
+				name, original_name, file_path, file_size, mime_type,
+				status, access
+			) VALUES (
+				$1, $2, $3, $4, $5, $5, $6, $7, $8, 'pending_review', 'all_staff'
+			)
+		`, documentID, tenantID, clientID, createdBy, originalName, filePath, fileSize, detectedMime)
+		if err != nil {
+			return err
+		}
+
+		// Mark token as used (optional: allow multiple uploads with same token)
+		// _, _ = tx.Exec(ctx, `UPDATE upload_tokens SET used_at = NOW() WHERE id = $1`, tokenID)
+		return nil
+	})
 
 	if err != nil {
 		log.Error().Err(err).Msg("Failed to create document from QR upload")
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "internal_error"})
 		return
 	}
-
-	// Mark token as used (optional: allow multiple uploads with same token)
-	// _, _ = h.db.Exec(ctx, `UPDATE upload_tokens SET used_at = NOW() WHERE id = $1`, tokenID)
 
 	// Audit log
 	h.audit.LogEntity(ctx, audit.ActionDocumentUpload, &createdBy, &tenantID, "document", &documentID, c.ClientIP(), map[string]interface{}{
