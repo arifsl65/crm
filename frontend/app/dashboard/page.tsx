@@ -11,6 +11,8 @@ export default function DashboardPage() {
   const [mounted, setMounted] = useState(false);
   const [stats, setStats] = useState<DashboardStats | null>(null);
   const [loading, setLoading] = useState(true);
+  // Fix #40: Track error state to show user-facing error message
+  const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
     setMounted(true);
@@ -19,10 +21,13 @@ export default function DashboardPage() {
   useEffect(() => {
     async function fetchStats() {
       try {
+        setError(null);
         const data = await getDashboardStats();
         setStats(data);
       } catch (err) {
         console.error('Failed to load dashboard stats:', err);
+        // Fix #40: Surface error to user instead of silently failing
+        setError('Failed to load dashboard statistics. Please try refreshing the page.');
       } finally {
         setLoading(false);
       }
@@ -99,6 +104,24 @@ export default function DashboardPage() {
 
       {/* Main Content */}
       <main className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-8">
+        {/* Fix #40: Error banner for failed dashboard stats */}
+        {error && (
+          <div className="mb-6 rounded-md bg-red-50 dark:bg-red-900/50 p-4 flex items-center justify-between">
+            <div className="flex items-center">
+              <svg className="w-5 h-5 text-red-400 mr-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 8v4m0 4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
+              </svg>
+              <p className="text-sm text-red-700 dark:text-red-300">{error}</p>
+            </div>
+            <button
+              onClick={() => window.location.reload()}
+              className="text-sm font-medium text-red-600 dark:text-red-400 hover:text-red-500"
+            >
+              Retry
+            </button>
+          </div>
+        )}
+
         {/* Welcome Card */}
         <div className="bg-white dark:bg-slate-800 rounded-lg shadow-sm p-6 mb-8">
           <h2 className="text-xl font-semibold text-gray-900 dark:text-white mb-2">

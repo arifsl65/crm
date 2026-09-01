@@ -290,8 +290,16 @@ func (c *Client) calculateBackoff(attempt int) time.Duration {
 	return delay
 }
 
-// RequestIDKey is the context key for request ID propagation
-const RequestIDKey = "X-Request-ID"
+// requestIDKeyType is a private type to prevent context key collisions.
+// Fix #28: Using struct type instead of string literal for context keys.
+type requestIDKeyType struct{}
+
+// RequestIDKey is the context key for request ID propagation.
+// Use this key with context.WithValue to set the request ID.
+var RequestIDKey = requestIDKeyType{}
+
+// requestIDHeader is the HTTP header name for request ID propagation.
+const requestIDHeader = "X-Request-ID"
 
 // get performs a GET request to the Python AI service with retry logic.
 // Propagates X-Request-ID from context for distributed tracing.
@@ -328,7 +336,7 @@ func (c *Client) get(ctx context.Context, path string) (*http.Response, error) {
 		req.Header.Set("Content-Type", "application/json")
 		// Propagate request ID for distributed tracing
 		if requestID != "" {
-			req.Header.Set(RequestIDKey, requestID)
+			req.Header.Set(requestIDHeader, requestID)
 		}
 
 		resp, err := c.httpClient.Do(req)
@@ -409,7 +417,7 @@ func (c *Client) post(ctx context.Context, path string, body interface{}) (*http
 		req.Header.Set("Content-Type", "application/json")
 		// Propagate request ID for distributed tracing
 		if requestID != "" {
-			req.Header.Set(RequestIDKey, requestID)
+			req.Header.Set(requestIDHeader, requestID)
 		}
 
 		resp, err := c.httpClient.Do(req)

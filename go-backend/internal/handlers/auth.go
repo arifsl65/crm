@@ -1493,14 +1493,52 @@ func (h *AuthHandler) Verify2FA(c *gin.Context) {
 	})
 }
 
+// Disable2FARequest is the request body for disabling 2FA.
+// Fix #39: Require password confirmation before disabling 2FA.
+type Disable2FARequest struct {
+	Password string `json:"password" binding:"required"`
+}
+
 // Disable2FA disables 2FA for a user (admin only or self).
 // DELETE /api/v1/auth/2fa
+// Fix #39: Requires password confirmation to prevent session hijacker from stripping MFA.
 func (h *AuthHandler) Disable2FA(c *gin.Context) {
 	userID, _ := middleware.GetUserID(c)
 	ctx := c.Request.Context()
 
-	// Clear TOTP secret and backup codes
+	// Parse and validate request body
+	var req Disable2FARequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{
+			"error":   "invalid_request",
+			"message": "Password is required to disable 2FA",
+		})
+		return
+	}
+
+	// Verify password before allowing 2FA disable
+	var passwordHash string
 	err := h.db.SuperAdminTransaction(ctx, func(tx pgx.Tx) error {
+		return tx.QueryRow(ctx, `SELECT password_hash FROM users WHERE id = $1`, userID).Scan(&passwordHash)
+	})
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{
+			"error":   "internal_error",
+			"message": "An error occurred",
+		})
+		return
+	}
+
+	if !auth.CheckPassword(req.Password, passwordHash) {
+		c.JSON(http.StatusUnauthorized, gin.H{
+			"error":   "invalid_password",
+			"message": "Incorrect password",
+		})
+		return
+	}
+
+	// Clear TOTP secret and backup codes
+	err = h.db.SuperAdminTransaction(ctx, func(tx pgx.Tx) error {
 		_, err := tx.Exec(ctx, `UPDATE users SET totp_secret = NULL, updated_at = NOW() WHERE id = $1`, userID)
 		return err
 	})

@@ -38,17 +38,26 @@ export default function LoginPage() {
       router.push('/dashboard');
     } catch (err) {
       if (err instanceof Error) {
-        // Try to parse error response
-        try {
-          const errorData: LoginError = JSON.parse(err.message);
-          if (isTenantRequiredError(errorData)) {
-            setShowTenantField(true);
-            setError('Your email exists in multiple workspaces. Please specify your workspace domain.');
-          } else {
-            setError(errorData.message || err.message);
+        // Fix #35: Safely parse error response, handling non-JSON errors gracefully
+        const message = err.message;
+
+        // Only attempt JSON parse if message looks like JSON object
+        if (message.startsWith('{') && message.endsWith('}')) {
+          try {
+            const errorData: LoginError = JSON.parse(message);
+            if (isTenantRequiredError(errorData)) {
+              setShowTenantField(true);
+              setError('Your email exists in multiple workspaces. Please specify your workspace domain.');
+            } else {
+              setError(errorData.message || message);
+            }
+          } catch {
+            // JSON parse failed despite looking like JSON, use raw message
+            setError(message);
           }
-        } catch {
-          setError(err.message);
+        } else {
+          // Plain text error message
+          setError(message);
         }
       } else {
         setError('Login failed');

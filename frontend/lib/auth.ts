@@ -135,6 +135,37 @@ export function isAuthenticated(): boolean {
 }
 
 /**
+ * Validates the current access token with the server.
+ * Fix #30: Prevents stale/expired tokens from passing as authenticated.
+ * Returns the user if valid, null if invalid (triggers refresh or logout).
+ */
+export async function validateToken(): Promise<User | null> {
+  const token = getAccessToken();
+  if (!token) {
+    return null;
+  }
+
+  try {
+    const res = await fetch(`${API_URL}/api/v1/auth/me`, {
+      method: 'GET',
+      headers: {
+        'Authorization': `Bearer ${token}`,
+        'Content-Type': 'application/json',
+      },
+    });
+
+    if (!res.ok) {
+      return null;
+    }
+
+    const data = await res.json();
+    return data.user || null;
+  } catch {
+    return null;
+  }
+}
+
+/**
  * Detects the current tenant domain from the browser hostname.
  * This helps pre-fill tenant_domain on multi-tenant deployments.
  *

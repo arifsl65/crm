@@ -1,6 +1,7 @@
 'use client';
 
 import React, { useState, useEffect, useRef, useCallback } from 'react';
+import { useRouter } from 'next/navigation';
 
 interface SearchResult {
   id: string;
@@ -25,6 +26,8 @@ export function GlobalSearch({
   onSearch,
   className = '',
 }: GlobalSearchProps) {
+  // Fix #31: Use Next.js router for SPA navigation instead of window.location.href
+  const router = useRouter();
   const [isOpen, setIsOpen] = useState(false);
   const [query, setQuery] = useState('');
   const [results, setResults] = useState<SearchResult[]>([]);
@@ -101,6 +104,7 @@ export function GlobalSearch({
   }, [query, handleSearch]);
 
   // Keyboard navigation
+  // Fix #31: Use router.push() for client-side SPA navigation
   const handleKeyDown = (e: React.KeyboardEvent) => {
     switch (e.key) {
       case 'ArrowDown':
@@ -114,7 +118,7 @@ export function GlobalSearch({
       case 'Enter':
         e.preventDefault();
         if (results[selectedIndex]) {
-          window.location.href = results[selectedIndex].url;
+          router.push(results[selectedIndex].url);
           setIsOpen(false);
         }
         break;
@@ -222,15 +226,19 @@ export function GlobalSearch({
               <ul className="py-2">
                 {results.map((result, index) => (
                   <li key={result.id}>
-                    <a
-                      href={result.url}
-                      className={`flex items-center gap-3 px-4 py-3 ${
+                    <button
+                      type="button"
+                      className={`w-full flex items-center gap-3 px-4 py-3 text-left ${
                         index === selectedIndex
                           ? 'bg-blue-50 dark:bg-blue-900/30'
                           : 'hover:bg-gray-50 dark:hover:bg-gray-700'
                       }`}
                       onMouseEnter={() => setSelectedIndex(index)}
-                      onClick={() => setIsOpen(false)}
+                      onClick={() => {
+                        // Fix #31: Use router.push for SPA navigation
+                        router.push(result.url);
+                        setIsOpen(false);
+                      }}
                     >
                       <div className="flex-shrink-0 w-8 h-8 flex items-center justify-center rounded-lg bg-gray-100 dark:bg-gray-700 text-gray-500 dark:text-gray-400">
                         {typeIcons[result.type]}
@@ -245,7 +253,7 @@ export function GlobalSearch({
                           </p>
                         )}
                       </div>
-                    </a>
+                    </button>
                   </li>
                 ))}
               </ul>

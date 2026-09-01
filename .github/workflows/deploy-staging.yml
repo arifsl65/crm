@@ -368,13 +368,13 @@ jobs:
     steps:
       - name: Run smoke tests
         run: |
-          # TODO: Change to HTTPS when SSL certificate is configured on ALB (Week 2)
+          # Fix #33: Use HTTPS for production health checks
           # Test health endpoints
-          curl -sf http://api.staging.accountant-crm.com/health || exit 1
-          curl -sf http://api.staging.accountant-crm.com/ready || exit 1
+          curl -sf https://api.staging.accountant-crm.com/health || exit 1
+          curl -sf https://api.staging.accountant-crm.com/ready || exit 1
 
-          # Test frontend (OSS with CDN, should have HTTPS)
-          curl -sf http://staging.accountant-crm.com/ || exit 1
+          # Test frontend
+          curl -sf https://staging.accountant-crm.com/ || exit 1
 
           echo "All smoke tests passed!"
 

@@ -3,6 +3,7 @@ package main
 
 import (
 	"context"
+	"crypto/subtle"
 	"errors"
 	"fmt"
 	"net/http"
@@ -102,7 +103,7 @@ func main() {
 	// Initialize handlers
 	authHandler := handlers.NewAuthHandler(db, jwtManager, sessionManager, emailClient, cfg.FrontendURL, authRateLimiter, auditLogger, redis)
 	tenantHandler := handlers.NewTenantHandler(db)
-	userHandler := handlers.NewUserHandler(db)
+	userHandler := handlers.NewUserHandler(db, sessionManager)
 	clientHandler := handlers.NewClientHandler(db, auditLogger)
 	serviceHandler := handlers.NewServiceHandler(db, auditLogger)
 	documentHandler := handlers.NewDocumentHandler(db, auditLogger)
@@ -482,15 +483,21 @@ func requestLogger() gin.HandlerFunc {
 
 // In-memory fallback rate limiter (Fix #11)
 // Used when Redis is unavailable to prevent unlimited requests
+// Fix #37: Added max size cap and periodic cleanup to prevent unbounded growth
 type memoryRateLimiter struct {
-	counts map[string]int
-	resets map[string]time.Time
-	mu     sync.Mutex
+	counts   map[string]int
+	resets   map[string]time.Time
+	mu       sync.Mutex
+	maxSize  int
+	cleanups int // Track cleanups for monitoring
 }
 
+const fallbackLimiterMaxSize = 10000 // Max unique IPs to track
+
 var fallbackLimiter = &memoryRateLimiter{
-	counts: make(map[string]int),
-	resets: make(map[string]time.Time),
+	counts:  make(map[string]int),
+	resets:  make(map[string]time.Time),
+	maxSize: fallbackLimiterMaxSize,
 }
 
 func (m *memoryRateLimiter) check(ip string, limit int, window time.Duration) (allowed bool, count int) {
@@ -498,6 +505,22 @@ func (m *memoryRateLimiter) check(ip string, limit int, window time.Duration) (a
 	defer m.mu.Unlock()
 
 	now := time.Now()
+
+	// Fix #37: Cleanup expired entries if we're at capacity
+	if len(m.counts) >= m.maxSize {
+		m.cleanupExpired(now)
+		m.cleanups++
+
+		// If still at capacity after cleanup, reject new IPs (defensive)
+		if len(m.counts) >= m.maxSize {
+			_, exists := m.counts[ip]
+			if !exists {
+				// New IP when at capacity - rate limit it
+				return false, limit + 1
+			}
+		}
+	}
+
 	resetTime, exists := m.resets[ip]
 
 	// Reset if window expired
@@ -511,6 +534,16 @@ func (m *memoryRateLimiter) check(ip string, limit int, window time.Duration) (a
 	m.counts[ip]++
 	count = m.counts[ip]
 	return count <= limit, count
+}
+
+// cleanupExpired removes entries with expired windows (must be called with lock held)
+func (m *memoryRateLimiter) cleanupExpired(now time.Time) {
+	for ip, resetTime := range m.resets {
+		if now.After(resetTime) {
+			delete(m.counts, ip)
+			delete(m.resets, ip)
+		}
+	}
 }
 
 // rateLimiter returns a Gin middleware for rate limiting using Redis.
@@ -595,21 +628,48 @@ func rateLimiter(cfg config.RateLimitConfig, redis *cache.Client) gin.HandlerFun
 	}
 }
 
+// memStatsCache holds periodically sampled memory statistics to avoid STW pauses.
+var memStatsCache struct {
+	sync.RWMutex
+	allocMB uint64
+}
+
 // healthHandler returns a handler for liveness checks.
 // Fix #26: Added basic runtime checks to ensure process is healthy.
+// Fix #27: Memory stats sampled every 30s to avoid STW pauses on frequent ALB probes.
 func healthHandler() gin.HandlerFunc {
 	startTime := time.Now()
 
+	// Sample memory stats immediately on startup
+	var initialStats runtime.MemStats
+	runtime.ReadMemStats(&initialStats)
+	memStatsCache.Lock()
+	memStatsCache.allocMB = initialStats.Alloc / 1024 / 1024
+	memStatsCache.Unlock()
+
+	// Background goroutine samples memory stats every 30 seconds
+	go func() {
+		ticker := time.NewTicker(30 * time.Second)
+		defer ticker.Stop()
+		for range ticker.C {
+			var stats runtime.MemStats
+			runtime.ReadMemStats(&stats)
+			memStatsCache.Lock()
+			memStatsCache.allocMB = stats.Alloc / 1024 / 1024
+			memStatsCache.Unlock()
+		}
+	}()
+
 	return func(c *gin.Context) {
-		// Basic runtime checks
-		var memStats runtime.MemStats
-		runtime.ReadMemStats(&memStats)
+		memStatsCache.RLock()
+		allocMB := memStatsCache.allocMB
+		memStatsCache.RUnlock()
 
 		c.JSON(http.StatusOK, gin.H{
 			"status":     "ok",
 			"uptime":     time.Since(startTime).String(),
 			"goroutines": runtime.NumGoroutine(),
-			"memory_mb":  memStats.Alloc / 1024 / 1024,
+			"memory_mb":  allocMB,
 		})
 	}
 }
@@ -655,20 +715,27 @@ func readyHandler(db *database.Pool, redis *cache.Client, aiClient *ai.Client) g
 
 // metricsAuthMiddleware protects the /metrics endpoint with a token.
 // Fix #12: Prevent public access to internal metrics.
+// Fix #32: Read METRICS_TOKEN once at startup instead of per-request.
 func metricsAuthMiddleware(cfg config.AppConfig) gin.HandlerFunc {
-	return func(c *gin.Context) {
-		// Get expected token from environment
-		expectedToken := os.Getenv("METRICS_TOKEN")
+	// Capture token at startup - not per request
+	expectedToken := os.Getenv("METRICS_TOKEN")
+	isDev := cfg.Env == "development"
+	tokenConfigured := expectedToken != ""
 
+	// Log warning once at startup if not configured in non-dev
+	if !isDev && !tokenConfigured {
+		log.Warn().Msg("METRICS_TOKEN not set, metrics endpoint will be blocked")
+	}
+
+	return func(c *gin.Context) {
 		// In development, allow access without token
-		if cfg.Env == "development" && expectedToken == "" {
+		if isDev && !tokenConfigured {
 			c.Next()
 			return
 		}
 
 		// Require token in production/staging
-		if expectedToken == "" {
-			log.Warn().Msg("METRICS_TOKEN not set, blocking metrics access")
+		if !tokenConfigured {
 			c.AbortWithStatusJSON(http.StatusForbidden, gin.H{
 				"error":   "forbidden",
 				"message": "Metrics endpoint not configured",
@@ -676,9 +743,10 @@ func metricsAuthMiddleware(cfg config.AppConfig) gin.HandlerFunc {
 			return
 		}
 
-		// Check X-Metrics-Token header
+		// Check X-Metrics-Token header using constant-time comparison
+		// Fix #32: Prevent timing attacks on token comparison
 		token := c.GetHeader("X-Metrics-Token")
-		if token != expectedToken {
+		if subtle.ConstantTimeCompare([]byte(token), []byte(expectedToken)) != 1 {
 			c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{
 				"error":   "unauthorized",
 				"message": "Invalid or missing metrics token",

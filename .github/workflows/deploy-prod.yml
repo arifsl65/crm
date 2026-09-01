@@ -464,21 +464,21 @@ jobs:
 
       - name: Run health checks
         run: |
-          # TODO: Change to HTTPS when SSL certificate is configured on ALB (Week 2)
+          # Fix #33: Use HTTPS for production health checks
           # API health
-          curl -sf http://api.accountant-crm.com/health || exit 1
-          curl -sf http://api.accountant-crm.com/ready || exit 1
+          curl -sf https://api.accountant-crm.com/health || exit 1
+          curl -sf https://api.accountant-crm.com/ready || exit 1
 
           # Frontend
-          curl -sf http://app.accountant-crm.com/ || exit 1
+          curl -sf https://app.accountant-crm.com/ || exit 1
 
           echo "All health checks passed!"
 
       - name: Run smoke tests
         run: |
-          # TODO: Change to HTTPS when SSL certificate is configured on ALB (Week 2)
+          # Fix #33: Use HTTPS for production smoke tests
           # Test API endpoints
-          response=$(curl -s -o /dev/null -w "%{http_code}" http://api.accountant-crm.com/api/v1/auth/login -X POST)
+          response=$(curl -s -o /dev/null -w "%{http_code}" https://api.accountant-crm.com/api/v1/auth/login -X POST)
           if [ "$response" != "400" ] && [ "$response" != "401" ] && [ "$response" != "501" ]; then
             echo "Unexpected response from login endpoint: $response"
           fi

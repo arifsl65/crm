@@ -1,4 +1,5 @@
 // Package main provides smoke tests for the server endpoints.
+// Fix #34: Updated CORS tests to use middleware.DynamicCORS instead of removed corsMiddleware.
 package main
 
 import (
@@ -9,7 +10,7 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/stretchr/testify/assert"
 
-	"github.com/accountant-crm/go-backend/internal/config"
+	"github.com/accountant-crm/go-backend/internal/middleware"
 )
 
 func init() {
@@ -43,13 +44,14 @@ func TestNotImplementedHandler(t *testing.T) {
 }
 
 func TestCORSMiddleware_AllowedOrigin(t *testing.T) {
-	cfg := config.CORSConfig{
-		AllowedOrigins:   []string{"http://localhost:3000", "https://app.example.com"},
+	cfg := middleware.CORSConfig{
+		StaticOrigins:    []string{"http://localhost:3000", "https://app.example.com"},
 		AllowCredentials: true,
+		DB:               nil, // No DB for static-only testing
 	}
 
 	router := gin.New()
-	router.Use(corsMiddleware(cfg))
+	router.Use(middleware.DynamicCORS(cfg))
 	router.GET("/test", func(c *gin.Context) {
 		c.String(http.StatusOK, "ok")
 	})
@@ -68,13 +70,14 @@ func TestCORSMiddleware_AllowedOrigin(t *testing.T) {
 }
 
 func TestCORSMiddleware_DisallowedOrigin(t *testing.T) {
-	cfg := config.CORSConfig{
-		AllowedOrigins:   []string{"http://localhost:3000"},
+	cfg := middleware.CORSConfig{
+		StaticOrigins:    []string{"http://localhost:3000"},
 		AllowCredentials: true,
+		DB:               nil,
 	}
 
 	router := gin.New()
-	router.Use(corsMiddleware(cfg))
+	router.Use(middleware.DynamicCORS(cfg))
 	router.GET("/test", func(c *gin.Context) {
 		c.String(http.StatusOK, "ok")
 	})
@@ -91,13 +94,14 @@ func TestCORSMiddleware_DisallowedOrigin(t *testing.T) {
 }
 
 func TestCORSMiddleware_OptionsRequest(t *testing.T) {
-	cfg := config.CORSConfig{
-		AllowedOrigins:   []string{"http://localhost:3000"},
+	cfg := middleware.CORSConfig{
+		StaticOrigins:    []string{"http://localhost:3000"},
 		AllowCredentials: true,
+		DB:               nil,
 	}
 
 	router := gin.New()
-	router.Use(corsMiddleware(cfg))
+	router.Use(middleware.DynamicCORS(cfg))
 	router.GET("/test", func(c *gin.Context) {
 		c.String(http.StatusOK, "ok")
 	})

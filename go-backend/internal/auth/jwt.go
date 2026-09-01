@@ -93,13 +93,17 @@ func (m *JWTManager) generateToken(userID, tenantID uuid.UUID, role string, toke
 	return token.SignedString(m.secretKey)
 }
 
+// clockSkewLeeway allows for slight clock drift between servers (±60 seconds)
+// Fix #38: Prevent spurious 401s due to clock synchronization issues
+const clockSkewLeeway = 60 * time.Second
+
 func (m *JWTManager) ValidateToken(tokenString string) (*Claims, error) {
 	token, err := jwt.ParseWithClaims(tokenString, &Claims{}, func(token *jwt.Token) (interface{}, error) {
 		if _, ok := token.Method.(*jwt.SigningMethodHMAC); !ok {
 			return nil, ErrInvalidToken
 		}
 		return m.secretKey, nil
-	})
+	}, jwt.WithLeeway(clockSkewLeeway)) // Fix #38: Add clock skew tolerance
 
 	if err != nil {
 		if errors.Is(err, jwt.ErrTokenExpired) {

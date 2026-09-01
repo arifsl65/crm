@@ -1437,19 +1437,20 @@ func (h *DocumentHandler) Download(c *gin.Context) {
 	}
 
 	// TODO: Generate OSS presigned URL when configured
-	// For now, return a placeholder URL with metadata
+	// For now, return a proxied download URL that doesn't expose internal paths
 	// In production, this would generate a signed URL with 15-minute expiry
 
 	// Audit the download request
 	h.audit.LogEntity(c.Request.Context(), audit.ActionDocumentDownload, &userID, &tenantID, "document", &documentID, c.ClientIP(), nil)
 
+	// Fix #43: Don't expose internal file_path - use opaque document ID in URL
+	// The actual file streaming will be handled by a separate endpoint or OSS signed URL
 	c.JSON(http.StatusOK, gin.H{
 		"document_id":   documentID,
-		"file_path":     *filePath,
 		"mime_type":     mimeType,
 		"original_name": originalName,
 		"file_size":     fileSize,
-		"download_url":  fmt.Sprintf("/storage/%s", *filePath), // Placeholder - replace with OSS signed URL
+		"download_url":  fmt.Sprintf("/api/v1/documents/%s/stream", documentID), // Proxied URL - no path leakage
 		"expires_in":    900, // 15 minutes in seconds
 		"message":       "OSS signed URL generation pending configuration",
 	})

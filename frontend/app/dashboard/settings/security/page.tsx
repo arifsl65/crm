@@ -128,8 +128,21 @@ export default function SecuritySettingsPage() {
     }
   };
 
+  // Fix #39: State for password confirmation when disabling 2FA
+  const [disablePassword, setDisablePassword] = useState('');
+  const [showDisableConfirm, setShowDisableConfirm] = useState(false);
+
   const handleDisable2FA = async () => {
-    if (!confirm('Are you sure you want to disable two-factor authentication?')) {
+    if (!showDisableConfirm) {
+      // First click - show password confirmation
+      setShowDisableConfirm(true);
+      setDisablePassword('');
+      return;
+    }
+
+    // Fix #39: Require password confirmation before disabling 2FA
+    if (!disablePassword) {
+      setError('Please enter your password to confirm');
       return;
     }
 
@@ -142,7 +155,9 @@ export default function SecuritySettingsPage() {
         method: 'DELETE',
         headers: {
           'Authorization': `Bearer ${token}`,
+          'Content-Type': 'application/json',
         },
+        body: JSON.stringify({ password: disablePassword }),
       });
 
       if (!res.ok) {
@@ -151,6 +166,8 @@ export default function SecuritySettingsPage() {
       }
 
       setTwoFactorEnabled(false);
+      setShowDisableConfirm(false);
+      setDisablePassword('');
       setSuccess('Two-factor authentication disabled.');
     } catch (err) {
       setError(err instanceof Error ? err.message : 'An error occurred');
@@ -259,23 +276,59 @@ export default function SecuritySettingsPage() {
                   : 'Add an extra layer of security to your account by enabling two-factor authentication.'}
               </p>
 
-              <div className="flex items-center space-x-4">
+              <div className="space-y-4">
                 {twoFactorEnabled ? (
-                  <button
-                    onClick={handleDisable2FA}
-                    disabled={loading}
-                    className="px-4 py-2 text-sm font-medium text-red-600 border border-red-600 rounded-md hover:bg-red-50 dark:hover:bg-red-900/20 disabled:opacity-50"
-                  >
-                    Disable 2FA
-                  </button>
+                  <>
+                    {showDisableConfirm ? (
+                      // Fix #39: Password confirmation for disabling 2FA
+                      <div className="flex items-center space-x-4">
+                        <input
+                          type="password"
+                          value={disablePassword}
+                          onChange={(e) => setDisablePassword(e.target.value)}
+                          placeholder="Enter your password"
+                          className="px-3 py-2 border border-gray-300 dark:border-gray-600 rounded-md shadow-sm focus:ring-red-500 focus:border-red-500 sm:text-sm bg-white dark:bg-slate-700 text-gray-900 dark:text-white"
+                        />
+                        <button
+                          onClick={handleDisable2FA}
+                          disabled={loading || !disablePassword}
+                          className="px-4 py-2 text-sm font-medium text-white bg-red-600 rounded-md hover:bg-red-700 disabled:opacity-50"
+                        >
+                          {loading ? 'Disabling...' : 'Confirm Disable'}
+                        </button>
+                        <button
+                          onClick={() => {
+                            setShowDisableConfirm(false);
+                            setDisablePassword('');
+                            setError('');
+                          }}
+                          className="px-4 py-2 text-sm font-medium text-gray-700 dark:text-gray-300 border border-gray-300 dark:border-gray-600 rounded-md hover:bg-gray-50 dark:hover:bg-slate-700"
+                        >
+                          Cancel
+                        </button>
+                      </div>
+                    ) : (
+                      <div className="flex items-center space-x-4">
+                        <button
+                          onClick={handleDisable2FA}
+                          disabled={loading}
+                          className="px-4 py-2 text-sm font-medium text-red-600 border border-red-600 rounded-md hover:bg-red-50 dark:hover:bg-red-900/20 disabled:opacity-50"
+                        >
+                          Disable 2FA
+                        </button>
+                      </div>
+                    )}
+                  </>
                 ) : (
-                  <button
-                    onClick={handleSetup2FA}
-                    disabled={loading}
-                    className="px-4 py-2 text-sm font-medium text-white bg-blue-600 rounded-md hover:bg-blue-700 disabled:opacity-50"
-                  >
-                    Enable 2FA
-                  </button>
+                  <div className="flex items-center space-x-4">
+                    <button
+                      onClick={handleSetup2FA}
+                      disabled={loading}
+                      className="px-4 py-2 text-sm font-medium text-white bg-blue-600 rounded-md hover:bg-blue-700 disabled:opacity-50"
+                    >
+                      Enable 2FA
+                    </button>
+                  </div>
                 )}
 
                 <span className={`inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium ${

@@ -2,7 +2,8 @@
 
 import { useEffect, useState } from 'react';
 import { useRouter, usePathname } from 'next/navigation';
-import { isAuthenticated, getUser, clearAuth, refreshToken, getAccessToken, saveAuth } from '@/lib/auth';
+import { isAuthenticated, getUser, clearAuth, refreshToken, getAccessToken, saveAuth, validateToken } from '@/lib/auth';
+import { AUTH_EXPIRED_EVENT } from '@/lib/api';
 
 interface AuthGuardProps {
   children: React.ReactNode;
@@ -39,20 +40,50 @@ export function AuthGuard({ children }: AuthGuardProps) {
         return;
       }
 
-      // Try to validate token by checking if user exists
-      const user = getUser();
-      if (!user) {
-        clearAuth();
-        router.replace('/login');
+      // Fix #30: Validate token with server to prevent stale/expired tokens
+      const validUser = await validateToken();
+      if (validUser) {
+        // Token is valid
+        setIsAuthed(true);
+        setIsLoading(false);
         return;
       }
 
-      setIsAuthed(true);
-      setIsLoading(false);
+      // Token invalid - try to refresh before giving up
+      const storedRefreshToken = typeof window !== 'undefined'
+        ? localStorage.getItem('refresh_token')
+        : null;
+
+      if (storedRefreshToken) {
+        try {
+          const auth = await refreshToken(storedRefreshToken);
+          saveAuth(auth);
+          setIsAuthed(true);
+          setIsLoading(false);
+          return;
+        } catch {
+          // Refresh failed, fall through to logout
+        }
+      }
+
+      // Both access and refresh tokens are invalid
+      clearAuth();
+      router.replace('/login');
     };
 
     checkAuth();
   }, [pathname, router]);
+
+  // Fix #36: Listen for auth-expired event from API client for SPA-friendly redirect
+  useEffect(() => {
+    const handleAuthExpired = () => {
+      setIsAuthed(false);
+      router.replace('/login');
+    };
+
+    window.addEventListener(AUTH_EXPIRED_EVENT, handleAuthExpired);
+    return () => window.removeEventListener(AUTH_EXPIRED_EVENT, handleAuthExpired);
+  }, [router]);
 
   // Show loading state while checking auth
   if (isLoading && !publicRoutes.some(route => pathname.startsWith(route))) {

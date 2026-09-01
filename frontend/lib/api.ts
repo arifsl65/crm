@@ -164,12 +164,18 @@ async function tryRefreshToken(): Promise<boolean> {
   return refreshPromise;
 }
 
+// Custom event for auth expiry - components can listen and handle navigation
+// Fix #36: Use custom event instead of window.location.href for SPA-friendly redirect
+export const AUTH_EXPIRED_EVENT = 'auth-expired';
+
 function clearAuthAndRedirect(): void {
   if (typeof window !== 'undefined') {
     localStorage.removeItem('access_token');
     localStorage.removeItem('refresh_token');
     localStorage.removeItem('user');
-    window.location.href = '/login';
+
+    // Dispatch custom event for React components to handle
+    window.dispatchEvent(new CustomEvent(AUTH_EXPIRED_EVENT));
   }
 }
 

@@ -18,12 +18,16 @@ import (
 
 // UserHandler handles user-related HTTP requests
 type UserHandler struct {
-	db *database.Pool
+	db             *database.Pool
+	sessionManager *auth.SessionManager
 }
 
 // NewUserHandler creates a new UserHandler instance
-func NewUserHandler(db *database.Pool) *UserHandler {
-	return &UserHandler{db: db}
+func NewUserHandler(db *database.Pool, sessionManager *auth.SessionManager) *UserHandler {
+	return &UserHandler{
+		db:             db,
+		sessionManager: sessionManager,
+	}
 }
 
 // User represents a user record
@@ -732,8 +736,16 @@ func (h *UserHandler) Reset2FA(c *gin.Context) {
 		return
 	}
 
+	// Fix #45: Revoke all user's refresh tokens when 2FA is reset
+	// This is a security measure - if someone lost their authenticator (phone stolen),
+	// their existing sessions should be invalidated
+	if err := h.sessionManager.RevokeAllUserTokens(c.Request.Context(), id); err != nil {
+		log.Error().Err(err).Str("user_id", id.String()).Msg("Failed to revoke tokens after 2FA reset")
+		// Continue anyway - 2FA was reset successfully
+	}
+
 	c.JSON(http.StatusOK, gin.H{
-		"message": "2FA reset successfully. User will need to set up 2FA again.",
+		"message": "2FA reset successfully. User will need to set up 2FA again and re-login on all devices.",
 	})
 }
 
@@ -780,6 +792,17 @@ func (h *UserHandler) Restore(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{
 			"error":   "not_deleted",
 			"message": "User is not deleted",
+		})
+		return
+	}
+
+	// Fix #46: Enforce GDPR 30-day grace period for data restoration
+	// Users deleted more than 30 days ago cannot be restored
+	const gdprGracePeriod = 30 * 24 * time.Hour
+	if time.Since(*deletedAt) > gdprGracePeriod {
+		c.JSON(http.StatusGone, gin.H{
+			"error":   "grace_period_expired",
+			"message": "User cannot be restored. The 30-day GDPR grace period has expired.",
 		})
 		return
 	}

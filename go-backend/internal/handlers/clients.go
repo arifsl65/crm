@@ -917,6 +917,7 @@ func (h *ClientHandler) CreateNote(c *gin.Context) {
 
 // UpdateNote updates an existing note
 // PATCH /api/v1/clients/:id/notes/:noteId
+// Fix #42: Added ownership check - only note author or admins can update
 func (h *ClientHandler) UpdateNote(c *gin.Context) {
 	clientID, err := uuid.Parse(c.Param("id"))
 	if err != nil {
@@ -941,11 +942,41 @@ func (h *ClientHandler) UpdateNote(c *gin.Context) {
 	ctx := c.Request.Context()
 	tenantID, _ := middleware.GetTenantID(c)
 	userID, _ := middleware.GetUserID(c)
+	role, _ := middleware.GetRole(c)
 
 	tenantDB, ok := middleware.GetTenantDB(c)
 	if !ok {
 		log.Error().Msg("TenantDB not found in context")
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "internal_error"})
+		return
+	}
+
+	// Fix #42: Check note ownership - only author or admins can update
+	var noteAuthorID uuid.UUID
+	err = tenantDB.Transaction(c, func(tx pgx.Tx) error {
+		return tx.QueryRow(ctx, `
+			SELECT staff_id FROM client_notes
+			WHERE id = $1 AND client_id = $2 AND tenant_id = $3
+		`, noteID, clientID, tenantID).Scan(&noteAuthorID)
+	})
+
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			c.JSON(http.StatusNotFound, gin.H{"error": "note_not_found"})
+			return
+		}
+		log.Error().Err(err).Msg("Failed to fetch note author")
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "internal_error"})
+		return
+	}
+
+	// Allow update if user is author, tenant_admin, or super_admin
+	isAdmin := role == "tenant_admin" || role == "super_admin"
+	if noteAuthorID != userID && !isAdmin {
+		c.JSON(http.StatusForbidden, gin.H{
+			"error":   "forbidden",
+			"message": "You can only edit your own notes",
+		})
 		return
 	}
 
@@ -980,6 +1011,7 @@ func (h *ClientHandler) UpdateNote(c *gin.Context) {
 
 // DeleteNote deletes a note
 // DELETE /api/v1/clients/:id/notes/:noteId
+// Fix #42: Added ownership check - only note author or admins can delete
 func (h *ClientHandler) DeleteNote(c *gin.Context) {
 	clientID, err := uuid.Parse(c.Param("id"))
 	if err != nil {
@@ -996,11 +1028,41 @@ func (h *ClientHandler) DeleteNote(c *gin.Context) {
 	ctx := c.Request.Context()
 	tenantID, _ := middleware.GetTenantID(c)
 	userID, _ := middleware.GetUserID(c)
+	role, _ := middleware.GetRole(c)
 
 	tenantDB, ok := middleware.GetTenantDB(c)
 	if !ok {
 		log.Error().Msg("TenantDB not found in context")
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "internal_error"})
+		return
+	}
+
+	// Fix #42: Check note ownership - only author or admins can delete
+	var noteAuthorID uuid.UUID
+	err = tenantDB.Transaction(c, func(tx pgx.Tx) error {
+		return tx.QueryRow(ctx, `
+			SELECT staff_id FROM client_notes
+			WHERE id = $1 AND client_id = $2 AND tenant_id = $3
+		`, noteID, clientID, tenantID).Scan(&noteAuthorID)
+	})
+
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			c.JSON(http.StatusNotFound, gin.H{"error": "note_not_found"})
+			return
+		}
+		log.Error().Err(err).Msg("Failed to fetch note author")
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "internal_error"})
+		return
+	}
+
+	// Allow delete if user is author, tenant_admin, or super_admin
+	isAdmin := role == "tenant_admin" || role == "super_admin"
+	if noteAuthorID != userID && !isAdmin {
+		c.JSON(http.StatusForbidden, gin.H{
+			"error":   "forbidden",
+			"message": "You can only delete your own notes",
+		})
 		return
 	}
 
@@ -1146,13 +1208,17 @@ func (h *ClientHandler) AssignStaff(c *gin.Context) {
 	err = tenantDB.Transaction(c, func(tx pgx.Tx) error {
 		// If setting as primary, clear existing primary first
 		if req.IsPrimary {
-			_, _ = tx.Exec(ctx, `
+			// Fix #44: Capture error instead of ignoring it
+			_, err := tx.Exec(ctx, `
 				UPDATE staff_clients SET is_primary = false
 				WHERE client_id = $1 AND tenant_id = $2
 			`, clientID, tenantID)
+			if err != nil {
+				return err
+			}
 		}
 
-		_, err = tx.Exec(ctx, `
+		_, err := tx.Exec(ctx, `
 			INSERT INTO staff_clients (tenant_id, staff_id, client_id, is_primary)
 			VALUES ($1, $2, $3, $4)
 			ON CONFLICT (staff_id, client_id) DO UPDATE SET is_primary = $4
@@ -1224,10 +1290,14 @@ func (h *ClientHandler) BulkReassign(c *gin.Context) {
 			for _, clientID := range batch {
 				// Clear existing primary if setting new as primary
 				if req.SetPrimary {
-					_, _ = tx.Exec(ctx, `
+					// Fix #44: Capture error instead of ignoring it
+					_, err := tx.Exec(ctx, `
 						UPDATE staff_clients SET is_primary = false
 						WHERE client_id = $1 AND tenant_id = $2
 					`, clientID, tenantID)
+					if err != nil {
+						return err
+					}
 				}
 
 				// Assign new staff

@@ -137,9 +137,31 @@ func (p *Pool) Transaction(ctx context.Context, fn func(tx pgx.Tx) error) error 
 	return nil
 }
 
+// validRoles is the set of allowed role values for RLS context.
+// Fix #29: Strict validation to prevent SQL injection via role parameter.
+var validRoles = map[string]bool{
+	"super_admin":  true,
+	"tenant_admin": true,
+	"staff":        true,
+	"client":       true,
+}
+
 // TenantTransaction executes a function within a transaction with RLS context set.
 // This sets app.tenant_id and app.role as PostgreSQL session variables for RLS policies.
 func (p *Pool) TenantTransaction(ctx context.Context, tenantID, role string, fn func(tx pgx.Tx) error) error {
+	// Fix #29: Validate tenantID is a valid UUID to prevent SQL injection.
+	// SET LOCAL does not support parameterized queries, so we must validate inputs.
+	if tenantID != "" {
+		if _, err := uuid.Parse(tenantID); err != nil {
+			return fmt.Errorf("invalid tenant_id format: must be a valid UUID")
+		}
+	}
+
+	// Fix #29: Validate role is one of the allowed values.
+	if role != "" && !validRoles[role] {
+		return fmt.Errorf("invalid role: must be one of super_admin, tenant_admin, staff, client")
+	}
+
 	tx, err := p.Begin(ctx)
 	if err != nil {
 		return fmt.Errorf("failed to begin transaction: %w", err)
@@ -152,11 +174,11 @@ func (p *Pool) TenantTransaction(ctx context.Context, tenantID, role string, fn 
 		}
 	}()
 
-	// Set RLS context variables using SET LOCAL (scoped to this transaction).
-	// SET does not accept parameter placeholders, so we use fmt.Sprintf with
-	// controlled values (UUID for tenant_id, known role enum for role).
+	// Set RLS context variables using set_config() which supports parameterized queries.
+	// Fix #29: Use set_config() instead of SET LOCAL to enable proper parameterization.
+	// The third parameter (true) makes it LOCAL to the transaction, equivalent to SET LOCAL.
 	if tenantID != "" {
-		_, err = tx.Exec(ctx, fmt.Sprintf("SET LOCAL app.tenant_id = '%s'", tenantID))
+		_, err = tx.Exec(ctx, "SELECT set_config('app.tenant_id', $1, true)", tenantID)
 		if err != nil {
 			_ = tx.Rollback(ctx)
 			return fmt.Errorf("failed to set tenant_id: %w", err)
@@ -164,7 +186,7 @@ func (p *Pool) TenantTransaction(ctx context.Context, tenantID, role string, fn 
 	}
 
 	if role != "" {
-		_, err = tx.Exec(ctx, fmt.Sprintf("SET LOCAL app.role = '%s'", role))
+		_, err = tx.Exec(ctx, "SELECT set_config('app.role', $1, true)", role)
 		if err != nil {
 			_ = tx.Rollback(ctx)
 			return fmt.Errorf("failed to set role: %w", err)
@@ -194,16 +216,24 @@ func (p *Pool) SuperAdminTransaction(ctx context.Context, fn func(tx pgx.Tx) err
 
 // SetRLSContext sets tenant_id and role on a connection for RLS.
 // Use this for queries outside of TenantTransaction.
-// Note: Uses SET LOCAL which only works within a transaction.
+// Note: Uses set_config with local=true which only works within a transaction.
+// Fix #29: Uses set_config() with parameterized queries instead of SET LOCAL.
 func (p *Pool) SetRLSContext(ctx context.Context, conn *pgxpool.Conn, tenantID, role string) error {
+	// Validate inputs before setting
 	if tenantID != "" {
-		_, err := conn.Exec(ctx, fmt.Sprintf("SET LOCAL app.tenant_id = '%s'", tenantID))
+		if _, err := uuid.Parse(tenantID); err != nil {
+			return fmt.Errorf("invalid tenant_id format: must be a valid UUID")
+		}
+		_, err := conn.Exec(ctx, "SELECT set_config('app.tenant_id', $1, true)", tenantID)
 		if err != nil {
 			return fmt.Errorf("failed to set tenant_id: %w", err)
 		}
 	}
 	if role != "" {
-		_, err := conn.Exec(ctx, fmt.Sprintf("SET LOCAL app.role = '%s'", role))
+		if !validRoles[role] {
+			return fmt.Errorf("invalid role: must be one of super_admin, tenant_admin, staff, client")
+		}
+		_, err := conn.Exec(ctx, "SELECT set_config('app.role', $1, true)", role)
 		if err != nil {
 			return fmt.Errorf("failed to set role: %w", err)
 		}

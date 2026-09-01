@@ -38,13 +38,24 @@ export default function ServicesPage() {
   }, [fetchServices]);
 
   const handleStatusChange = async (serviceId: string, newStatus: string) => {
+    // Fix #41: Store previous state for rollback on error
+    const previousServices = [...services];
+    const service = services.find(s => s.id === serviceId);
+    const previousStatus = service?.status;
+
+    // Optimistic update
+    setServices((prev) =>
+      prev.map((s) => (s.id === serviceId ? { ...s, status: newStatus } : s))
+    );
+
     try {
       await updateServiceStatus(serviceId, newStatus);
-      setServices((prev) =>
-        prev.map((s) => (s.id === serviceId ? { ...s, status: newStatus } : s))
-      );
+      // Success - state is already updated
     } catch (err) {
+      // Rollback to previous state on error
+      setServices(previousServices);
       setError(err instanceof Error ? err.message : 'Failed to update status');
+      console.error(`Failed to update service ${serviceId} from ${previousStatus} to ${newStatus}:`, err);
     }
   };
 
