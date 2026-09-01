@@ -1,6 +1,7 @@
 'use client';
 
 import { useEffect, useState } from 'react';
+import { usePathname } from 'next/navigation';
 import Link from 'next/link';
 import { useAuth } from '@/components/auth-guard';
 import { Client, Service, Document, getClient, getClientDocuments, getClientServices } from '@/lib/api';
@@ -11,8 +12,11 @@ interface ClientDetailProps {
   clientId: string;
 }
 
-export default function ClientDetail({ clientId }: ClientDetailProps) {
+export default function ClientDetail({ clientId: propClientId }: ClientDetailProps) {
   const { user } = useAuth();
+  const pathname = usePathname();
+  // Extract ID from URL path for static export (props always have 'placeholder')
+  const clientId = pathname?.split('/').pop() || propClientId;
 
   const [client, setClient] = useState<Client | null>(null);
   const [services, setServices] = useState<Service[]>([]);

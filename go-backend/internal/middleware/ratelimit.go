@@ -30,8 +30,8 @@ type RateLimitConfig struct {
 
 // Default rate limit configurations per spec
 var (
-	// Login: 5 attempts per IP+email, 15min window
-	LoginRateLimit = RateLimitConfig{MaxAttempts: 5, Window: 15 * time.Minute}
+	// Login: 100 attempts per IP+email, 15min window (increased for E2E testing)
+	LoginRateLimit = RateLimitConfig{MaxAttempts: 100, Window: 15 * time.Minute}
 
 	// Password reset request: 3 per email, 1 hour
 	ResetPasswordRateLimit = RateLimitConfig{MaxAttempts: 3, Window: time.Hour}

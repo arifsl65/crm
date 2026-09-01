@@ -7,3 +7,5 @@ export { OfflineBanner, useOnlineStatus } from './offline-banner';
 export { GlobalSearch } from './global-search';
 export { AuthGuard } from './auth-guard';
 export { ThemeProvider, useTheme } from './theme-provider';
+export { QRModal } from './qr-modal';
+export { NotificationBell } from './notification-bell';

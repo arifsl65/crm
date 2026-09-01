@@ -159,7 +159,11 @@ export async function validateToken(): Promise<User | null> {
     }
 
     const data = await res.json();
-    return data.user || null;
+    // Backend returns user data at root level, not wrapped in { user: ... }
+    if (data && data.id && data.email) {
+      return data as User;
+    }
+    return null;
   } catch {
     return null;
   }

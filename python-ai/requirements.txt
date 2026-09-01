@@ -34,6 +34,11 @@ groq==0.9.0                # Groq AI SDK (primary AI provider)
 # langchain==0.1.11
 # transformers==4.38.2
 
+# Document Processing
+pypdf==4.1.0               # PDF text extraction
+Pillow==10.2.0             # Image processing
+pdf2image==1.17.0          # PDF to image conversion (requires poppler)
+
 # Utilities
 python-multipart==0.0.9   # File uploads
 python-dotenv==1.0.1      # Environment variables

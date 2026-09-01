@@ -5,7 +5,7 @@ import Link from 'next/link';
 import { useAuth } from '@/components/auth-guard';
 import { Document, getDocuments, approveDocument, rejectDocument } from '@/lib/api';
 import { getStatusBadgeClass, formatStatus } from '@/lib/status';
-import { SkeletonTable, useToast } from '@/components';
+import { SkeletonTable, useToast, QRModal } from '@/components';
 
 export default function DocumentsPage() {
   const { user } = useAuth();
@@ -15,6 +15,7 @@ export default function DocumentsPage() {
   const [error, setError] = useState<string | null>(null);
   const [search, setSearch] = useState('');
   const [statusFilter, setStatusFilter] = useState('');
+  const [showQRModal, setShowQRModal] = useState(false);
 
   const fetchDocuments = useCallback(async () => {
     try {
@@ -90,6 +91,15 @@ export default function DocumentsPage() {
             </Link>
             <h1 className="text-2xl font-bold text-gray-900 dark:text-white">Documents</h1>
           </div>
+          <button
+            onClick={() => setShowQRModal(true)}
+            className="inline-flex items-center px-4 py-2 bg-blue-600 text-white text-sm font-medium rounded-md hover:bg-blue-700 transition-colors"
+          >
+            <svg className="w-5 h-5 mr-2" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 4v1m6 11h2m-6 0h-2v4m0-11v3m0 0h.01M12 12h4.01M16 20h4M4 12h4m12 0h.01M5 8h2a1 1 0 001-1V5a1 1 0 00-1-1H5a1 1 0 00-1 1v2a1 1 0 001 1zm12 0h2a1 1 0 001-1V5a1 1 0 00-1-1h-2a1 1 0 00-1 1v2a1 1 0 001 1zM5 20h2a1 1 0 001-1v-2a1 1 0 00-1-1H5a1 1 0 00-1 1v2a1 1 0 001 1z" />
+            </svg>
+            Generate QR
+          </button>
         </div>
       </header>
 
@@ -218,6 +228,9 @@ export default function DocumentsPage() {
           )}
         </div>
       </main>
+
+      {/* QR Code Generation Modal */}
+      <QRModal isOpen={showQRModal} onClose={() => setShowQRModal(false)} />
     </div>
   );
 }

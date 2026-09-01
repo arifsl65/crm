@@ -4,7 +4,7 @@ import { useEffect, useState } from 'react';
 import Link from 'next/link';
 import { useAuth } from '@/components/auth-guard';
 import { DashboardStats, getDashboardStats } from '@/lib/api';
-import { SkeletonCard } from '@/components';
+import { SkeletonCard, NotificationBell } from '@/components';
 
 export default function DashboardPage() {
   const { user, logout } = useAuth();
@@ -54,6 +54,7 @@ export default function DashboardPage() {
             Accountant CRM
           </h1>
           <div className="flex items-center space-x-4">
+            <NotificationBell />
             <span className="text-sm text-gray-600 dark:text-gray-300">
               {user.email}
             </span>

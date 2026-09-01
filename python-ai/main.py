@@ -4,6 +4,7 @@ Accountant CRM - Python AI Service
 FastAPI application providing AI-powered document processing endpoints.
 """
 
+import io
 import sys
 from contextlib import asynccontextmanager
 import json
@@ -12,7 +13,7 @@ from typing import Any, Dict, List, Optional
 import structlog
 import re
 
-from fastapi import FastAPI, HTTPException, Request, Response, status, Depends
+from fastapi import FastAPI, HTTPException, Request, Response, status, Depends, UploadFile, File
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from starlette.middleware.base import BaseHTTPMiddleware
@@ -20,6 +21,20 @@ from starlette.middleware.base import BaseHTTPMiddleware
 from internal.config import get_settings
 from internal.dependencies import AppState, get_app_state
 from internal.ai_client import get_groq_client, GroqClient
+
+# PDF and image processing imports
+try:
+    from pypdf import PdfReader
+    PDF_SUPPORT = True
+except ImportError:
+    PDF_SUPPORT = False
+
+try:
+    from PIL import Image
+    from pdf2image import convert_from_bytes
+    IMAGE_SUPPORT = True
+except ImportError:
+    IMAGE_SUPPORT = False
 
 # Configure structured logging with contextvars support for request ID propagation
 structlog.configure(
@@ -308,36 +323,225 @@ async def ready(state: AppState = Depends(get_app_state)) -> Dict[str, Any]:
 
 @app.post("/api/v1/ai/documents/extract", tags=["Documents"])
 async def extract_text(
-    file_key: str,
     response: Response,
     state: AppState = Depends(get_app_state),
+    file_key: Optional[str] = None,
+    file: Optional[UploadFile] = File(None),
 ) -> Dict[str, Any]:
     """
     Extract text from a document using OCR.
 
+    Supports two modes:
+    1. file_key: OSS key of document (requires OSS configured)
+    2. file: Direct file upload (multipart/form-data)
+
     Args:
-        file_key: OSS key of the document to process.
+        file_key: OSS key of the document to process (optional).
+        file: Uploaded file (optional).
 
     Returns:
         Extracted text and metadata.
     """
-    # FIXED: Validate file_key to prevent path traversal
-    if not validate_oss_key(file_key):
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Invalid file_key format",
-        )
+    settings = get_settings()
 
+    # Check feature flag
     if not await check_feature_flag(state, "ocr"):
         response.status_code = status.HTTP_503_SERVICE_UNAVAILABLE
         response.headers["Retry-After"] = "300"
         return {"error": "service_unavailable", "message": "OCR feature is currently disabled"}
 
-    # TODO: Implement OCR extraction
+    # Validate input - need either file_key or file upload
+    if not file_key and not file:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Either file_key or file upload is required",
+        )
+
+    file_data: bytes = b""
+    filename: str = ""
+    mime_type: str = ""
+
+    # Mode 1: File upload (preferred - no OSS dependency)
+    if file:
+        try:
+            file_data = await file.read()
+            filename = file.filename or "unknown"
+            mime_type = file.content_type or "application/octet-stream"
+            logger.info("Processing uploaded file", filename=filename, size=len(file_data))
+        except Exception as e:
+            logger.error("Failed to read uploaded file", error=str(e))
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"Failed to read uploaded file: {str(e)}",
+            )
+
+    # Mode 2: OSS file key
+    elif file_key:
+        # Validate file_key to prevent path traversal
+        if not validate_oss_key(file_key):
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Invalid file_key format",
+            )
+
+        # Check if OSS is configured
+        if not settings.oss_configured:
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail="OSS storage not configured. Use direct file upload instead.",
+            )
+
+        # Download from OSS
+        try:
+            import oss2
+            # Use AuthV2 signature (V1 is disabled on this bucket)
+            auth = oss2.AuthV2(settings.alibaba_access_key_id, settings.alibaba_access_key_secret)
+            bucket = oss2.Bucket(auth, settings.oss_endpoint, settings.oss_bucket_uploads)
+            result = bucket.get_object(file_key)
+            file_data = result.read()
+            filename = file_key.split("/")[-1]
+            # Detect mime type from extension
+            if filename.lower().endswith(".pdf"):
+                mime_type = "application/pdf"
+            elif filename.lower().endswith((".png",)):
+                mime_type = "image/png"
+            elif filename.lower().endswith((".jpg", ".jpeg")):
+                mime_type = "image/jpeg"
+            else:
+                mime_type = "application/octet-stream"
+            logger.info("Downloaded file from OSS", file_key=file_key, size=len(file_data))
+        except Exception as e:
+            logger.error("Failed to download from OSS", file_key=file_key, error=str(e))
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail=f"Failed to download file from storage: {str(e)}",
+            )
+
+    # Extract text based on file type
+    extracted_text = ""
+    extraction_method = ""
+    metadata: Dict[str, Any] = {}
+
+    try:
+        # PDF Processing
+        if mime_type == "application/pdf" or filename.lower().endswith(".pdf"):
+            if not PDF_SUPPORT:
+                raise HTTPException(
+                    status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                    detail="PDF processing not available. Install pypdf.",
+                )
+
+            # Try to extract embedded text first (fast, no API cost)
+            try:
+                pdf_reader = PdfReader(io.BytesIO(file_data))
+                text_parts = []
+                for page in pdf_reader.pages:
+                    page_text = page.extract_text() or ""
+                    text_parts.append(page_text)
+                extracted_text = "\n\n".join(text_parts)
+                metadata["page_count"] = len(pdf_reader.pages)
+
+                # Check if we got meaningful text
+                if len(extracted_text.strip()) > 50:
+                    extraction_method = "pdf_text"
+                    logger.info(
+                        "Extracted text from PDF",
+                        pages=len(pdf_reader.pages),
+                        text_length=len(extracted_text),
+                    )
+                else:
+                    # Scanned PDF - need OCR via vision model
+                    extracted_text = ""  # Reset for vision extraction
+            except Exception as e:
+                logger.warning("PDF text extraction failed, trying OCR", error=str(e))
+
+            # If no text extracted, use vision model (scanned PDF)
+            if not extracted_text and IMAGE_SUPPORT:
+                extraction_method = "vision_ocr"
+                try:
+                    # Convert PDF to images
+                    images = convert_from_bytes(file_data, dpi=150, first_page=1, last_page=5)
+                    all_text = []
+
+                    groq_client = get_groq_client()
+                    for i, img in enumerate(images):
+                        # Convert PIL Image to bytes
+                        img_buffer = io.BytesIO()
+                        img.save(img_buffer, format="PNG")
+                        img_bytes = img_buffer.getvalue()
+
+                        # Extract text from image using vision model
+                        result = await groq_client.extract_text_from_image(
+                            img_bytes, "image/png", f"{filename}_page_{i+1}"
+                        )
+                        if result.get("text"):
+                            all_text.append(f"--- Page {i+1} ---\n{result['text']}")
+
+                    extracted_text = "\n\n".join(all_text)
+                    metadata["page_count"] = len(images)
+                    metadata["ocr_pages_processed"] = len(images)
+                    logger.info(
+                        "Extracted text from scanned PDF via OCR",
+                        pages=len(images),
+                        text_length=len(extracted_text),
+                    )
+                except Exception as e:
+                    logger.error("PDF OCR failed", error=str(e))
+                    raise HTTPException(
+                        status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                        detail=f"PDF OCR processing failed: {str(e)}",
+                    )
+
+        # Image Processing (PNG, JPEG, etc.)
+        elif mime_type.startswith("image/") or filename.lower().endswith((".png", ".jpg", ".jpeg", ".gif", ".webp")):
+            extraction_method = "vision_ocr"
+            groq_client = get_groq_client()
+
+            if not groq_client.is_configured():
+                raise HTTPException(
+                    status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                    detail="AI service not configured (GROQ_API_KEY missing)",
+                )
+
+            result = await groq_client.extract_text_from_image(file_data, mime_type, filename)
+            extracted_text = result.get("text", "")
+            metadata.update({
+                "language": result.get("language"),
+                "document_type_hint": result.get("document_type_hint"),
+                "has_tables": result.get("has_tables", False),
+                "has_handwriting": result.get("has_handwriting", False),
+                "confidence": result.get("confidence", 0.0),
+                "page_count": 1,
+            })
+            logger.info(
+                "Extracted text from image via OCR",
+                text_length=len(extracted_text),
+                confidence=metadata.get("confidence"),
+            )
+
+        else:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"Unsupported file type: {mime_type}. Supported: PDF, PNG, JPEG",
+            )
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error("Text extraction failed", error=str(e), filename=filename)
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Text extraction failed: {str(e)}",
+        )
+
     return {
-        "status": "not_implemented",
-        "message": "OCR extraction will be implemented in Week 3",
-        "file_key": file_key,
+        "status": "success",
+        "text": extracted_text,
+        "text_length": len(extracted_text),
+        "extraction_method": extraction_method,
+        "filename": filename,
+        "mime_type": mime_type,
+        "metadata": metadata,
     }
 
 
