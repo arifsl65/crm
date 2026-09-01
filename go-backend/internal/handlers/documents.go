@@ -1390,6 +1390,71 @@ func (h *DocumentHandler) Upload(c *gin.Context) {
 	})
 }
 
+// Download generates a signed URL for document download
+// GET /api/v1/documents/:id/download
+func (h *DocumentHandler) Download(c *gin.Context) {
+	documentID, err := uuid.Parse(c.Param("id"))
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid_document_id"})
+		return
+	}
+
+	tenantID, _ := middleware.GetTenantID(c)
+	userID, _ := middleware.GetUserID(c)
+
+	tenantDB, ok := middleware.GetTenantDB(c)
+	if !ok {
+		log.Error().Msg("TenantDB not found in context")
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "internal_error"})
+		return
+	}
+
+	// Get document metadata
+	var filePath, mimeType, originalName *string
+	var fileSize *int
+	err = tenantDB.QueryRowScan(c, []interface{}{&filePath, &mimeType, &originalName, &fileSize}, `
+		SELECT file_path, mime_type, original_name, file_size
+		FROM documents
+		WHERE id = $1 AND tenant_id = $2
+	`, documentID, tenantID)
+
+	if err != nil {
+		if err == pgx.ErrNoRows {
+			c.JSON(http.StatusNotFound, gin.H{"error": "document_not_found"})
+			return
+		}
+		log.Error().Err(err).Msg("Failed to get document for download")
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "internal_error"})
+		return
+	}
+
+	if filePath == nil || *filePath == "" {
+		c.JSON(http.StatusNotFound, gin.H{
+			"error":   "no_file",
+			"message": "Document has no uploaded file",
+		})
+		return
+	}
+
+	// TODO: Generate OSS presigned URL when configured
+	// For now, return a placeholder URL with metadata
+	// In production, this would generate a signed URL with 15-minute expiry
+
+	// Audit the download request
+	h.audit.LogEntity(c.Request.Context(), audit.ActionDocumentDownload, &userID, &tenantID, "document", &documentID, c.ClientIP(), nil)
+
+	c.JSON(http.StatusOK, gin.H{
+		"document_id":   documentID,
+		"file_path":     *filePath,
+		"mime_type":     mimeType,
+		"original_name": originalName,
+		"file_size":     fileSize,
+		"download_url":  fmt.Sprintf("/storage/%s", *filePath), // Placeholder - replace with OSS signed URL
+		"expires_in":    900, // 15 minutes in seconds
+		"message":       "OSS signed URL generation pending configuration",
+	})
+}
+
 // UploadViaQR handles file upload via QR token (PUBLIC - no auth required)
 // POST /api/v1/documents/qr/:token/upload
 func (h *DocumentHandler) UploadViaQR(c *gin.Context) {

@@ -213,6 +213,101 @@ func (h *ClientHandler) List(c *gin.Context) {
 	})
 }
 
+// ListSuppressed returns clients with suppressed email status (bounced, unsubscribed, complained)
+// GET /api/v1/clients/suppressed
+func (h *ClientHandler) ListSuppressed(c *gin.Context) {
+	tenantID, _ := middleware.GetTenantID(c)
+
+	tenantDB, ok := middleware.GetTenantDB(c)
+	if !ok {
+		log.Error().Msg("TenantDB not found in context")
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "internal_error"})
+		return
+	}
+
+	// Pagination
+	limit, _ := strconv.Atoi(c.DefaultQuery("limit", "50"))
+	offset, _ := strconv.Atoi(c.DefaultQuery("offset", "0"))
+	if limit > 100 {
+		limit = 100
+	}
+
+	// Filter by specific status if provided
+	statusFilter := c.Query("status") // bounced, unsubscribed, complained
+
+	var queryBuilder strings.Builder
+	var args []interface{}
+	argNum := 1
+
+	queryBuilder.WriteString(`
+		SELECT id, tenant_id, company_name, contact_name, email, phone,
+		       status, email_status, email_status_at, created_at, updated_at
+		FROM clients
+		WHERE tenant_id = $1 AND deleted_at IS NULL
+		  AND email_status IN ('bounced', 'unsubscribed', 'complained')
+	`)
+	args = append(args, tenantID)
+	argNum++
+
+	if statusFilter != "" {
+		queryBuilder.WriteString(` AND email_status = $`)
+		queryBuilder.WriteString(strconv.Itoa(argNum))
+		args = append(args, statusFilter)
+		argNum++
+	}
+
+	queryBuilder.WriteString(` ORDER BY email_status_at DESC NULLS LAST, company_name ASC LIMIT $`)
+	queryBuilder.WriteString(strconv.Itoa(argNum))
+	args = append(args, limit)
+	argNum++
+
+	queryBuilder.WriteString(` OFFSET $`)
+	queryBuilder.WriteString(strconv.Itoa(argNum))
+	args = append(args, offset)
+
+	type SuppressedClient struct {
+		ID            uuid.UUID  `json:"id"`
+		TenantID      uuid.UUID  `json:"tenant_id"`
+		CompanyName   string     `json:"company_name"`
+		ContactName   string     `json:"contact_name"`
+		Email         string     `json:"email"`
+		Phone         *string    `json:"phone,omitempty"`
+		Status        string     `json:"status"`
+		EmailStatus   string     `json:"email_status"`
+		EmailStatusAt *time.Time `json:"email_status_at,omitempty"`
+		CreatedAt     time.Time  `json:"created_at"`
+		UpdatedAt     time.Time  `json:"updated_at"`
+	}
+
+	var clients []SuppressedClient
+	err := tenantDB.Query(c, queryBuilder.String(), args, func(rows pgx.Rows) error {
+		var client SuppressedClient
+		if err := rows.Scan(&client.ID, &client.TenantID, &client.CompanyName, &client.ContactName,
+			&client.Email, &client.Phone, &client.Status, &client.EmailStatus,
+			&client.EmailStatusAt, &client.CreatedAt, &client.UpdatedAt); err != nil {
+			return err
+		}
+		clients = append(clients, client)
+		return nil
+	})
+
+	if err != nil {
+		log.Error().Err(err).Msg("Failed to list suppressed clients")
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "internal_error"})
+		return
+	}
+
+	if clients == nil {
+		clients = []SuppressedClient{}
+	}
+
+	c.JSON(http.StatusOK, gin.H{
+		"clients": clients,
+		"limit":   limit,
+		"offset":  offset,
+	})
+}
+
 // Get returns a single client by ID
 // GET /api/v1/clients/:id
 func (h *ClientHandler) Get(c *gin.Context) {
@@ -707,6 +802,317 @@ func (h *ClientHandler) GetServices(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{"services": services})
 }
 
+// ClientNote represents a note on a client
+type ClientNote struct {
+	ID        uuid.UUID `json:"id"`
+	TenantID  uuid.UUID `json:"tenant_id"`
+	ClientID  uuid.UUID `json:"client_id"`
+	StaffID   uuid.UUID `json:"staff_id"`
+	Note      string    `json:"note"`
+	CreatedAt time.Time `json:"created_at"`
+	UpdatedAt time.Time `json:"updated_at"`
+	// Joined fields
+	StaffName *string `json:"staff_name,omitempty"`
+}
+
+// ListNotes returns all notes for a client
+// GET /api/v1/clients/:id/notes
+func (h *ClientHandler) ListNotes(c *gin.Context) {
+	clientID, err := uuid.Parse(c.Param("id"))
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid_client_id"})
+		return
+	}
+
+	tenantID, _ := middleware.GetTenantID(c)
+
+	tenantDB, ok := middleware.GetTenantDB(c)
+	if !ok {
+		log.Error().Msg("TenantDB not found in context")
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "internal_error"})
+		return
+	}
+
+	var notes []ClientNote
+	err = tenantDB.Query(c, `
+		SELECT cn.id, cn.tenant_id, cn.client_id, cn.staff_id, cn.note,
+		       cn.created_at, cn.updated_at, u.name as staff_name
+		FROM client_notes cn
+		LEFT JOIN users u ON cn.staff_id = u.id
+		WHERE cn.client_id = $1 AND cn.tenant_id = $2
+		ORDER BY cn.created_at DESC
+	`, []interface{}{clientID, tenantID}, func(rows pgx.Rows) error {
+		var note ClientNote
+		if err := rows.Scan(&note.ID, &note.TenantID, &note.ClientID, &note.StaffID,
+			&note.Note, &note.CreatedAt, &note.UpdatedAt, &note.StaffName); err != nil {
+			return err
+		}
+		notes = append(notes, note)
+		return nil
+	})
+
+	if err != nil {
+		log.Error().Err(err).Msg("Failed to list client notes")
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "internal_error"})
+		return
+	}
+
+	if notes == nil {
+		notes = []ClientNote{}
+	}
+
+	c.JSON(http.StatusOK, gin.H{"notes": notes})
+}
+
+// CreateNote creates a new note for a client
+// POST /api/v1/clients/:id/notes
+func (h *ClientHandler) CreateNote(c *gin.Context) {
+	clientID, err := uuid.Parse(c.Param("id"))
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid_client_id"})
+		return
+	}
+
+	var req struct {
+		Note string `json:"note" binding:"required"`
+	}
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "validation_error", "message": err.Error()})
+		return
+	}
+
+	ctx := c.Request.Context()
+	tenantID, _ := middleware.GetTenantID(c)
+	userID, _ := middleware.GetUserID(c)
+
+	tenantDB, ok := middleware.GetTenantDB(c)
+	if !ok {
+		log.Error().Msg("TenantDB not found in context")
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "internal_error"})
+		return
+	}
+
+	noteID := uuid.New()
+	err = tenantDB.Transaction(c, func(tx pgx.Tx) error {
+		_, err := tx.Exec(ctx, `
+			INSERT INTO client_notes (id, tenant_id, client_id, staff_id, note)
+			VALUES ($1, $2, $3, $4, $5)
+		`, noteID, tenantID, clientID, userID, req.Note)
+		return err
+	})
+
+	if err != nil {
+		log.Error().Err(err).Msg("Failed to create client note")
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "internal_error"})
+		return
+	}
+
+	h.audit.LogEntity(ctx, audit.ActionClientUpdate, &userID, &tenantID, "client_note", &noteID, c.ClientIP(), nil)
+
+	c.JSON(http.StatusCreated, gin.H{
+		"id":      noteID,
+		"message": "Note created successfully",
+	})
+}
+
+// UpdateNote updates an existing note
+// PATCH /api/v1/clients/:id/notes/:noteId
+func (h *ClientHandler) UpdateNote(c *gin.Context) {
+	clientID, err := uuid.Parse(c.Param("id"))
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid_client_id"})
+		return
+	}
+
+	noteID, err := uuid.Parse(c.Param("noteId"))
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid_note_id"})
+		return
+	}
+
+	var req struct {
+		Note string `json:"note" binding:"required"`
+	}
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "validation_error", "message": err.Error()})
+		return
+	}
+
+	ctx := c.Request.Context()
+	tenantID, _ := middleware.GetTenantID(c)
+	userID, _ := middleware.GetUserID(c)
+
+	tenantDB, ok := middleware.GetTenantDB(c)
+	if !ok {
+		log.Error().Msg("TenantDB not found in context")
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "internal_error"})
+		return
+	}
+
+	var rowsAffected int64
+	err = tenantDB.Transaction(c, func(tx pgx.Tx) error {
+		result, err := tx.Exec(ctx, `
+			UPDATE client_notes SET note = $1, updated_at = NOW()
+			WHERE id = $2 AND client_id = $3 AND tenant_id = $4
+		`, req.Note, noteID, clientID, tenantID)
+		if err != nil {
+			return err
+		}
+		rowsAffected = result.RowsAffected()
+		return nil
+	})
+
+	if err != nil {
+		log.Error().Err(err).Msg("Failed to update client note")
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "internal_error"})
+		return
+	}
+
+	if rowsAffected == 0 {
+		c.JSON(http.StatusNotFound, gin.H{"error": "note_not_found"})
+		return
+	}
+
+	h.audit.LogEntity(ctx, audit.ActionClientUpdate, &userID, &tenantID, "client_note", &noteID, c.ClientIP(), nil)
+
+	c.JSON(http.StatusOK, gin.H{"message": "Note updated successfully"})
+}
+
+// DeleteNote deletes a note
+// DELETE /api/v1/clients/:id/notes/:noteId
+func (h *ClientHandler) DeleteNote(c *gin.Context) {
+	clientID, err := uuid.Parse(c.Param("id"))
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid_client_id"})
+		return
+	}
+
+	noteID, err := uuid.Parse(c.Param("noteId"))
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid_note_id"})
+		return
+	}
+
+	ctx := c.Request.Context()
+	tenantID, _ := middleware.GetTenantID(c)
+	userID, _ := middleware.GetUserID(c)
+
+	tenantDB, ok := middleware.GetTenantDB(c)
+	if !ok {
+		log.Error().Msg("TenantDB not found in context")
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "internal_error"})
+		return
+	}
+
+	var rowsAffected int64
+	err = tenantDB.Transaction(c, func(tx pgx.Tx) error {
+		result, err := tx.Exec(ctx, `
+			DELETE FROM client_notes WHERE id = $1 AND client_id = $2 AND tenant_id = $3
+		`, noteID, clientID, tenantID)
+		if err != nil {
+			return err
+		}
+		rowsAffected = result.RowsAffected()
+		return nil
+	})
+
+	if err != nil {
+		log.Error().Err(err).Msg("Failed to delete client note")
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "internal_error"})
+		return
+	}
+
+	if rowsAffected == 0 {
+		c.JSON(http.StatusNotFound, gin.H{"error": "note_not_found"})
+		return
+	}
+
+	h.audit.LogEntity(ctx, audit.ActionClientUpdate, &userID, &tenantID, "client_note", &noteID, c.ClientIP(), nil)
+
+	c.JSON(http.StatusOK, gin.H{"message": "Note deleted successfully"})
+}
+
+// ClientEmail represents an email associated with a client
+type ClientEmail struct {
+	ID        uuid.UUID  `json:"id"`
+	TenantID  uuid.UUID  `json:"tenant_id"`
+	ClientID  *uuid.UUID `json:"client_id,omitempty"`
+	StaffID   *uuid.UUID `json:"staff_id,omitempty"`
+	Direction string     `json:"direction"`
+	ToEmail   string     `json:"to_email"`
+	FromEmail string     `json:"from_email"`
+	Subject   string     `json:"subject"`
+	Status    string     `json:"status"`
+	IsRead    bool       `json:"is_read"`
+	SentAt    *time.Time `json:"sent_at,omitempty"`
+	CreatedAt time.Time  `json:"created_at"`
+	// Joined fields
+	StaffName *string `json:"staff_name,omitempty"`
+}
+
+// GetEmails returns email history for a client
+// GET /api/v1/clients/:id/emails
+func (h *ClientHandler) GetEmails(c *gin.Context) {
+	clientID, err := uuid.Parse(c.Param("id"))
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid_client_id"})
+		return
+	}
+
+	tenantID, _ := middleware.GetTenantID(c)
+
+	tenantDB, ok := middleware.GetTenantDB(c)
+	if !ok {
+		log.Error().Msg("TenantDB not found in context")
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "internal_error"})
+		return
+	}
+
+	// Pagination
+	limit, _ := strconv.Atoi(c.DefaultQuery("limit", "50"))
+	offset, _ := strconv.Atoi(c.DefaultQuery("offset", "0"))
+	if limit > 100 {
+		limit = 100
+	}
+
+	var emails []ClientEmail
+	err = tenantDB.Query(c, `
+		SELECT e.id, e.tenant_id, e.client_id, e.staff_id, e.direction,
+		       e.to_email, e.from_email, e.subject, e.status, e.is_read,
+		       e.sent_at, e.created_at, u.name as staff_name
+		FROM emails e
+		LEFT JOIN users u ON e.staff_id = u.id
+		WHERE e.client_id = $1 AND e.tenant_id = $2
+		ORDER BY e.created_at DESC
+		LIMIT $3 OFFSET $4
+	`, []interface{}{clientID, tenantID, limit, offset}, func(rows pgx.Rows) error {
+		var email ClientEmail
+		if err := rows.Scan(&email.ID, &email.TenantID, &email.ClientID, &email.StaffID,
+			&email.Direction, &email.ToEmail, &email.FromEmail, &email.Subject,
+			&email.Status, &email.IsRead, &email.SentAt, &email.CreatedAt, &email.StaffName); err != nil {
+			return err
+		}
+		emails = append(emails, email)
+		return nil
+	})
+
+	if err != nil {
+		log.Error().Err(err).Msg("Failed to get client emails")
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "internal_error"})
+		return
+	}
+
+	if emails == nil {
+		emails = []ClientEmail{}
+	}
+
+	c.JSON(http.StatusOK, gin.H{
+		"emails": emails,
+		"limit":  limit,
+		"offset": offset,
+	})
+}
+
 // AssignStaff assigns a staff member to a client
 // POST /api/v1/clients/:id/assign
 func (h *ClientHandler) AssignStaff(c *gin.Context) {
@@ -761,4 +1167,106 @@ func (h *ClientHandler) AssignStaff(c *gin.Context) {
 	}
 
 	c.JSON(http.StatusOK, gin.H{"message": "Staff assigned successfully"})
+}
+
+// BulkReassign reassigns multiple clients to a different staff member
+// POST /api/v1/clients/bulk-reassign
+func (h *ClientHandler) BulkReassign(c *gin.Context) {
+	var req struct {
+		ClientIDs   []string `json:"client_ids" binding:"required"`
+		NewStaffID  string   `json:"new_staff_id" binding:"required,uuid"`
+		SetPrimary  bool     `json:"set_primary"`
+	}
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "validation_error", "message": err.Error()})
+		return
+	}
+
+	ctx := c.Request.Context()
+	tenantID, _ := middleware.GetTenantID(c)
+	userID, _ := middleware.GetUserID(c)
+
+	tenantDB, ok := middleware.GetTenantDB(c)
+	if !ok {
+		log.Error().Msg("TenantDB not found in context")
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "internal_error"})
+		return
+	}
+
+	newStaffID, _ := uuid.Parse(req.NewStaffID)
+
+	// Parse all client IDs
+	var clientIDs []uuid.UUID
+	for _, idStr := range req.ClientIDs {
+		if id, err := uuid.Parse(idStr); err == nil {
+			clientIDs = append(clientIDs, id)
+		}
+	}
+
+	if len(clientIDs) == 0 {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "no_valid_client_ids"})
+		return
+	}
+
+	// Micro-batching: process 10 clients at a time to protect Neon 10-conn limit
+	batchSize := 10
+	var successCount int64
+	var failedIDs []string
+
+	for i := 0; i < len(clientIDs); i += batchSize {
+		end := i + batchSize
+		if end > len(clientIDs) {
+			end = len(clientIDs)
+		}
+		batch := clientIDs[i:end]
+
+		err := tenantDB.Transaction(c, func(tx pgx.Tx) error {
+			for _, clientID := range batch {
+				// Clear existing primary if setting new as primary
+				if req.SetPrimary {
+					_, _ = tx.Exec(ctx, `
+						UPDATE staff_clients SET is_primary = false
+						WHERE client_id = $1 AND tenant_id = $2
+					`, clientID, tenantID)
+				}
+
+				// Assign new staff
+				result, err := tx.Exec(ctx, `
+					INSERT INTO staff_clients (tenant_id, staff_id, client_id, is_primary)
+					VALUES ($1, $2, $3, $4)
+					ON CONFLICT (staff_id, client_id) DO UPDATE SET is_primary = $4
+				`, tenantID, newStaffID, clientID, req.SetPrimary)
+				if err != nil {
+					return err
+				}
+				successCount += result.RowsAffected()
+			}
+			return nil
+		})
+
+		if err != nil {
+			log.Error().Err(err).Int("batch_start", i).Msg("Failed to reassign batch")
+			for _, id := range batch {
+				failedIDs = append(failedIDs, id.String())
+			}
+		}
+	}
+
+	// Audit log
+	h.audit.LogEntity(ctx, audit.ActionClientUpdate, &userID, &tenantID, "client", nil, c.ClientIP(), map[string]interface{}{
+		"bulk_reassign": true,
+		"count":         successCount,
+		"new_staff_id":  newStaffID,
+	})
+
+	response := gin.H{
+		"message":       "Bulk reassignment completed",
+		"success_count": successCount,
+		"total":         len(clientIDs),
+	}
+	if len(failedIDs) > 0 {
+		response["failed_ids"] = failedIDs
+	}
+
+	c.JSON(http.StatusOK, response)
 }

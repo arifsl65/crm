@@ -459,6 +459,21 @@ func (h *ServiceHandler) Update(c *gin.Context) {
 	query := "UPDATE services SET " + strings.Join(setClauses, ", ") +
 		" WHERE id = $" + strconv.Itoa(argNum) + " AND tenant_id = $" + strconv.Itoa(argNum+1)
 	args = append(args, serviceID, tenantID)
+	argNum += 2
+
+	// Optimistic locking: If-Match header check
+	ifMatch := c.GetHeader("If-Match")
+	var expectedVersion int
+	hasIfMatch := false
+	if ifMatch != "" {
+		v, err := strconv.Atoi(ifMatch)
+		if err == nil {
+			hasIfMatch = true
+			expectedVersion = v
+			query += " AND version = $" + strconv.Itoa(argNum)
+			args = append(args, expectedVersion)
+		}
+	}
 
 	// Get TenantDB for RLS-protected operations
 	tenantDB, ok := middleware.GetTenantDB(c)
@@ -485,6 +500,14 @@ func (h *ServiceHandler) Update(c *gin.Context) {
 	}
 
 	if rowsAffected == 0 {
+		// Check if this was due to version mismatch (If-Match conflict)
+		if hasIfMatch {
+			c.JSON(http.StatusConflict, gin.H{
+				"error":   "version_conflict",
+				"message": "Resource was modified by another request. Refresh and try again.",
+			})
+			return
+		}
 		c.JSON(http.StatusNotFound, gin.H{"error": "service_not_found"})
 		return
 	}

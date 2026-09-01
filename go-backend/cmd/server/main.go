@@ -259,14 +259,18 @@ func setupRouter(cfg *config.Config, db *database.Pool, redis *cache.Client, aiC
 			Logger: auditLogger,
 		}))
 
-		// Tenant routes
-		tenants := protected.Group("/tenants")
+		// Admin routes (super_admin operations)
+		admin := protected.Group("/admin")
 		{
-			tenants.GET("", tenantHandler.List)
-			tenants.POST("", middleware.RequireRole("super_admin"), tenantHandler.Create)
-			tenants.GET("/:id", middleware.ValidateUUID("id"), tenantHandler.Get)
-			tenants.PATCH("/:id", middleware.ValidateUUID("id"), middleware.RequireRole("super_admin", "tenant_admin"), tenantHandler.Update)
-			tenants.DELETE("/:id", middleware.ValidateUUID("id"), middleware.RequireRole("super_admin"), tenantHandler.Delete)
+			// Tenant management routes
+			tenants := admin.Group("/tenants")
+			{
+				tenants.GET("", tenantHandler.List)
+				tenants.POST("", middleware.RequireRole("super_admin"), tenantHandler.Create)
+				tenants.GET("/:id", middleware.ValidateUUID("id"), tenantHandler.Get)
+				tenants.PATCH("/:id", middleware.ValidateUUID("id"), middleware.RequireRole("super_admin", "tenant_admin"), tenantHandler.Update)
+				tenants.DELETE("/:id", middleware.ValidateUUID("id"), middleware.RequireRole("super_admin"), tenantHandler.Delete)
+			}
 		}
 
 		// User routes
@@ -277,12 +281,16 @@ func setupRouter(cfg *config.Config, db *database.Pool, redis *cache.Client, aiC
 			users.GET("/:id", middleware.ValidateUUID("id"), userHandler.Get)
 			users.PATCH("/:id", middleware.ValidateUUID("id"), userHandler.Update)
 			users.DELETE("/:id", middleware.ValidateUUID("id"), middleware.RequireRole("super_admin", "tenant_admin"), userHandler.Delete)
+			users.POST("/:id/restore", middleware.ValidateUUID("id"), middleware.RequireRole("super_admin", "tenant_admin"), userHandler.Restore)
+			users.DELETE("/:id/2fa", middleware.ValidateUUID("id"), middleware.RequireRole("super_admin", "tenant_admin"), userHandler.Reset2FA)
 		}
 
 		// Client routes
 		clients := protected.Group("/clients")
 		{
 			clients.GET("", clientHandler.List)
+			clients.GET("/suppressed", clientHandler.ListSuppressed)
+			clients.POST("/bulk-reassign", middleware.RequireRole("super_admin", "tenant_admin"), clientHandler.BulkReassign)
 			clients.POST("", middleware.RequireRole("super_admin", "tenant_admin", "staff"), clientHandler.Create)
 			clients.GET("/:id", middleware.ValidateUUID("id"), clientHandler.Get)
 			clients.PATCH("/:id", middleware.ValidateUUID("id"), middleware.RequireRole("super_admin", "tenant_admin", "staff"), clientHandler.Update)
@@ -290,7 +298,13 @@ func setupRouter(cfg *config.Config, db *database.Pool, redis *cache.Client, aiC
 			clients.POST("/:id/restore", middleware.ValidateUUID("id"), middleware.RequireRole("super_admin", "tenant_admin"), clientHandler.Restore)
 			clients.GET("/:id/documents", middleware.ValidateUUID("id"), clientHandler.GetDocuments)
 			clients.GET("/:id/services", middleware.ValidateUUID("id"), clientHandler.GetServices)
+			clients.GET("/:id/emails", middleware.ValidateUUID("id"), clientHandler.GetEmails)
 			clients.POST("/:id/assign", middleware.ValidateUUID("id"), middleware.RequireRole("super_admin", "tenant_admin"), clientHandler.AssignStaff)
+			// Client Notes
+			clients.GET("/:id/notes", middleware.ValidateUUID("id"), clientHandler.ListNotes)
+			clients.POST("/:id/notes", middleware.ValidateUUID("id"), clientHandler.CreateNote)
+			clients.PATCH("/:id/notes/:noteId", middleware.ValidateUUID("id"), middleware.ValidateUUID("noteId"), clientHandler.UpdateNote)
+			clients.DELETE("/:id/notes/:noteId", middleware.ValidateUUID("id"), middleware.ValidateUUID("noteId"), clientHandler.DeleteNote)
 		}
 
 		// Service routes
@@ -327,6 +341,7 @@ func setupRouter(cfg *config.Config, db *database.Pool, redis *cache.Client, aiC
 			documents.GET("/:id/versions", middleware.ValidateUUID("id"), documentHandler.GetVersions)
 			documents.POST("/:id/versions/:versionId/restore", middleware.ValidateUUID("id"), documentHandler.RestoreVersion)
 			documents.POST("/:id/upload", middleware.ValidateUUID("id"), documentHandler.Upload)
+			documents.GET("/:id/download", middleware.ValidateUUID("id"), documentHandler.Download)
 		}
 
 		// QR upload routes (public - no auth required)
@@ -358,6 +373,10 @@ func setupRouter(cfg *config.Config, db *database.Pool, redis *cache.Client, aiC
 			serviceTypes.PATCH("/:id", middleware.ValidateUUID("id"), middleware.RequireRole("super_admin", "tenant_admin"), serviceTypeHandler.Update)
 			serviceTypes.DELETE("/:id", middleware.ValidateUUID("id"), middleware.RequireRole("super_admin", "tenant_admin"), serviceTypeHandler.Delete)
 			serviceTypes.POST("/:id/clone", middleware.ValidateUUID("id"), middleware.RequireRole("super_admin", "tenant_admin"), serviceTypeHandler.Clone)
+			// Service Requirements
+			serviceTypes.GET("/:id/requirements", middleware.ValidateUUID("id"), serviceTypeHandler.GetRequirements)
+			serviceTypes.POST("/:id/requirements", middleware.ValidateUUID("id"), middleware.RequireRole("super_admin", "tenant_admin"), serviceTypeHandler.AddRequirement)
+			serviceTypes.DELETE("/:id/requirements/:docTypeId", middleware.ValidateUUID("id"), middleware.ValidateUUID("docTypeId"), middleware.RequireRole("super_admin", "tenant_admin"), serviceTypeHandler.RemoveRequirement)
 		}
 
 		// Document Type routes

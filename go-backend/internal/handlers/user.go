@@ -643,6 +643,184 @@ func (h *UserHandler) Delete(c *gin.Context) {
 	})
 }
 
+// Reset2FA resets 2FA for a user (admin resets for staff who lost authenticator)
+// DELETE /api/v1/users/:id/2fa
+func (h *UserHandler) Reset2FA(c *gin.Context) {
+	id, err := uuid.Parse(c.Param("id"))
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{
+			"error":   "invalid_id",
+			"message": "Invalid user ID format",
+		})
+		return
+	}
+
+	role, _ := middleware.GetRole(c)
+	userTenantID, _ := middleware.GetTenantID(c)
+	currentUserID, _ := middleware.GetUserID(c)
+
+	// Cannot reset your own 2FA via this endpoint (use auth endpoint instead)
+	if id == currentUserID {
+		c.JSON(http.StatusBadRequest, gin.H{
+			"error":   "invalid_operation",
+			"message": "Use /auth/2fa endpoint to disable your own 2FA",
+		})
+		return
+	}
+
+	// Get TenantDB for RLS-protected queries
+	tenantDB, ok := middleware.GetTenantDB(c)
+	if !ok {
+		c.JSON(http.StatusInternalServerError, gin.H{
+			"error":   "internal_error",
+			"message": "Database context not available",
+		})
+		return
+	}
+
+	// Check if user exists and get their tenant
+	var targetTenantID *string
+	var targetRole string
+	err = tenantDB.QueryRowScan(c, []interface{}{&targetTenantID, &targetRole}, `
+		SELECT tenant_id, role FROM users WHERE id = $1 AND deleted_at IS NULL
+	`, id)
+	if err != nil {
+		c.JSON(http.StatusNotFound, gin.H{
+			"error":   "not_found",
+			"message": "User not found",
+		})
+		return
+	}
+
+	// Authorization: super_admin can reset any, tenant_admin only their tenant (not other admins)
+	if role != "super_admin" {
+		if role == "tenant_admin" {
+			if targetTenantID == nil || *targetTenantID != userTenantID.String() {
+				c.JSON(http.StatusForbidden, gin.H{
+					"error":   "forbidden",
+					"message": "You can only reset 2FA for users in your own tenant",
+				})
+				return
+			}
+			// Tenant admins cannot reset 2FA for other tenant admins
+			if targetRole == "tenant_admin" {
+				c.JSON(http.StatusForbidden, gin.H{
+					"error":   "forbidden",
+					"message": "Only super_admin can reset 2FA for tenant_admin users",
+				})
+				return
+			}
+		} else {
+			c.JSON(http.StatusForbidden, gin.H{
+				"error":   "forbidden",
+				"message": "You don't have permission to reset 2FA for users",
+			})
+			return
+		}
+	}
+
+	// Reset the user's 2FA
+	_, err = tenantDB.Exec(c, `
+		UPDATE users SET totp_secret = NULL, updated_at = NOW()
+		WHERE id = $1
+	`, id)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{
+			"error":   "reset_error",
+			"message": "Failed to reset 2FA",
+		})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{
+		"message": "2FA reset successfully. User will need to set up 2FA again.",
+	})
+}
+
+// Restore restores a soft-deleted user (GDPR 30-day grace period)
+// POST /api/v1/users/:id/restore
+func (h *UserHandler) Restore(c *gin.Context) {
+	id, err := uuid.Parse(c.Param("id"))
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{
+			"error":   "invalid_id",
+			"message": "Invalid user ID format",
+		})
+		return
+	}
+
+	role, _ := middleware.GetRole(c)
+	userTenantID, _ := middleware.GetTenantID(c)
+
+	// Get TenantDB for RLS-protected queries
+	tenantDB, ok := middleware.GetTenantDB(c)
+	if !ok {
+		c.JSON(http.StatusInternalServerError, gin.H{
+			"error":   "internal_error",
+			"message": "Database context not available",
+		})
+		return
+	}
+
+	// Check if user exists and is deleted
+	var targetTenantID *string
+	var deletedAt *time.Time
+	err = tenantDB.QueryRowScan(c, []interface{}{&targetTenantID, &deletedAt}, `
+		SELECT tenant_id, deleted_at FROM users WHERE id = $1
+	`, id)
+	if err != nil {
+		c.JSON(http.StatusNotFound, gin.H{
+			"error":   "not_found",
+			"message": "User not found",
+		})
+		return
+	}
+
+	if deletedAt == nil {
+		c.JSON(http.StatusBadRequest, gin.H{
+			"error":   "not_deleted",
+			"message": "User is not deleted",
+		})
+		return
+	}
+
+	// Authorization: super_admin can restore any, tenant_admin only their tenant
+	if role != "super_admin" {
+		if role == "tenant_admin" {
+			if targetTenantID == nil || *targetTenantID != userTenantID.String() {
+				c.JSON(http.StatusForbidden, gin.H{
+					"error":   "forbidden",
+					"message": "You can only restore users in your own tenant",
+				})
+				return
+			}
+		} else {
+			c.JSON(http.StatusForbidden, gin.H{
+				"error":   "forbidden",
+				"message": "You don't have permission to restore users",
+			})
+			return
+		}
+	}
+
+	// Restore the user
+	_, err = tenantDB.Exec(c, `
+		UPDATE users SET deleted_at = NULL, status = 'active', updated_at = NOW()
+		WHERE id = $1
+	`, id)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{
+			"error":   "restore_error",
+			"message": "Failed to restore user",
+		})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{
+		"message": "User restored successfully",
+	})
+}
+
 // getUserByID is a helper function to fetch a user by ID using TenantDB for RLS
 func (h *UserHandler) getUserByID(c *gin.Context, id uuid.UUID) (*User, error) {
 	tenantDB, ok := middleware.GetTenantDB(c)

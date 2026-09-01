@@ -46,6 +46,7 @@ const (
 	ActionDocumentDelete     Action = "document_delete"
 	ActionDocumentApprove    Action = "document_approve"
 	ActionDocumentReject     Action = "document_reject"
+	ActionDocumentDownload   Action = "document_download"
 	ActionServiceTypeCreate  Action = "service_type_create"
 	ActionServiceTypeUpdate  Action = "service_type_update"
 	ActionServiceTypeDelete  Action = "service_type_delete"

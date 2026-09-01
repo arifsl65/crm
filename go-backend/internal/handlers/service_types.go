@@ -624,6 +624,188 @@ func (h *ServiceTypeHandler) Reorder(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{"message": "Service types reordered"})
 }
 
+// ServiceRequirement represents a document requirement for a service type
+type ServiceRequirement struct {
+	ID             uuid.UUID `json:"id"`
+	TenantID       uuid.UUID `json:"tenant_id"`
+	ServiceTypeID  uuid.UUID `json:"service_type_id"`
+	DocumentTypeID uuid.UUID `json:"document_type_id"`
+	IsMandatory    bool      `json:"is_mandatory"`
+	CreatedAt      time.Time `json:"created_at"`
+	// Joined fields
+	DocumentTypeName *string `json:"document_type_name,omitempty"`
+}
+
+// GetRequirements returns document requirements for a service type
+// GET /api/v1/service-types/:id/requirements
+func (h *ServiceTypeHandler) GetRequirements(c *gin.Context) {
+	tenantID, _ := middleware.GetTenantID(c)
+	id := c.Param("id")
+
+	tenantDB, ok := middleware.GetTenantDB(c)
+	if !ok {
+		log.Error().Msg("TenantDB not found in context")
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "internal_error"})
+		return
+	}
+
+	stID, err := uuid.Parse(id)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid service type ID"})
+		return
+	}
+
+	var requirements []ServiceRequirement
+	err = tenantDB.Query(c, `
+		SELECT sr.id, sr.tenant_id, sr.service_type_id, sr.document_type_id,
+		       sr.is_mandatory, sr.created_at, dt.name as document_type_name
+		FROM service_requirements sr
+		LEFT JOIN document_types dt ON sr.document_type_id = dt.id
+		WHERE sr.service_type_id = $1 AND sr.tenant_id = $2
+		ORDER BY dt.name ASC
+	`, []interface{}{stID, tenantID}, func(rows pgx.Rows) error {
+		var req ServiceRequirement
+		if err := rows.Scan(&req.ID, &req.TenantID, &req.ServiceTypeID, &req.DocumentTypeID,
+			&req.IsMandatory, &req.CreatedAt, &req.DocumentTypeName); err != nil {
+			return err
+		}
+		requirements = append(requirements, req)
+		return nil
+	})
+
+	if err != nil {
+		log.Error().Err(err).Msg("Failed to get service requirements")
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "internal_error"})
+		return
+	}
+
+	if requirements == nil {
+		requirements = []ServiceRequirement{}
+	}
+
+	c.JSON(http.StatusOK, gin.H{"requirements": requirements})
+}
+
+// AddRequirement adds a document requirement to a service type
+// POST /api/v1/service-types/:id/requirements
+func (h *ServiceTypeHandler) AddRequirement(c *gin.Context) {
+	ctx := c.Request.Context()
+	tenantID, _ := middleware.GetTenantID(c)
+	userID, _ := middleware.GetUserID(c)
+	id := c.Param("id")
+
+	tenantDB, ok := middleware.GetTenantDB(c)
+	if !ok {
+		log.Error().Msg("TenantDB not found in context")
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "internal_error"})
+		return
+	}
+
+	stID, err := uuid.Parse(id)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid service type ID"})
+		return
+	}
+
+	var req struct {
+		DocumentTypeID string `json:"document_type_id" binding:"required,uuid"`
+		IsMandatory    *bool  `json:"is_mandatory,omitempty"`
+	}
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+
+	docTypeID, _ := uuid.Parse(req.DocumentTypeID)
+	isMandatory := true
+	if req.IsMandatory != nil {
+		isMandatory = *req.IsMandatory
+	}
+
+	reqID := uuid.New()
+	err = tenantDB.Transaction(c, func(tx pgx.Tx) error {
+		_, err := tx.Exec(ctx, `
+			INSERT INTO service_requirements (id, tenant_id, service_type_id, document_type_id, is_mandatory)
+			VALUES ($1, $2, $3, $4, $5)
+			ON CONFLICT (service_type_id, document_type_id) DO UPDATE SET is_mandatory = $5
+		`, reqID, tenantID, stID, docTypeID, isMandatory)
+		return err
+	})
+
+	if err != nil {
+		log.Error().Err(err).Msg("Failed to add service requirement")
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "internal_error"})
+		return
+	}
+
+	h.audit.LogEntity(ctx, audit.ActionServiceTypeUpdate, &userID, &tenantID, "service_requirement", &reqID, c.ClientIP(), nil)
+
+	c.JSON(http.StatusCreated, gin.H{
+		"id":      reqID,
+		"message": "Requirement added successfully",
+	})
+}
+
+// RemoveRequirement removes a document requirement from a service type
+// DELETE /api/v1/service-types/:id/requirements/:docTypeId
+func (h *ServiceTypeHandler) RemoveRequirement(c *gin.Context) {
+	ctx := c.Request.Context()
+	tenantID, _ := middleware.GetTenantID(c)
+	userID, _ := middleware.GetUserID(c)
+	id := c.Param("id")
+	docTypeIDStr := c.Param("docTypeId")
+
+	tenantDB, ok := middleware.GetTenantDB(c)
+	if !ok {
+		log.Error().Msg("TenantDB not found in context")
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "internal_error"})
+		return
+	}
+
+	stID, err := uuid.Parse(id)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid service type ID"})
+		return
+	}
+
+	docTypeID, err := uuid.Parse(docTypeIDStr)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid document type ID"})
+		return
+	}
+
+	var rowsAffected int64
+	err = tenantDB.Transaction(c, func(tx pgx.Tx) error {
+		result, err := tx.Exec(ctx, `
+			DELETE FROM service_requirements
+			WHERE service_type_id = $1 AND document_type_id = $2 AND tenant_id = $3
+		`, stID, docTypeID, tenantID)
+		if err != nil {
+			return err
+		}
+		rowsAffected = result.RowsAffected()
+		return nil
+	})
+
+	if err != nil {
+		log.Error().Err(err).Msg("Failed to remove service requirement")
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "internal_error"})
+		return
+	}
+
+	if rowsAffected == 0 {
+		c.JSON(http.StatusNotFound, gin.H{"error": "requirement_not_found"})
+		return
+	}
+
+	h.audit.LogEntity(ctx, audit.ActionServiceTypeUpdate, &userID, &tenantID, "service_requirement", nil, c.ClientIP(), map[string]interface{}{
+		"service_type_id":  stID,
+		"document_type_id": docTypeID,
+	})
+
+	c.JSON(http.StatusOK, gin.H{"message": "Requirement removed successfully"})
+}
+
 // Clone creates a copy of an existing service type
 // POST /api/v1/service-types/:id/clone
 func (h *ServiceTypeHandler) Clone(c *gin.Context) {
