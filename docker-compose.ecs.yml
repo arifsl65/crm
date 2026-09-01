@@ -53,6 +53,12 @@ services:
       # Python AI service (internal)
       - PYTHON_AI_URL=http://python-ai:8000
       - PYTHON_AI_TIMEOUT=30s
+      # Alibaba Cloud OSS Storage
+      - OSS_ENABLED=${OSS_ENABLED:-true}
+      - ALIBABA_ACCESS_KEY_ID=${ALIBABA_ACCESS_KEY_ID}
+      - ALIBABA_ACCESS_KEY_SECRET=${ALIBABA_ACCESS_KEY_SECRET}
+      - OSS_ENDPOINT=${OSS_ENDPOINT:-https://oss-eu-west-1.aliyuncs.com}
+      - OSS_BUCKET_UPLOADS=${OSS_BUCKET_UPLOADS:-fzco-uploads}
     depends_on:
       redis:
         condition: service_healthy
@@ -99,6 +105,12 @@ services:
       - AI_CLASSIFICATION_ENABLED=true
       # Groq AI
       - GROQ_API_KEY=${GROQ_API_KEY}
+      # Alibaba Cloud OSS Storage
+      - OSS_ENABLED=${OSS_ENABLED:-true}
+      - ALIBABA_ACCESS_KEY_ID=${ALIBABA_ACCESS_KEY_ID}
+      - ALIBABA_ACCESS_KEY_SECRET=${ALIBABA_ACCESS_KEY_SECRET}
+      - OSS_ENDPOINT=${OSS_ENDPOINT:-https://oss-eu-west-1.aliyuncs.com}
+      - OSS_BUCKET_UPLOADS=${OSS_BUCKET_UPLOADS:-fzco-uploads}
     depends_on:
       redis:
         condition: service_healthy

@@ -4,6 +4,7 @@ Groq AI Client for document processing.
 Provides AI-powered document analysis using Groq's fast inference API.
 """
 
+import base64
 import json
 from typing import Any, Dict, List, Optional
 
@@ -304,6 +305,100 @@ Respond with JSON:
             return {"error": "Failed to parse AI response"}
         except Exception as e:
             logger.error("Document summarization failed", error=str(e))
+            raise
+
+    async def extract_text_from_image(
+        self, image_data: bytes, mime_type: str = "image/png", filename: str = ""
+    ) -> Dict[str, Any]:
+        """
+        Extract text from an image using Groq Vision model (OCR).
+
+        Args:
+            image_data: Raw image bytes.
+            mime_type: MIME type of the image (image/png, image/jpeg, etc.).
+            filename: Original filename for context.
+
+        Returns:
+            Extracted text and metadata.
+        """
+        settings = get_settings()
+
+        # Encode image to base64
+        base64_image = base64.b64encode(image_data).decode("utf-8")
+
+        system_prompt = """You are an OCR expert. Extract ALL text from this document image.
+
+Rules:
+1. Extract text exactly as it appears, preserving formatting where possible
+2. Maintain paragraph structure with blank lines
+3. For tables, use | to separate columns and newlines for rows
+4. Include headers, footers, dates, amounts, and all visible text
+5. If text is unclear, mark it as [unclear]
+6. Preserve numbers and currency symbols exactly
+
+Output JSON format:
+{
+    "text": "Full extracted text with formatting preserved",
+    "language": "detected language (e.g., en, es, fr)",
+    "document_type_hint": "invoice/receipt/letter/form/other",
+    "has_tables": true/false,
+    "has_handwriting": true/false,
+    "confidence": 0.95,
+    "page_count": 1
+}"""
+
+        user_content = [
+            {
+                "type": "image_url",
+                "image_url": {
+                    "url": f"data:{mime_type};base64,{base64_image}"
+                }
+            },
+            {
+                "type": "text",
+                "text": f"Extract all text from this document image. Filename: {filename}"
+            }
+        ]
+
+        try:
+            response = await self.client.chat.completions.create(
+                model=settings.groq_vision_model,
+                messages=[
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": user_content},
+                ],
+                max_tokens=settings.groq_max_tokens,
+                temperature=0.1,  # Low temperature for accurate OCR
+            )
+
+            result_text = response.choices[0].message.content
+
+            # Try to parse as JSON, fall back to plain text
+            try:
+                result = json.loads(result_text)
+            except json.JSONDecodeError:
+                # If not JSON, wrap the raw text
+                result = {
+                    "text": result_text,
+                    "language": "unknown",
+                    "document_type_hint": "other",
+                    "has_tables": False,
+                    "has_handwriting": False,
+                    "confidence": 0.8,
+                    "page_count": 1
+                }
+
+            logger.info(
+                "Text extracted from image",
+                text_length=len(result.get("text", "")),
+                confidence=result.get("confidence"),
+                document_type=result.get("document_type_hint"),
+            )
+
+            return result
+
+        except Exception as e:
+            logger.error("Image text extraction failed", error=str(e), filename=filename)
             raise
 
 

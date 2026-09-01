@@ -27,7 +27,17 @@ type Config struct {
 	RateLimit      RateLimitConfig
 	Email          EmailConfig
 	CompaniesHouse CompaniesHouseConfig
+	OSS            OSSConfig
 	FrontendURL    string
+}
+
+// OSSConfig holds Alibaba Cloud OSS storage settings.
+type OSSConfig struct {
+	Enabled         bool
+	AccessKeyID     string
+	AccessKeySecret string
+	Endpoint        string
+	Bucket          string
 }
 
 // EmailConfig holds email service settings.
@@ -332,6 +342,15 @@ func Load() (*Config, error) {
 		BaseURL:  getEnv("COMPANIES_HOUSE_BASE_URL", "https://api.company-information.service.gov.uk"),
 		Timeout:  getEnvDuration("COMPANIES_HOUSE_TIMEOUT", 10*time.Second),
 		CacheTTL: getEnvDuration("COMPANIES_HOUSE_CACHE_TTL", 1*time.Hour),
+	}
+
+	// Alibaba Cloud OSS config
+	cfg.OSS = OSSConfig{
+		Enabled:         getEnvBool("OSS_ENABLED", false),
+		AccessKeyID:     getEnv("ALIBABA_ACCESS_KEY_ID", ""),
+		AccessKeySecret: getEnv("ALIBABA_ACCESS_KEY_SECRET", ""),
+		Endpoint:        getEnv("OSS_ENDPOINT", "https://oss-eu-west-1.aliyuncs.com"),
+		Bucket:          getEnv("OSS_BUCKET_UPLOADS", "fzco-uploads"),
 	}
 
 	// Validate critical security settings in production AND staging

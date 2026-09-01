@@ -28,6 +28,7 @@ import (
 	"github.com/accountant-crm/go-backend/internal/email"
 	"github.com/accountant-crm/go-backend/internal/handlers"
 	"github.com/accountant-crm/go-backend/internal/middleware"
+	"github.com/accountant-crm/go-backend/internal/storage"
 	"github.com/accountant-crm/go-backend/internal/websocket"
 )
 
@@ -58,6 +59,11 @@ type Handlers struct {
 	AI             *handlers.AIHandler
 	CompaniesHouse *handlers.CompaniesHouseHandler
 	WebSocket      *websocket.Handler
+	// Email module handlers
+	Email         *handlers.EmailHandler
+	EmailTemplate *handlers.EmailTemplateHandler
+	EmailAccount  *handlers.EmailAccountHandler
+	ChaseLog      *handlers.ChaseLogHandler
 }
 
 func main() {
@@ -140,6 +146,17 @@ func main() {
 		log.Warn().Msg("Email client not configured - password reset emails will not be sent")
 	}
 
+	// Initialize OSS storage client (optional - can be nil if not configured)
+	ossClient, err := storage.NewOSSClient(cfg.OSS)
+	if err != nil {
+		log.Fatal().Err(err).Msg("Failed to initialize OSS client")
+	}
+	if ossClient != nil && ossClient.IsConfigured() {
+		log.Info().Msg("OSS storage configured (Alibaba Cloud)")
+	} else {
+		log.Warn().Msg("OSS storage not configured - file uploads will not be stored in cloud")
+	}
+
 	// Initialize auth rate limiter
 	authRateLimiter := middleware.NewAuthRateLimiter(redis)
 
@@ -165,13 +182,18 @@ func main() {
 			User:           handlers.NewUserHandler(db, sessionManager),
 			Client:         handlers.NewClientHandler(db, auditLogger),
 			Service:        handlers.NewServiceHandler(db, auditLogger),
-			Document:       handlers.NewDocumentHandler(db, auditLogger, redis),
+			Document:       handlers.NewDocumentHandler(db, auditLogger, redis, ossClient),
 			Dashboard:      handlers.NewDashboardHandler(db),
 			ServiceType:    handlers.NewServiceTypeHandler(db, auditLogger),
 			DocumentType:   handlers.NewDocumentTypeHandler(db, auditLogger),
 			AI:             handlers.NewAIHandler(aiClient),
 			CompaniesHouse: handlers.NewCompaniesHouseHandler(db, redis, cfg.CompaniesHouse),
 			WebSocket:      websocket.NewHandler(wsHub, jwtManager, redis),
+			// Email module handlers
+			Email:         handlers.NewEmailHandler(db, emailClient, auditLogger),
+			EmailTemplate: handlers.NewEmailTemplateHandler(db, auditLogger),
+			EmailAccount:  handlers.NewEmailAccountHandler(db, auditLogger),
+			ChaseLog:      handlers.NewChaseLogHandler(db, emailClient, auditLogger),
 		},
 	}
 
@@ -405,6 +427,7 @@ func setupRouter(app *Application) *gin.Engine {
 			documents.POST("/qr", middleware.RequireRole("super_admin", "tenant_admin", "staff"), h.Document.GenerateQRToken)
 			documents.GET("/:id", middleware.ValidateUUID("id"), h.Document.Get)
 			documents.PATCH("/:id", middleware.ValidateUUID("id"), middleware.RequireRole("super_admin", "tenant_admin", "staff"), h.Document.Update)
+			documents.DELETE("/:id", middleware.ValidateUUID("id"), middleware.RequireRole("super_admin", "tenant_admin"), h.Document.Delete)
 			documents.POST("/:id/approve", middleware.ValidateUUID("id"), middleware.RequireRole("super_admin", "tenant_admin"), h.Document.Approve)
 			documents.POST("/:id/reject", middleware.ValidateUUID("id"), middleware.RequireRole("super_admin", "tenant_admin"), h.Document.Reject)
 			documents.GET("/:id/versions", middleware.ValidateUUID("id"), h.Document.GetVersions)
@@ -523,6 +546,52 @@ func setupRouter(app *Application) *gin.Engine {
 			chRoutes.GET("/company/:number", h.CompaniesHouse.GetCompany)
 			chRoutes.POST("/sync/:clientId", middleware.ValidateUUID("clientId"), h.CompaniesHouse.SyncClient)
 			chRoutes.GET("/status", h.CompaniesHouse.Status)
+		}
+
+		// Email routes
+		emails := protected.Group("/emails")
+		{
+			emails.GET("", h.Email.List)
+			emails.GET("/stats", h.Email.GetStats)
+			emails.POST("", middleware.RequireRole("super_admin", "tenant_admin", "staff"), h.Email.Send)
+			emails.POST("/send-template", middleware.RequireRole("super_admin", "tenant_admin", "staff"), h.Email.SendFromTemplate)
+			emails.GET("/:id", middleware.ValidateUUID("id"), h.Email.Get)
+			emails.PATCH("/:id/read", middleware.ValidateUUID("id"), h.Email.MarkRead)
+		}
+
+		// Email Template routes
+		emailTemplates := protected.Group("/email-templates")
+		{
+			emailTemplates.GET("", h.EmailTemplate.List)
+			emailTemplates.POST("", middleware.RequireRole("super_admin", "tenant_admin"), h.EmailTemplate.Create)
+			emailTemplates.GET("/:id", middleware.ValidateUUID("id"), h.EmailTemplate.Get)
+			emailTemplates.PATCH("/:id", middleware.ValidateUUID("id"), middleware.RequireRole("super_admin", "tenant_admin"), h.EmailTemplate.Update)
+			emailTemplates.DELETE("/:id", middleware.ValidateUUID("id"), middleware.RequireRole("super_admin", "tenant_admin"), h.EmailTemplate.Delete)
+		}
+
+		// Email Account routes
+		emailAccounts := protected.Group("/email-accounts")
+		{
+			emailAccounts.GET("", h.EmailAccount.List)
+			emailAccounts.POST("/imap", middleware.RequireRole("super_admin", "tenant_admin"), h.EmailAccount.CreateIMAP)
+			emailAccounts.GET("/oauth/:provider", h.EmailAccount.OAuthInitiate)
+			emailAccounts.GET("/oauth/:provider/callback", h.EmailAccount.OAuthCallback)
+			emailAccounts.GET("/:id", middleware.ValidateUUID("id"), h.EmailAccount.Get)
+			emailAccounts.PATCH("/:id", middleware.ValidateUUID("id"), middleware.RequireRole("super_admin", "tenant_admin"), h.EmailAccount.Update)
+			emailAccounts.DELETE("/:id", middleware.ValidateUUID("id"), middleware.RequireRole("super_admin", "tenant_admin"), h.EmailAccount.Delete)
+			emailAccounts.POST("/:id/sync", middleware.ValidateUUID("id"), h.EmailAccount.Sync)
+			emailAccounts.POST("/:id/test", middleware.ValidateUUID("id"), h.EmailAccount.TestConnection)
+			emailAccounts.POST("/:id/disconnect", middleware.ValidateUUID("id"), h.EmailAccount.Disconnect)
+			emailAccounts.POST("/:id/reconnect", middleware.ValidateUUID("id"), h.EmailAccount.Reconnect)
+		}
+
+		// Chase Log routes
+		chaseLogs := protected.Group("/chase-logs")
+		{
+			chaseLogs.GET("", h.ChaseLog.List)
+			chaseLogs.GET("/stats", h.ChaseLog.GetStats)
+			chaseLogs.POST("", middleware.RequireRole("super_admin", "tenant_admin", "staff"), h.ChaseLog.Create)
+			chaseLogs.GET("/:id", middleware.ValidateUUID("id"), h.ChaseLog.Get)
 		}
 
 		// WebSocket routes (protected)

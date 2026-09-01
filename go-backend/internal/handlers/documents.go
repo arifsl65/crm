@@ -21,6 +21,7 @@ import (
 	"github.com/accountant-crm/go-backend/internal/cache"
 	"github.com/accountant-crm/go-backend/internal/database"
 	"github.com/accountant-crm/go-backend/internal/middleware"
+	"github.com/accountant-crm/go-backend/internal/storage"
 )
 
 // Magic byte signatures for file type validation
@@ -95,13 +96,15 @@ type DocumentHandler struct {
 	db    *database.Pool
 	audit *audit.Logger
 	redis *cache.Client
+	oss   *storage.OSSClient
 }
 
-func NewDocumentHandler(db *database.Pool, auditLogger *audit.Logger, redisClient *cache.Client) *DocumentHandler {
+func NewDocumentHandler(db *database.Pool, auditLogger *audit.Logger, redisClient *cache.Client, ossClient *storage.OSSClient) *DocumentHandler {
 	return &DocumentHandler{
 		db:    db,
 		audit: auditLogger,
 		redis: redisClient,
+		oss:   ossClient,
 	}
 }
 
@@ -823,6 +826,72 @@ func (h *DocumentHandler) CancelRenewal(c *gin.Context) {
 	h.audit.LogEntity(ctx, "document_renewal_cancel", &userID, &tenantID, "document", &documentID, c.ClientIP(), nil)
 
 	c.JSON(http.StatusOK, gin.H{"message": "Renewal cancelled successfully"})
+}
+
+// Delete soft-deletes a document
+// DELETE /api/v1/documents/:id
+func (h *DocumentHandler) Delete(c *gin.Context) {
+	documentID, err := uuid.Parse(c.Param("id"))
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid_document_id"})
+		return
+	}
+
+	ctx := c.Request.Context()
+	tenantID, _ := middleware.GetTenantID(c)
+	userID, _ := middleware.GetUserID(c)
+	role, _ := middleware.GetRole(c)
+
+	tenantDB, ok := middleware.GetTenantDB(c)
+	if !ok {
+		log.Error().Msg("TenantDB not found in context")
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "internal_error"})
+		return
+	}
+
+	var rowsAffected int64
+	err = tenantDB.Transaction(c, func(tx pgx.Tx) error {
+		var sql string
+		var args []interface{}
+
+		// Super admin can delete any document
+		if role == "super_admin" {
+			sql = `
+				UPDATE documents SET deleted_at = NOW(), updated_at = NOW()
+				WHERE id = $1 AND deleted_at IS NULL
+			`
+			args = []interface{}{documentID}
+		} else {
+			sql = `
+				UPDATE documents SET deleted_at = NOW(), updated_at = NOW()
+				WHERE id = $1 AND tenant_id = $2 AND deleted_at IS NULL
+			`
+			args = []interface{}{documentID, tenantID}
+		}
+
+		result, err := tx.Exec(ctx, sql, args...)
+		if err != nil {
+			return err
+		}
+		rowsAffected = result.RowsAffected()
+		return nil
+	})
+
+	if err != nil {
+		log.Error().Err(err).Msg("Failed to delete document")
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "internal_error"})
+		return
+	}
+
+	if rowsAffected == 0 {
+		c.JSON(http.StatusNotFound, gin.H{"error": "document_not_found"})
+		return
+	}
+
+	// Audit log
+	h.audit.LogEntity(ctx, audit.ActionDocumentDelete, &userID, &tenantID, "document", &documentID, c.ClientIP(), nil)
+
+	c.JSON(http.StatusOK, gin.H{"message": "Document deleted successfully"})
 }
 
 // ListExpiring returns documents that are expiring soon
@@ -1591,11 +1660,19 @@ func (h *DocumentHandler) Upload(c *gin.Context) {
 		ext,
 	)
 
-	// TODO: Upload to OSS when configured
-	// For now, store file path metadata but don't persist the actual file
-	// This stub allows the API to work while OSS is being set up
-
 	fileSize := len(fileContent)
+
+	// Upload to OSS if configured
+	if h.oss != nil && h.oss.IsConfigured() {
+		if err := h.oss.Upload(ctx, filePath, fileContent, detectedMime); err != nil {
+			log.Error().Err(err).Str("document_id", documentID.String()).Msg("Failed to upload file to OSS")
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "storage_error", "message": "Failed to upload file to storage"})
+			return
+		}
+		log.Info().Str("document_id", documentID.String()).Str("path", filePath).Int("size", fileSize).Msg("File uploaded to OSS")
+	} else {
+		log.Warn().Str("document_id", documentID.String()).Msg("OSS not configured - file metadata stored but content not persisted")
+	}
 	originalName := header.Filename
 
 	err = tenantDB.Transaction(c, func(tx pgx.Tx) error {
@@ -1693,15 +1770,31 @@ func (h *DocumentHandler) Download(c *gin.Context) {
 		return
 	}
 
-	// TODO: Generate OSS presigned URL when configured
-	// For now, return a proxied download URL that doesn't expose internal paths
-	// In production, this would generate a signed URL with 15-minute expiry
-
 	// Audit the download request
 	h.audit.LogEntity(c.Request.Context(), audit.ActionDocumentDownload, &userID, &tenantID, "document", &documentID, c.ClientIP(), nil)
 
+	// Generate OSS signed URL if configured
+	if h.oss != nil && h.oss.IsConfigured() {
+		signedURL, err := h.oss.GetSignedURL(c.Request.Context(), *filePath, 15*time.Minute)
+		if err != nil {
+			log.Error().Err(err).Str("document_id", documentID.String()).Msg("Failed to generate signed URL")
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "storage_error", "message": "Failed to generate download URL"})
+			return
+		}
+
+		c.JSON(http.StatusOK, gin.H{
+			"document_id":   documentID,
+			"mime_type":     mimeType,
+			"original_name": originalName,
+			"file_size":     fileSize,
+			"download_url":  signedURL,
+			"expires_in":    900, // 15 minutes in seconds
+		})
+		return
+	}
+
+	// Fallback: OSS not configured - return proxied URL
 	// Fix #43: Don't expose internal file_path - use opaque document ID in URL
-	// The actual file streaming will be handled by a separate endpoint or OSS signed URL
 	c.JSON(http.StatusOK, gin.H{
 		"document_id":   documentID,
 		"mime_type":     mimeType,
@@ -1709,7 +1802,7 @@ func (h *DocumentHandler) Download(c *gin.Context) {
 		"file_size":     fileSize,
 		"download_url":  fmt.Sprintf("/api/v1/documents/%s/stream", documentID), // Proxied URL - no path leakage
 		"expires_in":    900, // 15 minutes in seconds
-		"message":       "OSS signed URL generation pending configuration",
+		"message":       "OSS not configured - using proxy URL",
 	})
 }
 
@@ -1800,6 +1893,18 @@ func (h *DocumentHandler) UploadViaQR(c *gin.Context) {
 
 	fileSize := len(fileContent)
 	originalName := header.Filename
+
+	// Upload to OSS if configured
+	if h.oss != nil && h.oss.IsConfigured() {
+		if err := h.oss.Upload(ctx, filePath, fileContent, detectedMime); err != nil {
+			log.Error().Err(err).Str("document_id", documentID.String()).Msg("Failed to upload QR file to OSS")
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "storage_error", "message": "Failed to upload file to storage"})
+			return
+		}
+		log.Info().Str("document_id", documentID.String()).Str("path", filePath).Int("size", fileSize).Msg("QR file uploaded to OSS")
+	} else {
+		log.Warn().Str("document_id", documentID.String()).Msg("OSS not configured - QR file metadata stored but content not persisted")
+	}
 
 	// Create document record using TenantTransaction with the token's tenant context
 	err = h.db.TenantTransaction(ctx, tenantID.String(), "staff", func(tx pgx.Tx) error {
