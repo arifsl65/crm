@@ -28,7 +28,8 @@ cryptography==42.0.5      # mTLS certificates
 # HTTP Client
 httpx==0.27.0             # Async HTTP client
 
-# AI/ML (optional - uncomment as needed)
+# AI/ML
+groq==0.9.0                # Groq AI SDK (primary AI provider)
 # openai==1.13.3
 # langchain==0.1.11
 # transformers==4.38.2

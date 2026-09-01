@@ -6,7 +6,8 @@ FastAPI application providing AI-powered document processing endpoints.
 
 import sys
 from contextlib import asynccontextmanager
-from typing import Any, Dict, Optional
+import json
+from typing import Any, Dict, List, Optional
 
 import structlog
 import re
@@ -18,6 +19,7 @@ from starlette.middleware.base import BaseHTTPMiddleware
 
 from internal.config import get_settings
 from internal.dependencies import AppState, get_app_state
+from internal.ai_client import get_groq_client, GroqClient
 
 # Configure structured logging with contextvars support for request ID propagation
 structlog.configure(
@@ -342,17 +344,19 @@ async def extract_text(
 @app.post("/api/v1/ai/documents/classify", tags=["Documents"])
 async def classify_document(
     file_key: str,
-    response: Response,
+    text: str = "",
+    response: Response = None,
     state: AppState = Depends(get_app_state),
 ) -> Dict[str, Any]:
     """
-    Classify a document type.
+    Classify a document type using Groq AI.
 
     Args:
         file_key: OSS key of the document to classify.
+        text: Extracted text from the document (if already available).
 
     Returns:
-        Document classification result.
+        Document classification result with type, confidence, and metadata.
     """
     # FIXED: Validate file_key to prevent path traversal
     if not validate_oss_key(file_key):
@@ -366,56 +370,107 @@ async def classify_document(
         response.headers["Retry-After"] = "300"
         return {"error": "service_unavailable", "message": "Classification feature is currently disabled"}
 
-    # TODO: Implement document classification
-    return {
-        "status": "not_implemented",
-        "message": "Document classification will be implemented in Week 3",
-        "file_key": file_key,
-    }
+    # Check if Groq is configured
+    groq_client = get_groq_client()
+    if not groq_client.is_configured():
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="AI service not configured (missing GROQ_API_KEY)",
+        )
+
+    # If no text provided, we need to extract it first (OCR)
+    if not text:
+        return {
+            "status": "text_required",
+            "message": "Document text must be provided. Use /api/v1/ai/documents/extract first.",
+            "file_key": file_key,
+        }
+
+    try:
+        result = await groq_client.classify_document(text=text, filename=file_key)
+        result["file_key"] = file_key
+        return result
+    except Exception as e:
+        logger.error("Classification failed", file_key=file_key, error=str(e))
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Classification failed: {str(e)}",
+        )
 
 
 @app.post("/api/v1/ai/chat", tags=["Chat"])
 async def chat_completion(
     message: str,
-    response: Response,
+    context: Optional[str] = None,
+    response: Response = None,
     state: AppState = Depends(get_app_state),
 ) -> Dict[str, Any]:
     """
-    Process a chat message with AI.
+    Process a chat message with Groq AI.
 
     Args:
         message: User message.
+        context: Optional JSON string of previous messages for context.
 
     Returns:
-        AI response.
+        AI response with usage statistics.
     """
     if not await check_feature_flag(state, "chat"):
         response.status_code = status.HTTP_503_SERVICE_UNAVAILABLE
         response.headers["Retry-After"] = "300"
         return {"error": "service_unavailable", "message": "Chat feature is currently disabled"}
 
-    # TODO: Implement chat completion
-    return {
-        "status": "not_implemented",
-        "message": "Chat completion will be implemented in Week 4",
-        "input": message,
-    }
+    # Check if Groq is configured
+    groq_client = get_groq_client()
+    if not groq_client.is_configured():
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="AI service not configured (missing GROQ_API_KEY)",
+        )
+
+    # Parse context if provided
+    context_messages = None
+    if context:
+        try:
+            context_messages = json.loads(context)
+        except json.JSONDecodeError:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Invalid context format (must be JSON array)",
+            )
+
+    try:
+        result = await groq_client.chat_completion(
+            message=message,
+            context=context_messages,
+        )
+        return result
+    except Exception as e:
+        logger.error("Chat completion failed", error=str(e))
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Chat completion failed: {str(e)}",
+        )
 
 
 @app.post("/api/v1/ai/forms/extract", tags=["Forms"])
 async def extract_form_data(
     file_key: str,
-    response: Response,
+    text: str = "",
+    document_type: str = "unknown",
+    response: Response = None,
     state: AppState = Depends(get_app_state),
 ) -> Dict[str, Any]:
     """
-    Extract structured form data from a document.
+    Extract structured form data from a document using Groq AI.
 
     Args:
         file_key: OSS key of the document to process.
+        text: Extracted text from the document.
+        document_type: Type of document for better extraction.
 
     Returns:
-        Extracted form fields.
+        Extracted form fields as structured data.
     """
     # FIXED: Validate file_key to prevent path traversal
     if not validate_oss_key(file_key):
@@ -429,12 +484,85 @@ async def extract_form_data(
         response.headers["Retry-After"] = "300"
         return {"error": "service_unavailable", "message": "Form extraction feature is currently disabled"}
 
-    # TODO: Implement form extraction
-    return {
-        "status": "not_implemented",
-        "message": "Form extraction will be implemented in Week 3",
-        "file_key": file_key,
-    }
+    # Check if Groq is configured
+    groq_client = get_groq_client()
+    if not groq_client.is_configured():
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="AI service not configured (missing GROQ_API_KEY)",
+        )
+
+    # If no text provided, we need to extract it first (OCR)
+    if not text:
+        return {
+            "status": "text_required",
+            "message": "Document text must be provided. Use /api/v1/ai/documents/extract first.",
+            "file_key": file_key,
+        }
+
+    try:
+        result = await groq_client.extract_form_data(
+            text=text,
+            document_type=document_type,
+        )
+        result["file_key"] = file_key
+        return result
+    except Exception as e:
+        logger.error("Form extraction failed", file_key=file_key, error=str(e))
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Form extraction failed: {str(e)}",
+        )
+
+
+@app.post("/api/v1/ai/documents/summarize", tags=["Documents"])
+async def summarize_document(
+    text: str,
+    file_key: str = "",
+    response: Response = None,
+    state: AppState = Depends(get_app_state),
+) -> Dict[str, Any]:
+    """
+    Generate a summary of a document using Groq AI.
+
+    Args:
+        text: Document text to summarize.
+        file_key: Optional OSS key for reference.
+
+    Returns:
+        Summary with key points, financial highlights, and action items.
+    """
+    if file_key and not validate_oss_key(file_key):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Invalid file_key format",
+        )
+
+    # Check if Groq is configured
+    groq_client = get_groq_client()
+    if not groq_client.is_configured():
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="AI service not configured (missing GROQ_API_KEY)",
+        )
+
+    if not text:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Document text is required",
+        )
+
+    try:
+        result = await groq_client.summarize_document(text=text)
+        if file_key:
+            result["file_key"] = file_key
+        return result
+    except Exception as e:
+        logger.error("Document summarization failed", error=str(e))
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Summarization failed: {str(e)}",
+        )
 
 
 # =============================================================================

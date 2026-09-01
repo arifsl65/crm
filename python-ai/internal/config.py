@@ -173,6 +173,12 @@ class Settings(BaseSettings):
     openai_api_key: str = ""
     openai_model: str = "gpt-4-turbo-preview"
 
+    # Groq AI (primary AI provider)
+    groq_api_key: str = ""
+    groq_model: str = "llama-3.1-70b-versatile"  # Fast and capable model
+    groq_max_tokens: int = 4096
+    groq_temperature: float = 0.1  # Low for consistent document analysis
+
     def get_cors_origins(self) -> list[str]:
         """Parse CORS origins from comma-separated string."""
         if not self.cors_allowed_origins:
