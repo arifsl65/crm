@@ -114,14 +114,33 @@ func NewCompaniesHouseHandler(db *database.Pool, redis *cache.Client, cfg config
 	}
 }
 
-// CompanySearchResult represents a company from search results.
+// chSearchItem is the internal struct matching CH API response (uses "title" for company name)
+type chSearchItem struct {
+	CompanyNumber     string   `json:"company_number"`
+	Title             string   `json:"title"` // CH search API uses "title"
+	CompanyStatus     string   `json:"company_status"`
+	CompanyType       string   `json:"company_type"`
+	DateOfCreation    string   `json:"date_of_creation,omitempty"`
+	AddressSnippet    string   `json:"address_snippet,omitempty"`
+	RegisteredAddress *Address `json:"registered_office_address,omitempty"`
+}
+
+// chSearchAPIResponse is the internal struct for CH API search response
+type chSearchAPIResponse struct {
+	Items        []chSearchItem `json:"items"`
+	TotalResults int            `json:"total_results"`
+	StartIndex   int            `json:"start_index"`
+	ItemsPerPage int            `json:"items_per_page"`
+}
+
+// CompanySearchResult represents a company in our API response (uses "company_name")
 type CompanySearchResult struct {
-	CompanyNumber     string  `json:"company_number"`
-	CompanyName       string  `json:"company_name"`
-	CompanyStatus     string  `json:"company_status"`
-	CompanyType       string  `json:"company_type"`
-	DateOfCreation    string  `json:"date_of_creation,omitempty"`
-	AddressSnippet    string  `json:"address_snippet,omitempty"`
+	CompanyNumber     string   `json:"company_number"`
+	CompanyName       string   `json:"company_name"` // Our API uses "company_name"
+	CompanyStatus     string   `json:"company_status"`
+	CompanyType       string   `json:"company_type"`
+	DateOfCreation    string   `json:"date_of_creation,omitempty"`
+	AddressSnippet    string   `json:"address_snippet,omitempty"`
 	RegisteredAddress *Address `json:"registered_office_address,omitempty"`
 }
 
@@ -227,14 +246,34 @@ func (h *CompaniesHouseHandler) Search(c *gin.Context) {
 
 	h.circuit.RecordSuccess()
 
-	var searchResponse CHSearchResponse
-	if err := json.Unmarshal(results, &searchResponse); err != nil {
+	// Parse CH API response (uses "title" for company name)
+	var chResponse chSearchAPIResponse
+	if err := json.Unmarshal(results, &chResponse); err != nil {
 		log.Error().Err(err).Msg("Failed to parse Companies House search response")
 		c.JSON(http.StatusInternalServerError, gin.H{
 			"error":   "parse_error",
 			"message": "Failed to parse search results",
 		})
 		return
+	}
+
+	// Transform to our API response format (maps "title" -> "company_name")
+	searchResponse := CHSearchResponse{
+		TotalResults: chResponse.TotalResults,
+		StartIndex:   chResponse.StartIndex,
+		ItemsPerPage: chResponse.ItemsPerPage,
+		Items:        make([]CompanySearchResult, len(chResponse.Items)),
+	}
+	for i, item := range chResponse.Items {
+		searchResponse.Items[i] = CompanySearchResult{
+			CompanyNumber:     item.CompanyNumber,
+			CompanyName:       item.Title, // Map title -> company_name
+			CompanyStatus:     item.CompanyStatus,
+			CompanyType:       item.CompanyType,
+			DateOfCreation:    item.DateOfCreation,
+			AddressSnippet:    item.AddressSnippet,
+			RegisteredAddress: item.RegisteredAddress,
+		}
 	}
 
 	// Cache the results
