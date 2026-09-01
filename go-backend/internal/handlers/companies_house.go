@@ -446,10 +446,24 @@ func (h *CompaniesHouseHandler) SyncClient(c *gin.Context) {
 		}
 	}
 
-	// Determine year end from accounting reference date
-	var yearEnd string
+	// Determine year end from accounting reference date (construct as current year date)
+	var yearEnd *time.Time
 	if profile.Accounts != nil && profile.Accounts.AccountingReferenceDate != nil {
-		yearEnd = fmt.Sprintf("%s/%s", profile.Accounts.AccountingReferenceDate.Day, profile.Accounts.AccountingReferenceDate.Month)
+		day := profile.Accounts.AccountingReferenceDate.Day
+		month := profile.Accounts.AccountingReferenceDate.Month
+		// Construct a date using current year
+		yearEndStr := fmt.Sprintf("%d-%s-%s", time.Now().Year(), month, day)
+		if t, err := time.Parse("2006-01-02", yearEndStr); err == nil {
+			yearEnd = &t
+		}
+	}
+
+	// Parse incorporation date
+	var incorporationDate *time.Time
+	if profile.DateOfCreation != "" {
+		if t, err := time.Parse("2006-01-02", profile.DateOfCreation); err == nil {
+			incorporationDate = &t
+		}
 	}
 
 	// Update client record
@@ -459,10 +473,10 @@ func (h *CompaniesHouseHandler) SyncClient(c *gin.Context) {
 			company_type = COALESCE($2, company_type),
 			incorporation_date = COALESCE($3, incorporation_date),
 			address = COALESCE(NULLIF($4, ''), address),
-			year_end = COALESCE(NULLIF($5, ''), year_end),
+			year_end = COALESCE($5, year_end),
 			updated_at = NOW()
 		WHERE id = $6 AND tenant_id = $7
-	`, profile.CompanyName, profile.CompanyType, profile.DateOfCreation, address, yearEnd, clientID, tenantID)
+	`, profile.CompanyName, profile.CompanyType, incorporationDate, address, yearEnd, clientID, tenantID)
 
 	if err != nil {
 		log.Error().Err(err).Str("client_id", clientID.String()).Msg("Failed to update client with CH data")
