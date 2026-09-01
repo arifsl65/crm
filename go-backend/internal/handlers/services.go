@@ -462,7 +462,10 @@ func (h *ServiceHandler) Update(c *gin.Context) {
 	argNum += 2
 
 	// Optimistic locking: If-Match header check
+	// Strip W/ prefix and quotes per RFC 7232 (e.g., W/"123" or "123" -> 123)
 	ifMatch := c.GetHeader("If-Match")
+	ifMatch = strings.TrimPrefix(ifMatch, "W/")
+	ifMatch = strings.Trim(ifMatch, `"`)
 	var expectedVersion int
 	hasIfMatch := false
 	if ifMatch != "" {

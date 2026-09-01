@@ -4,6 +4,7 @@ import { useEffect, useState } from 'react';
 import Link from 'next/link';
 import { useAuth } from '@/components/auth-guard';
 import { Client, Service, Document, getClient, getClientDocuments, getClientServices } from '@/lib/api';
+import { getStatusBadgeClass, formatStatus } from '@/lib/status';
 import { SkeletonCard } from '@/components';
 
 interface ClientDetailProps {
@@ -42,27 +43,6 @@ export default function ClientDetail({ clientId }: ClientDetailProps) {
     fetchData();
   }, [clientId]);
 
-  const getStatusBadgeClass = (status: string) => {
-    switch (status) {
-      case 'active':
-      case 'approved':
-      case 'completed':
-        return 'bg-green-100 text-green-800 dark:bg-green-900 dark:text-green-200';
-      case 'inactive':
-      case 'pending_review':
-      case 'in_progress':
-        return 'bg-yellow-100 text-yellow-800 dark:bg-yellow-900 dark:text-yellow-200';
-      case 'archived':
-      case 'rejected':
-      case 'cancelled':
-        return 'bg-red-100 text-red-800 dark:bg-red-900 dark:text-red-200';
-      case 'requested':
-      case 'not_started':
-        return 'bg-blue-100 text-blue-800 dark:bg-blue-900 dark:text-blue-200';
-      default:
-        return 'bg-gray-100 text-gray-800 dark:bg-gray-700 dark:text-gray-300';
-    }
-  };
 
   if (loading) {
     return (
@@ -259,7 +239,7 @@ export default function ClientDetail({ clientId }: ClientDetailProps) {
                       <td className="px-6 py-4 text-sm text-gray-900 dark:text-white">{service.name}</td>
                       <td className="px-6 py-4">
                         <span className={`px-2 py-1 text-xs font-medium rounded-full ${getStatusBadgeClass(service.status)}`}>
-                          {service.status.replace('_', ' ')}
+                          {formatStatus(service.status)}
                         </span>
                       </td>
                       <td className="px-6 py-4 text-sm text-gray-500 dark:text-gray-400 capitalize">{service.priority}</td>
@@ -294,7 +274,7 @@ export default function ClientDetail({ clientId }: ClientDetailProps) {
                       <td className="px-6 py-4 text-sm text-gray-900 dark:text-white">{doc.name}</td>
                       <td className="px-6 py-4">
                         <span className={`px-2 py-1 text-xs font-medium rounded-full ${getStatusBadgeClass(doc.status)}`}>
-                          {doc.status.replace('_', ' ')}
+                          {formatStatus(doc.status)}
                         </span>
                       </td>
                       <td className="px-6 py-4 text-sm text-gray-500 dark:text-gray-400">

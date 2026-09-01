@@ -127,6 +127,34 @@ type MTLSConfig struct {
 	ServerKey  string
 	ClientCert string
 	ClientKey  string
+	// fromKMS indicates whether the certificates were loaded from KMS
+	// (and thus need cleanup on shutdown)
+	fromKMS bool
+}
+
+// CleanupTempFiles removes temporary certificate files created when loading from KMS.
+// This should be called via defer after config.Load() in main.go.
+func (m *MTLSConfig) CleanupTempFiles() {
+	if !m.fromKMS {
+		return
+	}
+
+	// Remove temp files (ignore errors - best effort cleanup)
+	if m.CACert != "" {
+		if err := os.Remove(m.CACert); err == nil {
+			log.Debug().Str("file", m.CACert).Msg("Cleaned up mTLS CA cert temp file")
+		}
+	}
+	if m.ClientCert != "" {
+		if err := os.Remove(m.ClientCert); err == nil {
+			log.Debug().Str("file", m.ClientCert).Msg("Cleaned up mTLS client cert temp file")
+		}
+	}
+	if m.ClientKey != "" {
+		if err := os.Remove(m.ClientKey); err == nil {
+			log.Debug().Str("file", m.ClientKey).Msg("Cleaned up mTLS client key temp file")
+		}
+	}
 }
 
 // PythonAIConfig holds Python AI service connection settings.
@@ -275,6 +303,7 @@ func Load() (*Config, error) {
 		ServerKey:  getEnv("MTLS_SERVER_KEY", ""),
 		ClientCert: mtlsClientCert,
 		ClientKey:  mtlsClientKey,
+		fromKMS:    mtlsEnabled && kmsClient != nil, // Track if temp files need cleanup
 	}
 
 	// CORS config

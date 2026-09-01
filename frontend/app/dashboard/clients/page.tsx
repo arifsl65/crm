@@ -5,6 +5,7 @@ import Link from 'next/link';
 import { useRouter } from 'next/navigation';
 import { useAuth } from '@/components/auth-guard';
 import { Client, getClients } from '@/lib/api';
+import { getStatusBadgeClass } from '@/lib/status';
 import { SkeletonTable } from '@/components';
 
 export default function ClientsPage() {
@@ -37,18 +38,6 @@ export default function ClientsPage() {
     fetchClients();
   }, [fetchClients]);
 
-  const getStatusBadgeClass = (status: string) => {
-    switch (status) {
-      case 'active':
-        return 'bg-green-100 text-green-800 dark:bg-green-900 dark:text-green-200';
-      case 'inactive':
-        return 'bg-yellow-100 text-yellow-800 dark:bg-yellow-900 dark:text-yellow-200';
-      case 'archived':
-        return 'bg-gray-100 text-gray-800 dark:bg-gray-700 dark:text-gray-300';
-      default:
-        return 'bg-gray-100 text-gray-800 dark:bg-gray-700 dark:text-gray-300';
-    }
-  };
 
   return (
     <div className="min-h-screen bg-gray-50 dark:bg-slate-900">

@@ -346,7 +346,7 @@ export default function SecuritySettingsPage() {
                 Scan this QR code with your authenticator app (Google Authenticator, Authy, etc.)
               </p>
 
-              {qrCode && (
+              {qrCode && qrCode.startsWith('data:image') && (
                 <div className="flex justify-center mb-4">
                   <img src={qrCode} alt="2FA QR Code" className="w-48 h-48" />
                 </div>

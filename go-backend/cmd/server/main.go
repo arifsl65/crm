@@ -30,12 +30,41 @@ import (
 	"github.com/accountant-crm/go-backend/internal/middleware"
 )
 
+// Application holds all the application dependencies.
+// This struct reduces the number of parameters passed to setupRouter.
+type Application struct {
+	Config    *config.Config
+	DB        *database.Pool
+	Redis     *cache.Client
+	AIClient  *ai.Client
+	JWT       *auth.JWTManager
+	Audit     *audit.Logger
+	Handlers  *Handlers
+}
+
+// Handlers holds all HTTP handler instances.
+type Handlers struct {
+	Auth           *handlers.AuthHandler
+	Tenant         *handlers.TenantHandler
+	User           *handlers.UserHandler
+	Client         *handlers.ClientHandler
+	Service        *handlers.ServiceHandler
+	Document       *handlers.DocumentHandler
+	Dashboard      *handlers.DashboardHandler
+	ServiceType    *handlers.ServiceTypeHandler
+	DocumentType   *handlers.DocumentTypeHandler
+	AI             *handlers.AIHandler
+	CompaniesHouse *handlers.CompaniesHouseHandler
+}
+
 func main() {
 	// Load configuration
 	cfg, err := config.Load()
 	if err != nil {
 		log.Fatal().Err(err).Msg("Failed to load configuration")
 	}
+	// Cleanup mTLS temp files on shutdown (only if loaded from KMS)
+	defer cfg.MTLS.CleanupTempFiles()
 
 	// Configure logging
 	setupLogging(cfg.App)
@@ -81,6 +110,20 @@ func main() {
 	// Initialize session manager for token revocation
 	sessionManager := auth.NewSessionManager(db, cfg.JWT.RefreshTokenExpire)
 
+	// Start background goroutine to cleanup expired tokens daily
+	go func() {
+		ticker := time.NewTicker(24 * time.Hour)
+		defer ticker.Stop()
+		for range ticker.C {
+			count, err := sessionManager.CleanupExpiredTokens(context.Background())
+			if err != nil {
+				log.Error().Err(err).Msg("Failed to cleanup expired tokens")
+			} else {
+				log.Info().Int64("cleaned", count).Msg("Expired tokens cleanup")
+			}
+		}
+	}()
+
 	// Initialize email client (optional - can be nil if not configured)
 	var emailClient *email.Client
 	if cfg.Email.APIKey != "" {
@@ -100,21 +143,31 @@ func main() {
 	// Initialize audit logger
 	auditLogger := audit.NewLogger(db)
 
-	// Initialize handlers
-	authHandler := handlers.NewAuthHandler(db, jwtManager, sessionManager, emailClient, cfg.FrontendURL, authRateLimiter, auditLogger, redis)
-	tenantHandler := handlers.NewTenantHandler(db)
-	userHandler := handlers.NewUserHandler(db, sessionManager)
-	clientHandler := handlers.NewClientHandler(db, auditLogger)
-	serviceHandler := handlers.NewServiceHandler(db, auditLogger)
-	documentHandler := handlers.NewDocumentHandler(db, auditLogger)
-	dashboardHandler := handlers.NewDashboardHandler(db)
-	serviceTypeHandler := handlers.NewServiceTypeHandler(db, auditLogger)
-	documentTypeHandler := handlers.NewDocumentTypeHandler(db, auditLogger)
-	aiHandler := handlers.NewAIHandler(aiClient)
-	companiesHouseHandler := handlers.NewCompaniesHouseHandler(db, redis, cfg.CompaniesHouse)
+	// Build Application with all dependencies
+	app := &Application{
+		Config:   cfg,
+		DB:       db,
+		Redis:    redis,
+		AIClient: aiClient,
+		JWT:      jwtManager,
+		Audit:    auditLogger,
+		Handlers: &Handlers{
+			Auth:           handlers.NewAuthHandler(db, jwtManager, sessionManager, emailClient, cfg.FrontendURL, authRateLimiter, auditLogger, redis),
+			Tenant:         handlers.NewTenantHandler(db),
+			User:           handlers.NewUserHandler(db, sessionManager),
+			Client:         handlers.NewClientHandler(db, auditLogger),
+			Service:        handlers.NewServiceHandler(db, auditLogger),
+			Document:       handlers.NewDocumentHandler(db, auditLogger),
+			Dashboard:      handlers.NewDashboardHandler(db),
+			ServiceType:    handlers.NewServiceTypeHandler(db, auditLogger),
+			DocumentType:   handlers.NewDocumentTypeHandler(db, auditLogger),
+			AI:             handlers.NewAIHandler(aiClient),
+			CompaniesHouse: handlers.NewCompaniesHouseHandler(db, redis, cfg.CompaniesHouse),
+		},
+	}
 
 	// Setup Gin router
-	router := setupRouter(cfg, db, redis, aiClient, jwtManager, authHandler, tenantHandler, userHandler, clientHandler, serviceHandler, documentHandler, dashboardHandler, serviceTypeHandler, documentTypeHandler, aiHandler, companiesHouseHandler, auditLogger)
+	router := setupRouter(app)
 
 	// Create HTTP server
 	srv := &http.Server{
@@ -175,7 +228,10 @@ func setupLogging(cfg config.AppConfig) {
 }
 
 // setupRouter configures the Gin router with all routes.
-func setupRouter(cfg *config.Config, db *database.Pool, redis *cache.Client, aiClient *ai.Client, jwtManager *auth.JWTManager, authHandler *handlers.AuthHandler, tenantHandler *handlers.TenantHandler, userHandler *handlers.UserHandler, clientHandler *handlers.ClientHandler, serviceHandler *handlers.ServiceHandler, documentHandler *handlers.DocumentHandler, dashboardHandler *handlers.DashboardHandler, serviceTypeHandler *handlers.ServiceTypeHandler, documentTypeHandler *handlers.DocumentTypeHandler, aiHandler *handlers.AIHandler, companiesHouseHandler *handlers.CompaniesHouseHandler, auditLogger *audit.Logger) *gin.Engine {
+func setupRouter(app *Application) *gin.Engine {
+	cfg := app.Config
+	h := app.Handlers
+
 	// Set Gin mode
 	if cfg.App.Env == "production" {
 		gin.SetMode(gin.ReleaseMode)
@@ -190,7 +246,7 @@ func setupRouter(cfg *config.Config, db *database.Pool, redis *cache.Client, aiC
 	router.Use(middleware.DynamicCORS(middleware.CORSConfig{
 		StaticOrigins:    cfg.CORS.AllowedOrigins,
 		AllowCredentials: cfg.CORS.AllowCredentials,
-		DB:               db,
+		DB:               app.DB,
 		CacheTTL:         5 * time.Minute,
 	}))
 
@@ -199,17 +255,17 @@ func setupRouter(cfg *config.Config, db *database.Pool, redis *cache.Client, aiC
 
 	// Rate limiting (applied to all routes except health checks)
 	if cfg.RateLimit.Enabled {
-		router.Use(rateLimiter(cfg.RateLimit, redis))
+		router.Use(rateLimiter(cfg.RateLimit, app.Redis))
 	}
 
 	// Health endpoints (no auth required)
 	router.GET("/health", healthHandler())
 	router.HEAD("/health", healthHandler())
-	router.GET("/ready", readyHandler(db, redis, aiClient))
+	router.GET("/ready", readyHandler(app.DB, app.Redis, app.AIClient))
 
 	// Metrics endpoint - protected with bearer token (Fix #12)
 	// Only accessible with X-Metrics-Token header matching METRICS_TOKEN env var
-	router.GET("/metrics", metricsAuthMiddleware(cfg.App), metricsHandler(db, redis))
+	router.GET("/metrics", metricsAuthMiddleware(cfg.App), metricsHandler(app.DB, app.Redis))
 
 	// API v1 routes
 	v1 := router.Group("/api/v1")
@@ -217,47 +273,47 @@ func setupRouter(cfg *config.Config, db *database.Pool, redis *cache.Client, aiC
 		// Auth routes (public)
 		authRoutes := v1.Group("/auth")
 		{
-			authRoutes.POST("/login", authHandler.Login)
-			authRoutes.POST("/register", authHandler.Register)
-			authRoutes.POST("/refresh", authHandler.Refresh)
-			authRoutes.POST("/reset-password", authHandler.ForgotPassword)
-			authRoutes.POST("/reset-password/confirm", authHandler.ResetPassword)
-			authRoutes.POST("/magic-link", authHandler.SendMagicLink)
-			authRoutes.GET("/magic-link", authHandler.VerifyMagicLink)
-			authRoutes.POST("/invite-accept", authHandler.InviteAccept) // Accept invite and set password
+			authRoutes.POST("/login", h.Auth.Login)
+			authRoutes.POST("/register", h.Auth.Register)
+			authRoutes.POST("/refresh", h.Auth.Refresh)
+			authRoutes.POST("/reset-password", h.Auth.ForgotPassword)
+			authRoutes.POST("/reset-password/confirm", h.Auth.ResetPassword)
+			authRoutes.POST("/magic-link", h.Auth.SendMagicLink)
+			authRoutes.GET("/magic-link", h.Auth.VerifyMagicLink)
+			authRoutes.POST("/invite-accept", h.Auth.InviteAccept) // Accept invite and set password
 			// 2FA backup code verification (public - for lockout recovery)
-			authRoutes.POST("/2fa/backup-codes/verify", authHandler.VerifyBackupCode)
+			authRoutes.POST("/2fa/backup-codes/verify", h.Auth.VerifyBackupCode)
 		}
 
 		// Auth routes (protected)
 		authProtected := v1.Group("/auth")
-		authProtected.Use(middleware.JWTAuth(jwtManager, redis))
-		authProtected.Use(middleware.TenantRLS(db)) // Wire RLS context
+		authProtected.Use(middleware.JWTAuth(app.JWT, app.Redis))
+		authProtected.Use(middleware.TenantRLS(app.DB)) // Wire RLS context
 		authProtected.Use(middleware.AuditLog(middleware.AuditLogConfig{
-			Logger:    auditLogger,
+			Logger:    app.Audit,
 			SkipPaths: []string{"/api/v1/auth/refresh"},
 		}))
 		{
-			authProtected.POST("/logout", authHandler.Logout)
-			authProtected.GET("/me", authHandler.GetMe)
-			authProtected.PATCH("/me", authHandler.UpdateMe)
-			authProtected.PATCH("/password", authHandler.ChangePassword)
-			authProtected.GET("/sessions", authHandler.GetSessions)
+			authProtected.POST("/logout", h.Auth.Logout)
+			authProtected.GET("/me", h.Auth.GetMe)
+			authProtected.PATCH("/me", h.Auth.UpdateMe)
+			authProtected.PATCH("/password", h.Auth.ChangePassword)
+			authProtected.GET("/sessions", h.Auth.GetSessions)
 			// Token family revocation (for theft detection)
-			authProtected.POST("/refresh/revoke-family", authHandler.RevokeTokenFamily)
+			authProtected.POST("/refresh/revoke-family", h.Auth.RevokeTokenFamily)
 			// 2FA endpoints
-			authProtected.POST("/2fa/setup", authHandler.Setup2FA)
-			authProtected.POST("/2fa/verify", authHandler.Verify2FA)
-			authProtected.DELETE("/2fa", authHandler.Disable2FA)
-			authProtected.POST("/2fa/backup-codes", authHandler.GenerateBackupCodes)
+			authProtected.POST("/2fa/setup", h.Auth.Setup2FA)
+			authProtected.POST("/2fa/verify", h.Auth.Verify2FA)
+			authProtected.DELETE("/2fa", h.Auth.Disable2FA)
+			authProtected.POST("/2fa/backup-codes", h.Auth.GenerateBackupCodes)
 		}
 
 		// Protected routes (require authentication)
 		protected := v1.Group("")
-		protected.Use(middleware.JWTAuth(jwtManager, redis))
-		protected.Use(middleware.TenantRLS(db)) // Wire RLS context for tenant isolation
+		protected.Use(middleware.JWTAuth(app.JWT, app.Redis))
+		protected.Use(middleware.TenantRLS(app.DB)) // Wire RLS context for tenant isolation
 		protected.Use(middleware.AuditLog(middleware.AuditLogConfig{
-			Logger: auditLogger,
+			Logger: app.Audit,
 		}))
 
 		// Admin routes (super_admin operations)
@@ -266,191 +322,191 @@ func setupRouter(cfg *config.Config, db *database.Pool, redis *cache.Client, aiC
 			// Tenant management routes
 			tenants := admin.Group("/tenants")
 			{
-				tenants.GET("", tenantHandler.List)
-				tenants.POST("", middleware.RequireRole("super_admin"), tenantHandler.Create)
-				tenants.GET("/:id", middleware.ValidateUUID("id"), tenantHandler.Get)
-				tenants.PATCH("/:id", middleware.ValidateUUID("id"), middleware.RequireRole("super_admin", "tenant_admin"), tenantHandler.Update)
-				tenants.DELETE("/:id", middleware.ValidateUUID("id"), middleware.RequireRole("super_admin"), tenantHandler.Delete)
+				tenants.GET("", h.Tenant.List)
+				tenants.POST("", middleware.RequireRole("super_admin"), h.Tenant.Create)
+				tenants.GET("/:id", middleware.ValidateUUID("id"), h.Tenant.Get)
+				tenants.PATCH("/:id", middleware.ValidateUUID("id"), middleware.RequireRole("super_admin", "tenant_admin"), h.Tenant.Update)
+				tenants.DELETE("/:id", middleware.ValidateUUID("id"), middleware.RequireRole("super_admin"), h.Tenant.Delete)
 			}
 		}
 
 		// User routes
 		users := protected.Group("/users")
 		{
-			users.GET("", userHandler.List)
-			users.POST("", middleware.RequireRole("super_admin", "tenant_admin"), userHandler.Create)
-			users.GET("/:id", middleware.ValidateUUID("id"), userHandler.Get)
-			users.PATCH("/:id", middleware.ValidateUUID("id"), userHandler.Update)
-			users.DELETE("/:id", middleware.ValidateUUID("id"), middleware.RequireRole("super_admin", "tenant_admin"), userHandler.Delete)
-			users.POST("/:id/restore", middleware.ValidateUUID("id"), middleware.RequireRole("super_admin", "tenant_admin"), userHandler.Restore)
-			users.DELETE("/:id/2fa", middleware.ValidateUUID("id"), middleware.RequireRole("super_admin", "tenant_admin"), userHandler.Reset2FA)
+			users.GET("", h.User.List)
+			users.POST("", middleware.RequireRole("super_admin", "tenant_admin"), h.User.Create)
+			users.GET("/:id", middleware.ValidateUUID("id"), h.User.Get)
+			users.PATCH("/:id", middleware.ValidateUUID("id"), h.User.Update)
+			users.DELETE("/:id", middleware.ValidateUUID("id"), middleware.RequireRole("super_admin", "tenant_admin"), h.User.Delete)
+			users.POST("/:id/restore", middleware.ValidateUUID("id"), middleware.RequireRole("super_admin", "tenant_admin"), h.User.Restore)
+			users.DELETE("/:id/2fa", middleware.ValidateUUID("id"), middleware.RequireRole("super_admin", "tenant_admin"), h.User.Reset2FA)
 		}
 
 		// Client routes
 		clients := protected.Group("/clients")
 		{
-			clients.GET("", clientHandler.List)
-			clients.GET("/suppressed", clientHandler.ListSuppressed)
-			clients.POST("/bulk-reassign", middleware.RequireRole("super_admin", "tenant_admin"), clientHandler.BulkReassign)
-			clients.POST("", middleware.RequireRole("super_admin", "tenant_admin", "staff"), clientHandler.Create)
-			clients.GET("/:id", middleware.ValidateUUID("id"), clientHandler.Get)
-			clients.PATCH("/:id", middleware.ValidateUUID("id"), middleware.RequireRole("super_admin", "tenant_admin", "staff"), clientHandler.Update)
-			clients.DELETE("/:id", middleware.ValidateUUID("id"), middleware.RequireRole("super_admin", "tenant_admin"), clientHandler.Delete)
-			clients.POST("/:id/restore", middleware.ValidateUUID("id"), middleware.RequireRole("super_admin", "tenant_admin"), clientHandler.Restore)
-			clients.GET("/:id/documents", middleware.ValidateUUID("id"), clientHandler.GetDocuments)
-			clients.GET("/:id/services", middleware.ValidateUUID("id"), clientHandler.GetServices)
-			clients.GET("/:id/emails", middleware.ValidateUUID("id"), clientHandler.GetEmails)
-			clients.POST("/:id/assign", middleware.ValidateUUID("id"), middleware.RequireRole("super_admin", "tenant_admin"), clientHandler.AssignStaff)
+			clients.GET("", h.Client.List)
+			clients.GET("/suppressed", h.Client.ListSuppressed)
+			clients.POST("/bulk-reassign", middleware.RequireRole("super_admin", "tenant_admin"), h.Client.BulkReassign)
+			clients.POST("", middleware.RequireRole("super_admin", "tenant_admin", "staff"), h.Client.Create)
+			clients.GET("/:id", middleware.ValidateUUID("id"), h.Client.Get)
+			clients.PATCH("/:id", middleware.ValidateUUID("id"), middleware.RequireRole("super_admin", "tenant_admin", "staff"), h.Client.Update)
+			clients.DELETE("/:id", middleware.ValidateUUID("id"), middleware.RequireRole("super_admin", "tenant_admin"), h.Client.Delete)
+			clients.POST("/:id/restore", middleware.ValidateUUID("id"), middleware.RequireRole("super_admin", "tenant_admin"), h.Client.Restore)
+			clients.GET("/:id/documents", middleware.ValidateUUID("id"), h.Client.GetDocuments)
+			clients.GET("/:id/services", middleware.ValidateUUID("id"), h.Client.GetServices)
+			clients.GET("/:id/emails", middleware.ValidateUUID("id"), h.Client.GetEmails)
+			clients.POST("/:id/assign", middleware.ValidateUUID("id"), middleware.RequireRole("super_admin", "tenant_admin"), h.Client.AssignStaff)
 			// Client Notes
-			clients.GET("/:id/notes", middleware.ValidateUUID("id"), clientHandler.ListNotes)
-			clients.POST("/:id/notes", middleware.ValidateUUID("id"), clientHandler.CreateNote)
-			clients.PATCH("/:id/notes/:noteId", middleware.ValidateUUID("id"), middleware.ValidateUUID("noteId"), clientHandler.UpdateNote)
-			clients.DELETE("/:id/notes/:noteId", middleware.ValidateUUID("id"), middleware.ValidateUUID("noteId"), clientHandler.DeleteNote)
+			clients.GET("/:id/notes", middleware.ValidateUUID("id"), h.Client.ListNotes)
+			clients.POST("/:id/notes", middleware.ValidateUUID("id"), h.Client.CreateNote)
+			clients.PATCH("/:id/notes/:noteId", middleware.ValidateUUID("id"), middleware.ValidateUUID("noteId"), h.Client.UpdateNote)
+			clients.DELETE("/:id/notes/:noteId", middleware.ValidateUUID("id"), middleware.ValidateUUID("noteId"), h.Client.DeleteNote)
 		}
 
 		// Service routes
 		services := protected.Group("/services")
 		{
-			services.GET("", serviceHandler.List)
-			services.POST("", middleware.RequireRole("super_admin", "tenant_admin", "staff"), serviceHandler.Create)
-			services.GET("/deadlines", serviceHandler.GetDeadlines)
-			services.GET("/alerts", serviceHandler.GetAlerts)
-			services.POST("/bulk-update", middleware.RequireRole("super_admin", "tenant_admin"), serviceHandler.BulkUpdate)
-			services.PATCH("/reorder", serviceHandler.Reorder)
-			services.GET("/:id", middleware.ValidateUUID("id"), serviceHandler.Get)
-			services.PATCH("/:id", middleware.ValidateUUID("id"), middleware.RequireRole("super_admin", "tenant_admin", "staff"), serviceHandler.Update)
-			services.PATCH("/:id/status", middleware.ValidateUUID("id"), serviceHandler.UpdateStatus)
-			services.POST("/:id/complete", middleware.ValidateUUID("id"), serviceHandler.Complete)
-			services.POST("/:id/hmrc-mark", middleware.ValidateUUID("id"), serviceHandler.MarkHMRC)
-			services.DELETE("/:id", middleware.ValidateUUID("id"), middleware.RequireRole("super_admin", "tenant_admin"), serviceHandler.Delete)
+			services.GET("", h.Service.List)
+			services.POST("", middleware.RequireRole("super_admin", "tenant_admin", "staff"), h.Service.Create)
+			services.GET("/deadlines", h.Service.GetDeadlines)
+			services.GET("/alerts", h.Service.GetAlerts)
+			services.POST("/bulk-update", middleware.RequireRole("super_admin", "tenant_admin"), h.Service.BulkUpdate)
+			services.PATCH("/reorder", h.Service.Reorder)
+			services.GET("/:id", middleware.ValidateUUID("id"), h.Service.Get)
+			services.PATCH("/:id", middleware.ValidateUUID("id"), middleware.RequireRole("super_admin", "tenant_admin", "staff"), h.Service.Update)
+			services.PATCH("/:id/status", middleware.ValidateUUID("id"), h.Service.UpdateStatus)
+			services.POST("/:id/complete", middleware.ValidateUUID("id"), h.Service.Complete)
+			services.POST("/:id/hmrc-mark", middleware.ValidateUUID("id"), h.Service.MarkHMRC)
+			services.DELETE("/:id", middleware.ValidateUUID("id"), middleware.RequireRole("super_admin", "tenant_admin"), h.Service.Delete)
 		}
 
 		// Document routes
 		documents := protected.Group("/documents")
 		{
-			documents.GET("", documentHandler.List)
-			documents.POST("", middleware.RequireRole("super_admin", "tenant_admin", "staff"), documentHandler.Create)
-			documents.POST("/bulk-request", middleware.RequireRole("super_admin", "tenant_admin", "staff"), documentHandler.BulkRequest)
-			documents.POST("/bulk-approve", middleware.RequireRole("super_admin", "tenant_admin"), documentHandler.BulkApprove)
-			documents.GET("/firm", documentHandler.ListFirm)
-			documents.POST("/upload-url", middleware.RequireRole("super_admin", "tenant_admin", "staff"), documentHandler.GenerateUploadURL)
-			documents.POST("/qr", middleware.RequireRole("super_admin", "tenant_admin", "staff"), documentHandler.GenerateQRToken)
-			documents.GET("/:id", middleware.ValidateUUID("id"), documentHandler.Get)
-			documents.PATCH("/:id", middleware.ValidateUUID("id"), middleware.RequireRole("super_admin", "tenant_admin", "staff"), documentHandler.Update)
-			documents.POST("/:id/approve", middleware.ValidateUUID("id"), middleware.RequireRole("super_admin", "tenant_admin"), documentHandler.Approve)
-			documents.POST("/:id/reject", middleware.ValidateUUID("id"), middleware.RequireRole("super_admin", "tenant_admin"), documentHandler.Reject)
-			documents.GET("/:id/versions", middleware.ValidateUUID("id"), documentHandler.GetVersions)
-			documents.POST("/:id/versions/:versionId/restore", middleware.ValidateUUID("id"), documentHandler.RestoreVersion)
-			documents.POST("/:id/upload", middleware.ValidateUUID("id"), documentHandler.Upload)
-			documents.GET("/:id/download", middleware.ValidateUUID("id"), documentHandler.Download)
+			documents.GET("", h.Document.List)
+			documents.POST("", middleware.RequireRole("super_admin", "tenant_admin", "staff"), h.Document.Create)
+			documents.POST("/bulk-request", middleware.RequireRole("super_admin", "tenant_admin", "staff"), h.Document.BulkRequest)
+			documents.POST("/bulk-approve", middleware.RequireRole("super_admin", "tenant_admin"), h.Document.BulkApprove)
+			documents.GET("/firm", h.Document.ListFirm)
+			documents.POST("/upload-url", middleware.RequireRole("super_admin", "tenant_admin", "staff"), h.Document.GenerateUploadURL)
+			documents.POST("/qr", middleware.RequireRole("super_admin", "tenant_admin", "staff"), h.Document.GenerateQRToken)
+			documents.GET("/:id", middleware.ValidateUUID("id"), h.Document.Get)
+			documents.PATCH("/:id", middleware.ValidateUUID("id"), middleware.RequireRole("super_admin", "tenant_admin", "staff"), h.Document.Update)
+			documents.POST("/:id/approve", middleware.ValidateUUID("id"), middleware.RequireRole("super_admin", "tenant_admin"), h.Document.Approve)
+			documents.POST("/:id/reject", middleware.ValidateUUID("id"), middleware.RequireRole("super_admin", "tenant_admin"), h.Document.Reject)
+			documents.GET("/:id/versions", middleware.ValidateUUID("id"), h.Document.GetVersions)
+			documents.POST("/:id/versions/:versionId/restore", middleware.ValidateUUID("id"), h.Document.RestoreVersion)
+			documents.POST("/:id/upload", middleware.ValidateUUID("id"), h.Document.Upload)
+			documents.GET("/:id/download", middleware.ValidateUUID("id"), h.Document.Download)
 		}
 
 		// QR upload routes (public - no auth required)
 		qr := v1.Group("/documents/qr")
 		{
-			qr.GET("/:token", documentHandler.GetQRToken)
-			qr.POST("/:token/upload", documentHandler.UploadViaQR)
+			qr.GET("/:token", h.Document.GetQRToken)
+			qr.POST("/:token/upload", h.Document.UploadViaQR)
 		}
 
 		// Dashboard routes
 		dashboard := protected.Group("/dashboard")
 		{
-			dashboard.GET("/stats", dashboardHandler.GetStats)
-			dashboard.GET("/deadlines", dashboardHandler.GetDeadlines)
-			dashboard.GET("/pending-documents", dashboardHandler.GetPendingDocuments)
-			dashboard.GET("/workload", middleware.RequireRole("super_admin", "tenant_admin"), dashboardHandler.GetClientWorkload)
-			dashboard.GET("/recent-clients", dashboardHandler.GetRecentClients)
-			dashboard.GET("/kanban", dashboardHandler.GetKanban)
+			dashboard.GET("/stats", h.Dashboard.GetStats)
+			dashboard.GET("/deadlines", h.Dashboard.GetDeadlines)
+			dashboard.GET("/pending-documents", h.Dashboard.GetPendingDocuments)
+			dashboard.GET("/workload", middleware.RequireRole("super_admin", "tenant_admin"), h.Dashboard.GetClientWorkload)
+			dashboard.GET("/recent-clients", h.Dashboard.GetRecentClients)
+			dashboard.GET("/kanban", h.Dashboard.GetKanban)
 		}
 
 		// Service Type routes
 		serviceTypes := protected.Group("/service-types")
 		{
-			serviceTypes.GET("", serviceTypeHandler.List)
-			serviceTypes.GET("/categories", serviceTypeHandler.GetCategories)
-			serviceTypes.POST("", middleware.RequireRole("super_admin", "tenant_admin"), serviceTypeHandler.Create)
-			serviceTypes.PATCH("/reorder", middleware.RequireRole("super_admin", "tenant_admin"), serviceTypeHandler.Reorder)
-			serviceTypes.GET("/:id", middleware.ValidateUUID("id"), serviceTypeHandler.Get)
-			serviceTypes.PATCH("/:id", middleware.ValidateUUID("id"), middleware.RequireRole("super_admin", "tenant_admin"), serviceTypeHandler.Update)
-			serviceTypes.DELETE("/:id", middleware.ValidateUUID("id"), middleware.RequireRole("super_admin", "tenant_admin"), serviceTypeHandler.Delete)
-			serviceTypes.POST("/:id/clone", middleware.ValidateUUID("id"), middleware.RequireRole("super_admin", "tenant_admin"), serviceTypeHandler.Clone)
+			serviceTypes.GET("", h.ServiceType.List)
+			serviceTypes.GET("/categories", h.ServiceType.GetCategories)
+			serviceTypes.POST("", middleware.RequireRole("super_admin", "tenant_admin"), h.ServiceType.Create)
+			serviceTypes.PATCH("/reorder", middleware.RequireRole("super_admin", "tenant_admin"), h.ServiceType.Reorder)
+			serviceTypes.GET("/:id", middleware.ValidateUUID("id"), h.ServiceType.Get)
+			serviceTypes.PATCH("/:id", middleware.ValidateUUID("id"), middleware.RequireRole("super_admin", "tenant_admin"), h.ServiceType.Update)
+			serviceTypes.DELETE("/:id", middleware.ValidateUUID("id"), middleware.RequireRole("super_admin", "tenant_admin"), h.ServiceType.Delete)
+			serviceTypes.POST("/:id/clone", middleware.ValidateUUID("id"), middleware.RequireRole("super_admin", "tenant_admin"), h.ServiceType.Clone)
 			// Service Requirements
-			serviceTypes.GET("/:id/requirements", middleware.ValidateUUID("id"), serviceTypeHandler.GetRequirements)
-			serviceTypes.POST("/:id/requirements", middleware.ValidateUUID("id"), middleware.RequireRole("super_admin", "tenant_admin"), serviceTypeHandler.AddRequirement)
-			serviceTypes.DELETE("/:id/requirements/:docTypeId", middleware.ValidateUUID("id"), middleware.ValidateUUID("docTypeId"), middleware.RequireRole("super_admin", "tenant_admin"), serviceTypeHandler.RemoveRequirement)
+			serviceTypes.GET("/:id/requirements", middleware.ValidateUUID("id"), h.ServiceType.GetRequirements)
+			serviceTypes.POST("/:id/requirements", middleware.ValidateUUID("id"), middleware.RequireRole("super_admin", "tenant_admin"), h.ServiceType.AddRequirement)
+			serviceTypes.DELETE("/:id/requirements/:docTypeId", middleware.ValidateUUID("id"), middleware.ValidateUUID("docTypeId"), middleware.RequireRole("super_admin", "tenant_admin"), h.ServiceType.RemoveRequirement)
 		}
 
 		// Document Type routes
 		documentTypes := protected.Group("/document-types")
 		{
-			documentTypes.GET("", documentTypeHandler.List)
-			documentTypes.GET("/categories", documentTypeHandler.GetCategories)
-			documentTypes.POST("", middleware.RequireRole("super_admin", "tenant_admin"), documentTypeHandler.Create)
-			documentTypes.GET("/:id", middleware.ValidateUUID("id"), documentTypeHandler.Get)
-			documentTypes.PATCH("/:id", middleware.ValidateUUID("id"), middleware.RequireRole("super_admin", "tenant_admin"), documentTypeHandler.Update)
-			documentTypes.DELETE("/:id", middleware.ValidateUUID("id"), middleware.RequireRole("super_admin", "tenant_admin"), documentTypeHandler.Delete)
+			documentTypes.GET("", h.DocumentType.List)
+			documentTypes.GET("/categories", h.DocumentType.GetCategories)
+			documentTypes.POST("", middleware.RequireRole("super_admin", "tenant_admin"), h.DocumentType.Create)
+			documentTypes.GET("/:id", middleware.ValidateUUID("id"), h.DocumentType.Get)
+			documentTypes.PATCH("/:id", middleware.ValidateUUID("id"), middleware.RequireRole("super_admin", "tenant_admin"), h.DocumentType.Update)
+			documentTypes.DELETE("/:id", middleware.ValidateUUID("id"), middleware.RequireRole("super_admin", "tenant_admin"), h.DocumentType.Delete)
 		}
 
 		// AI routes (proxy to Python AI service)
 		aiRoutes := protected.Group("/ai")
 		{
 			// Chat AI
-			aiRoutes.POST("/chat", aiHandler.Chat)
-			aiRoutes.POST("/chat/stream", aiHandler.ChatStream)
-			aiRoutes.GET("/chat/history", aiHandler.GetChatHistory)
-			aiRoutes.DELETE("/chat/:id", aiHandler.DeleteChat)
+			aiRoutes.POST("/chat", h.AI.Chat)
+			aiRoutes.POST("/chat/stream", h.AI.ChatStream)
+			aiRoutes.GET("/chat/history", h.AI.GetChatHistory)
+			aiRoutes.DELETE("/chat/:id", h.AI.DeleteChat)
 
 			// Document AI
-			aiRoutes.POST("/documents/extract", aiHandler.ExtractDocument)
-			aiRoutes.POST("/documents/classify", aiHandler.ClassifyDocument)
-			aiRoutes.POST("/documents/summarize", aiHandler.SummarizeDocument)
-			aiRoutes.POST("/documents/rename", aiHandler.RenameDocument)
+			aiRoutes.POST("/documents/extract", h.AI.ExtractDocument)
+			aiRoutes.POST("/documents/classify", h.AI.ClassifyDocument)
+			aiRoutes.POST("/documents/summarize", h.AI.SummarizeDocument)
+			aiRoutes.POST("/documents/rename", h.AI.RenameDocument)
 
 			// Email AI
-			aiRoutes.POST("/emails/summarize", aiHandler.SummarizeEmail)
-			aiRoutes.POST("/emails/sentiment", aiHandler.AnalyzeEmailSentiment)
-			aiRoutes.POST("/emails/promises", aiHandler.ExtractEmailPromises)
-			aiRoutes.POST("/emails/draft", aiHandler.NotImplementedAI)
-			aiRoutes.POST("/emails/match-client", aiHandler.NotImplementedAI)
-			aiRoutes.POST("/emails/thread-summary", aiHandler.NotImplementedAI)
-			aiRoutes.POST("/emails/find-alternate", aiHandler.NotImplementedAI)
+			aiRoutes.POST("/emails/summarize", h.AI.SummarizeEmail)
+			aiRoutes.POST("/emails/sentiment", h.AI.AnalyzeEmailSentiment)
+			aiRoutes.POST("/emails/promises", h.AI.ExtractEmailPromises)
+			aiRoutes.POST("/emails/draft", h.AI.NotImplementedAI)
+			aiRoutes.POST("/emails/match-client", h.AI.NotImplementedAI)
+			aiRoutes.POST("/emails/thread-summary", h.AI.NotImplementedAI)
+			aiRoutes.POST("/emails/find-alternate", h.AI.NotImplementedAI)
 
 			// Form AI
-			aiRoutes.POST("/forms/extract", aiHandler.ExtractFormData)
-			aiRoutes.POST("/forms/vat", aiHandler.AutoFillVAT)
-			aiRoutes.POST("/forms/ct600", aiHandler.AutoFillCT600)
-			aiRoutes.POST("/forms/sa", aiHandler.AutoFillSA)
+			aiRoutes.POST("/forms/extract", h.AI.ExtractFormData)
+			aiRoutes.POST("/forms/vat", h.AI.AutoFillVAT)
+			aiRoutes.POST("/forms/ct600", h.AI.AutoFillCT600)
+			aiRoutes.POST("/forms/sa", h.AI.AutoFillSA)
 
 			// Risk AI
-			aiRoutes.POST("/risk/client", aiHandler.AnalyzeClientRisk)
-			aiRoutes.POST("/risk/service", aiHandler.AnalyzeServiceRisk)
+			aiRoutes.POST("/risk/client", h.AI.AnalyzeClientRisk)
+			aiRoutes.POST("/risk/service", h.AI.AnalyzeServiceRisk)
 
 			// Template AI
-			aiRoutes.POST("/templates/generate", aiHandler.NotImplementedAI)
+			aiRoutes.POST("/templates/generate", h.AI.NotImplementedAI)
 
 			// Client AI
-			aiRoutes.POST("/clients/duplicate-check", aiHandler.NotImplementedAI)
+			aiRoutes.POST("/clients/duplicate-check", h.AI.NotImplementedAI)
 
 			// Service AI
-			aiRoutes.POST("/services/auto-name", aiHandler.NotImplementedAI)
-			aiRoutes.POST("/services/completion-summary", aiHandler.NotImplementedAI)
+			aiRoutes.POST("/services/auto-name", h.AI.NotImplementedAI)
+			aiRoutes.POST("/services/completion-summary", h.AI.NotImplementedAI)
 
 			// Dashboard AI
-			aiRoutes.POST("/dashboard/troublemakers", aiHandler.NotImplementedAI)
-			aiRoutes.POST("/dashboard/anomalies", aiHandler.NotImplementedAI)
-			aiRoutes.POST("/staff/activity", aiHandler.NotImplementedAI)
+			aiRoutes.POST("/dashboard/troublemakers", h.AI.NotImplementedAI)
+			aiRoutes.POST("/dashboard/anomalies", h.AI.NotImplementedAI)
+			aiRoutes.POST("/staff/activity", h.AI.NotImplementedAI)
 
 			// AI Jobs
-			aiRoutes.GET("/jobs/:id", middleware.ValidateUUID("id"), aiHandler.GetJobStatus)
+			aiRoutes.GET("/jobs/:id", middleware.ValidateUUID("id"), h.AI.GetJobStatus)
 		}
 
 		// Companies House routes
 		chRoutes := protected.Group("/ch")
 		{
-			chRoutes.GET("/search", companiesHouseHandler.Search)
-			chRoutes.GET("/company/:number", companiesHouseHandler.GetCompany)
-			chRoutes.POST("/sync/:clientId", middleware.ValidateUUID("clientId"), companiesHouseHandler.SyncClient)
-			chRoutes.GET("/status", companiesHouseHandler.Status)
+			chRoutes.GET("/search", h.CompaniesHouse.Search)
+			chRoutes.GET("/company/:number", h.CompaniesHouse.GetCompany)
+			chRoutes.POST("/sync/:clientId", middleware.ValidateUUID("clientId"), h.CompaniesHouse.SyncClient)
+			chRoutes.GET("/status", h.CompaniesHouse.Status)
 		}
 	}
 
