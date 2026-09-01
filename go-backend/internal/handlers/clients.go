@@ -85,6 +85,17 @@ type UpdateClientRequest struct {
 	Status            *string `json:"status,omitempty"`
 }
 
+// escapeLikePattern escapes special LIKE/ILIKE pattern characters
+// Fix #3: Prevents LIKE pattern injection attacks (%, _, \)
+func escapeLikePattern(s string) string {
+	// Escape backslash first (it's the escape character)
+	s = strings.ReplaceAll(s, `\`, `\\`)
+	// Escape wildcards
+	s = strings.ReplaceAll(s, `%`, `\%`)
+	s = strings.ReplaceAll(s, `_`, `\_`)
+	return s
+}
+
 // List returns all clients for the tenant (staff-scoped)
 // GET /api/v1/clients
 func (h *ClientHandler) List(c *gin.Context) {
@@ -154,6 +165,7 @@ func (h *ClientHandler) List(c *gin.Context) {
 	}
 
 	// Search filter
+	// Fix #3: Escape LIKE pattern special characters to prevent pattern injection
 	if search != "" {
 		query.WriteString(` AND (c.company_name ILIKE $`)
 		query.WriteString(strconv.Itoa(argNum))
@@ -161,8 +173,8 @@ func (h *ClientHandler) List(c *gin.Context) {
 		query.WriteString(strconv.Itoa(argNum))
 		query.WriteString(` OR c.email ILIKE $`)
 		query.WriteString(strconv.Itoa(argNum))
-		query.WriteString(`)`)
-		args = append(args, "%"+search+"%")
+		query.WriteString(`) ESCAPE '\'`)
+		args = append(args, "%"+escapeLikePattern(search)+"%")
 		argNum++
 	}
 
@@ -313,6 +325,7 @@ func (h *ClientHandler) ListSuppressed(c *gin.Context) {
 // GET /api/v1/clients/:id
 func (h *ClientHandler) Get(c *gin.Context) {
 	tenantID, _ := middleware.GetTenantID(c)
+	userID, _ := middleware.GetUserID(c)
 	role, _ := middleware.GetRole(c)
 
 	// Get TenantDB for RLS-protected operations
@@ -344,7 +357,21 @@ func (h *ClientHandler) Get(c *gin.Context) {
 			WHERE id = $1
 		`
 		args = []interface{}{clientID}
+	} else if role == "staff" {
+		// Fix #1: Staff can only view clients they are assigned to
+		sql = `
+			SELECT c.id, c.tenant_id, c.user_id, c.company_name, c.contact_name,
+			       c.email, c.phone, c.address, c.year_end, c.utr, c.company_number,
+			       c.company_type, c.incorporation_date, c.vat_number, c.vat_quarter,
+			       c.status, c.risk_score, c.email_status, c.last_contact_at,
+			       c.created_at, c.updated_at
+			FROM clients c
+			WHERE c.id = $1 AND c.tenant_id = $2
+			  AND EXISTS (SELECT 1 FROM staff_clients sc WHERE sc.client_id = c.id AND sc.staff_id = $3)
+		`
+		args = []interface{}{clientID, tenantID, userID}
 	} else {
+		// tenant_admin and other roles: can view all clients in tenant
 		sql = `
 			SELECT id, tenant_id, user_id, company_name, contact_name,
 			       email, phone, address, year_end, utr, company_number,

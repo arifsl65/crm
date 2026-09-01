@@ -6,6 +6,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
+	"github.com/rs/zerolog/log"
 
 	"github.com/accountant-crm/go-backend/internal/database"
 )
@@ -131,8 +132,18 @@ func (t *TenantDB) Query(c *gin.Context, sql string, args []interface{}, scanFn 
 
 // QueryRow executes a query that returns a single row with RLS context set.
 // DEPRECATED: Use QueryRowScan instead for proper RLS handling.
+// Fix #11: WARNING - This method returns a Row AFTER the transaction commits,
+// which means the underlying connection may be returned to the pool and reused.
+// This can cause cross-tenant data leakage in high-concurrency scenarios.
+// This method is kept only for backwards compatibility and will be removed.
 func (t *TenantDB) QueryRow(c *gin.Context, sql string, args ...interface{}) pgx.Row {
 	ctx := c.Request.Context()
+
+	// Log deprecation warning to track usage and enforce migration
+	log.Warn().
+		Str("tenant_id", t.tenantID).
+		Str("method", "TenantDB.QueryRow").
+		Msg("DEPRECATED: QueryRow called - use QueryRowScan instead to prevent potential data leakage")
 
 	// For QueryRow, we need to return a Row interface.
 	// We'll use the pool directly but set RLS context in a transaction wrapper.

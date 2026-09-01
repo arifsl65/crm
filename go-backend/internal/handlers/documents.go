@@ -1013,14 +1013,17 @@ func (h *DocumentHandler) RestoreVersion(c *gin.Context) {
 		return
 	}
 
-	// Get the version to restore
+	// Fix #4: Get the version to restore, validating it belongs to this document's version chain
+	// A version is valid if: it IS the parent document, OR its parent_id matches the document
 	var oldFilePath, oldMimeType *string
 	var oldFileSize *int
 	err = tenantDB.QueryRowScan(c, []interface{}{&oldFilePath, &oldFileSize, &oldMimeType}, `
-		SELECT file_path, file_size, mime_type FROM documents WHERE id = $1 AND tenant_id = $2
-	`, versionID, tenantID)
+		SELECT file_path, file_size, mime_type FROM documents
+		WHERE id = $1 AND tenant_id = $2
+		  AND (id = $3 OR parent_id = $3)
+	`, versionID, tenantID, documentID)
 	if err != nil {
-		c.JSON(http.StatusNotFound, gin.H{"error": "version_not_found"})
+		c.JSON(http.StatusNotFound, gin.H{"error": "version_not_found_or_not_in_chain"})
 		return
 	}
 
@@ -1813,9 +1816,10 @@ func (h *DocumentHandler) UploadViaQR(c *gin.Context) {
 			return err
 		}
 
-		// Mark token as used (optional: allow multiple uploads with same token)
-		// _, _ = tx.Exec(ctx, `UPDATE upload_tokens SET used_at = NOW() WHERE id = $1`, tokenID)
-		return nil
+		// Fix #2: Mark token as used to prevent replay attacks
+		// Single-use tokens are invalidated immediately after successful upload
+		_, err = tx.Exec(ctx, `UPDATE upload_tokens SET used_at = NOW() WHERE id = $1`, tokenID)
+		return err
 	})
 
 	if err != nil {

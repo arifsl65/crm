@@ -70,11 +70,18 @@ func JWTAuth(jwtManager *auth.JWTManager, blocklist TokenBlocklist) gin.HandlerF
 		}
 
 		// Check token blocklist (e.g. after logout)
+		// Fix #5: Fail closed - if blocklist check fails, reject the token
 		if blocklist != nil && claims.ID != "" {
 			blocked, err := blocklist.IsTokenBlocked(c.Request.Context(), claims.ID)
 			if err != nil {
-				log.Warn().Err(err).Str("jti", claims.ID).Msg("Token blocklist check failed")
-			} else if blocked {
+				log.Error().Err(err).Str("jti", claims.ID).Msg("Token blocklist check failed - failing closed")
+				c.AbortWithStatusJSON(http.StatusServiceUnavailable, gin.H{
+					"error":   "service_unavailable",
+					"message": "Unable to validate token status. Please try again.",
+				})
+				return
+			}
+			if blocked {
 				c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{
 					"error":   "token_revoked",
 					"message": "Token has been revoked",
