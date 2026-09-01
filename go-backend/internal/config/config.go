@@ -16,17 +16,18 @@ import (
 
 // Config holds all application configuration.
 type Config struct {
-	App         AppConfig
-	Server      ServerConfig
-	Postgres    PostgresConfig
-	Redis       RedisConfig
-	JWT         JWTConfig
-	MTLS        MTLSConfig
-	CORS        CORSConfig
-	PythonAI    PythonAIConfig
-	RateLimit   RateLimitConfig
-	Email       EmailConfig
-	FrontendURL string
+	App            AppConfig
+	Server         ServerConfig
+	Postgres       PostgresConfig
+	Redis          RedisConfig
+	JWT            JWTConfig
+	MTLS           MTLSConfig
+	CORS           CORSConfig
+	PythonAI       PythonAIConfig
+	RateLimit      RateLimitConfig
+	Email          EmailConfig
+	CompaniesHouse CompaniesHouseConfig
+	FrontendURL    string
 }
 
 // EmailConfig holds email service settings.
@@ -132,6 +133,14 @@ type MTLSConfig struct {
 type PythonAIConfig struct {
 	BaseURL string
 	Timeout time.Duration
+}
+
+// CompaniesHouseConfig holds UK Companies House API settings.
+type CompaniesHouseConfig struct {
+	APIKey   string
+	BaseURL  string
+	Timeout  time.Duration
+	CacheTTL time.Duration
 }
 
 // Load reads configuration from environment variables.
@@ -286,6 +295,14 @@ func Load() (*Config, error) {
 		RequestsPerIP: getEnvInt("RATE_LIMIT_REQUESTS_PER_IP", 100),
 		Window:        getEnvDuration("RATE_LIMIT_WINDOW", 1*time.Minute),
 		BurstSize:     getEnvInt("RATE_LIMIT_BURST_SIZE", 20),
+	}
+
+	// Companies House API config
+	cfg.CompaniesHouse = CompaniesHouseConfig{
+		APIKey:   getEnv("COMPANIES_HOUSE_API_KEY", ""),
+		BaseURL:  getEnv("COMPANIES_HOUSE_BASE_URL", "https://api.company-information.service.gov.uk"),
+		Timeout:  getEnvDuration("COMPANIES_HOUSE_TIMEOUT", 10*time.Second),
+		CacheTTL: getEnvDuration("COMPANIES_HOUSE_CACHE_TTL", 1*time.Hour),
 	}
 
 	// Validate critical security settings in production AND staging

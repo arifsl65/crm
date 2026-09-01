@@ -157,6 +157,16 @@ func (h *AuthHandler) Login(c *gin.Context) {
 		return
 	}
 
+	// Reject pending or inactive users
+	if user.Status != "active" {
+		h.audit.LogAuth(ctx, audit.ActionLogin, &user.ID, user.TenantID, ipAddress, userAgent, false, "account_"+user.Status)
+		c.JSON(http.StatusForbidden, gin.H{
+			"error":   "account_" + user.Status,
+			"message": "Account is not active. Please complete your invitation or contact support.",
+		})
+		return
+	}
+
 	valid, err := auth.VerifyPassword(req.Password, user.Password)
 	if err != nil || !valid {
 		_ = h.incrementFailedAttempts(ctx, user.ID)
@@ -455,6 +465,7 @@ type userRecord struct {
 	Password            string
 	Name                string
 	Role                string
+	Status              string
 	FailedLoginAttempts int
 	LockedUntil         *time.Time
 }
@@ -468,7 +479,7 @@ func (h *AuthHandler) getUserByEmail(ctx context.Context, email string, tenantID
 		if tenantID != nil {
 			// Tenant-scoped lookup
 			query := `
-				SELECT id, tenant_id, email, password, name, role,
+				SELECT id, tenant_id, email, password, name, role, status,
 				       failed_login_attempts, locked_until
 				FROM users
 				WHERE email = $1 AND tenant_id = $2 AND deleted_at IS NULL
@@ -476,7 +487,7 @@ func (h *AuthHandler) getUserByEmail(ctx context.Context, email string, tenantID
 			var user userRecord
 			qErr = tx.QueryRow(ctx, query, email, *tenantID).Scan(
 				&user.ID, &user.TenantID, &user.Email, &user.Password,
-				&user.Name, &user.Role,
+				&user.Name, &user.Role, &user.Status,
 				&user.FailedLoginAttempts, &user.LockedUntil,
 			)
 			if qErr == nil {
@@ -500,7 +511,7 @@ func (h *AuthHandler) getUserByEmail(ctx context.Context, email string, tenantID
 
 		// Single tenant or super_admin - proceed with lookup
 		query := `
-			SELECT id, tenant_id, email, password, name, role,
+			SELECT id, tenant_id, email, password, name, role, status,
 			       failed_login_attempts, locked_until
 			FROM users
 			WHERE email = $1 AND deleted_at IS NULL
@@ -508,7 +519,7 @@ func (h *AuthHandler) getUserByEmail(ctx context.Context, email string, tenantID
 		var user userRecord
 		qErr = tx.QueryRow(ctx, query, email).Scan(
 			&user.ID, &user.TenantID, &user.Email, &user.Password,
-			&user.Name, &user.Role,
+			&user.Name, &user.Role, &user.Status,
 			&user.FailedLoginAttempts, &user.LockedUntil,
 		)
 		if qErr == nil {

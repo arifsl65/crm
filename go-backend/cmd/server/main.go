@@ -110,9 +110,10 @@ func main() {
 	serviceTypeHandler := handlers.NewServiceTypeHandler(db, auditLogger)
 	documentTypeHandler := handlers.NewDocumentTypeHandler(db, auditLogger)
 	aiHandler := handlers.NewAIHandler(aiClient)
+	companiesHouseHandler := handlers.NewCompaniesHouseHandler(db, redis, cfg.CompaniesHouse)
 
 	// Setup Gin router
-	router := setupRouter(cfg, db, redis, aiClient, jwtManager, authHandler, tenantHandler, userHandler, clientHandler, serviceHandler, documentHandler, dashboardHandler, serviceTypeHandler, documentTypeHandler, aiHandler)
+	router := setupRouter(cfg, db, redis, aiClient, jwtManager, authHandler, tenantHandler, userHandler, clientHandler, serviceHandler, documentHandler, dashboardHandler, serviceTypeHandler, documentTypeHandler, aiHandler, companiesHouseHandler, auditLogger)
 
 	// Create HTTP server
 	srv := &http.Server{
@@ -173,7 +174,7 @@ func setupLogging(cfg config.AppConfig) {
 }
 
 // setupRouter configures the Gin router with all routes.
-func setupRouter(cfg *config.Config, db *database.Pool, redis *cache.Client, aiClient *ai.Client, jwtManager *auth.JWTManager, authHandler *handlers.AuthHandler, tenantHandler *handlers.TenantHandler, userHandler *handlers.UserHandler, clientHandler *handlers.ClientHandler, serviceHandler *handlers.ServiceHandler, documentHandler *handlers.DocumentHandler, dashboardHandler *handlers.DashboardHandler, serviceTypeHandler *handlers.ServiceTypeHandler, documentTypeHandler *handlers.DocumentTypeHandler, aiHandler *handlers.AIHandler) *gin.Engine {
+func setupRouter(cfg *config.Config, db *database.Pool, redis *cache.Client, aiClient *ai.Client, jwtManager *auth.JWTManager, authHandler *handlers.AuthHandler, tenantHandler *handlers.TenantHandler, userHandler *handlers.UserHandler, clientHandler *handlers.ClientHandler, serviceHandler *handlers.ServiceHandler, documentHandler *handlers.DocumentHandler, dashboardHandler *handlers.DashboardHandler, serviceTypeHandler *handlers.ServiceTypeHandler, documentTypeHandler *handlers.DocumentTypeHandler, aiHandler *handlers.AIHandler, companiesHouseHandler *handlers.CompaniesHouseHandler, auditLogger *audit.Logger) *gin.Engine {
 	// Set Gin mode
 	if cfg.App.Env == "production" {
 		gin.SetMode(gin.ReleaseMode)
@@ -231,6 +232,10 @@ func setupRouter(cfg *config.Config, db *database.Pool, redis *cache.Client, aiC
 		authProtected := v1.Group("/auth")
 		authProtected.Use(middleware.JWTAuth(jwtManager, redis))
 		authProtected.Use(middleware.TenantRLS(db)) // Wire RLS context
+		authProtected.Use(middleware.AuditLog(middleware.AuditLogConfig{
+			Logger:    auditLogger,
+			SkipPaths: []string{"/api/v1/auth/refresh"},
+		}))
 		{
 			authProtected.POST("/logout", authHandler.Logout)
 			authProtected.GET("/me", authHandler.GetMe)
@@ -250,6 +255,9 @@ func setupRouter(cfg *config.Config, db *database.Pool, redis *cache.Client, aiC
 		protected := v1.Group("")
 		protected.Use(middleware.JWTAuth(jwtManager, redis))
 		protected.Use(middleware.TenantRLS(db)) // Wire RLS context for tenant isolation
+		protected.Use(middleware.AuditLog(middleware.AuditLogConfig{
+			Logger: auditLogger,
+		}))
 
 		// Tenant routes
 		tenants := protected.Group("/tenants")
@@ -414,6 +422,15 @@ func setupRouter(cfg *config.Config, db *database.Pool, redis *cache.Client, aiC
 
 			// AI Jobs
 			aiRoutes.GET("/jobs/:id", middleware.ValidateUUID("id"), aiHandler.GetJobStatus)
+		}
+
+		// Companies House routes
+		chRoutes := protected.Group("/ch")
+		{
+			chRoutes.GET("/search", companiesHouseHandler.Search)
+			chRoutes.GET("/company/:number", companiesHouseHandler.GetCompany)
+			chRoutes.POST("/sync/:clientId", middleware.ValidateUUID("clientId"), companiesHouseHandler.SyncClient)
+			chRoutes.GET("/status", companiesHouseHandler.Status)
 		}
 	}
 

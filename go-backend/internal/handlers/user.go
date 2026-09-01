@@ -1,12 +1,15 @@
 package handlers
 
 import (
+	"crypto/rand"
+	"encoding/hex"
 	"net/http"
 	"time"
 
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
+	"github.com/rs/zerolog/log"
 
 	"github.com/accountant-crm/go-backend/internal/auth"
 	"github.com/accountant-crm/go-backend/internal/database"
@@ -45,11 +48,12 @@ type CreateUserRequest struct {
 	TenantID   string  `json:"tenant_id" binding:"required,uuid"`
 	Name       string  `json:"name" binding:"required,min=1,max=255"`
 	Email      string  `json:"email" binding:"required,email"`
-	Password   string  `json:"password" binding:"required,min=8"`
+	Password   *string `json:"password,omitempty"`
 	Role       string  `json:"role" binding:"required,oneof=tenant_admin staff client"`
 	Phone      *string `json:"phone,omitempty"`
 	Specialism *string `json:"specialism,omitempty"`
 	Notes      *string `json:"notes,omitempty"`
+	SendEmail  *bool   `json:"send_email,omitempty"`
 }
 
 // UpdateUserRequest represents the request body for updating a user
@@ -239,24 +243,48 @@ func (h *UserHandler) Create(c *gin.Context) {
 		return
 	}
 
-	// Hash password
-	hashedPassword, err := auth.HashPassword(req.Password)
-	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{
-			"error":   "hash_error",
-			"message": "Failed to hash password",
-		})
-		return
+	// Determine creation mode: direct (password provided) or invitation (no password)
+	var hashedPassword *string
+	var inviteToken *string
+	var inviteExpires *time.Time
+	status := "active"
+
+	if req.Password != nil && *req.Password != "" {
+		hp, err := auth.HashPassword(*req.Password)
+		if err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{
+				"error":   "hash_error",
+				"message": "Failed to hash password",
+			})
+			return
+		}
+		hashedPassword = &hp
+	} else {
+		// Invitation mode
+		status = "pending"
+		tokenBytes := make([]byte, 32)
+		if _, err := rand.Read(tokenBytes); err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{
+				"error":   "internal_error",
+				"message": "Failed to generate invite token",
+			})
+			return
+		}
+		t := hex.EncodeToString(tokenBytes)
+		inviteToken = &t
+		exp := time.Now().Add(7 * 24 * time.Hour)
+		inviteExpires = &exp
 	}
 
 	// Create user
 	id := uuid.New()
 	_, err = tenantDB.Exec(c, `
 		INSERT INTO users (id, tenant_id, name, email, password, role, status,
-		                   phone, specialism, notes, created_at, updated_at)
-		VALUES ($1, $2, $3, $4, $5, $6, 'active', $7, $8, $9, NOW(), NOW())
-	`, id, targetTenantID, req.Name, req.Email, hashedPassword, req.Role,
-		req.Phone, req.Specialism, req.Notes)
+		                   phone, specialism, notes, invite_token, invite_expires,
+		                   created_at, updated_at)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, NOW(), NOW())
+	`, id, targetTenantID, req.Name, req.Email, hashedPassword, req.Role, status,
+		req.Phone, req.Specialism, req.Notes, inviteToken, inviteExpires)
 
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{
@@ -276,10 +304,21 @@ func (h *UserHandler) Create(c *gin.Context) {
 		return
 	}
 
-	c.JSON(http.StatusCreated, gin.H{
+	response := gin.H{
 		"message": "User created successfully",
 		"user":    user,
-	})
+	}
+	if inviteToken != nil {
+		response["invite_token"] = *inviteToken
+		response["invite_expires_at"] = inviteExpires
+		response["invite_url"] = "/invite/" + *inviteToken
+		log.Warn().
+			Str("email", req.Email).
+			Str("invite_token", *inviteToken).
+			Msg("User created via invitation; email client not configured, returning token in response")
+	}
+
+	c.JSON(http.StatusCreated, response)
 }
 
 // Get retrieves a user by ID
