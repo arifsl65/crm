@@ -1,11 +1,11 @@
 import ClientDetail from './ClientDetail';
 
 // Required for static export: generates a catch-all fallback page.
-// Actual client IDs are resolved client-side after hydration.
+// Actual client IDs are resolved client-side via useParams().
 export async function generateStaticParams() {
   return [{ id: 'placeholder' }];
 }
 
-export default function ClientDetailPage({ params }: { params: { id: string } }) {
-  return <ClientDetail clientId={params.id} />;
+export default function ClientDetailPage() {
+  return <ClientDetail />;
 }

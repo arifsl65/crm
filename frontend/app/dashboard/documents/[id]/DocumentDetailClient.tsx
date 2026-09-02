@@ -30,6 +30,9 @@ export default function DocumentDetailClient({ documentId }: DocumentDetailClien
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [showVersions, setShowVersions] = useState(false);
+  const [showRejectModal, setShowRejectModal] = useState(false);
+  const [rejectReason, setRejectReason] = useState('');
+  const [rejecting, setRejecting] = useState(false);
 
   const fetchDocument = useCallback(async () => {
     try {
@@ -65,18 +68,31 @@ export default function DocumentDetailClient({ documentId }: DocumentDetailClien
     }
   };
 
-  const handleReject = async () => {
-    if (!document) return;
-    const note = prompt('Enter rejection reason:');
-    if (!note) return;
+  const handleRejectClick = () => {
+    setShowRejectModal(true);
+    setRejectReason('');
+  };
+
+  const handleRejectConfirm = async () => {
+    if (!document || !rejectReason.trim()) return;
 
     try {
-      await rejectDocument(document.id, note);
+      setRejecting(true);
+      await rejectDocument(document.id, rejectReason.trim());
       setDocument({ ...document, status: 'rejected' });
       toast.success('Document rejected');
+      setShowRejectModal(false);
+      setRejectReason('');
     } catch (err) {
       toast.error(err instanceof Error ? err.message : 'Failed to reject document');
+    } finally {
+      setRejecting(false);
     }
+  };
+
+  const handleRejectCancel = () => {
+    setShowRejectModal(false);
+    setRejectReason('');
   };
 
   const handleRestoreVersion = async (versionId: string) => {
@@ -298,7 +314,7 @@ export default function DocumentDetailClient({ documentId }: DocumentDetailClien
                       Approve
                     </button>
                     <button
-                      onClick={handleReject}
+                      onClick={handleRejectClick}
                       className="w-full flex items-center justify-center px-4 py-2 border border-transparent rounded-md text-sm font-medium text-white bg-red-600 hover:bg-red-700"
                     >
                       <svg className="w-5 h-5 mr-2" fill="none" stroke="currentColor" viewBox="0 0 24 24">
@@ -359,6 +375,72 @@ export default function DocumentDetailClient({ documentId }: DocumentDetailClien
           </div>
         </div>
       </main>
+
+      {/* Rejection Modal */}
+      {showRejectModal && (
+        <div className="fixed inset-0 z-50 overflow-y-auto">
+          <div className="flex min-h-full items-center justify-center p-4">
+            {/* Backdrop */}
+            <div
+              className="fixed inset-0 bg-black/50 transition-opacity"
+              onClick={handleRejectCancel}
+            />
+
+            {/* Modal */}
+            <div className="relative bg-white dark:bg-slate-800 rounded-lg shadow-xl max-w-md w-full p-6">
+              <div className="flex justify-between items-center mb-4">
+                <h2 className="text-lg font-semibold text-gray-900 dark:text-white">
+                  Reject Document
+                </h2>
+                <button
+                  onClick={handleRejectCancel}
+                  className="text-gray-400 hover:text-gray-600 dark:hover:text-gray-200"
+                >
+                  <svg className="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
+                  </svg>
+                </button>
+              </div>
+
+              <div className="space-y-4">
+                <div>
+                  <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1">
+                    Rejection Reason *
+                  </label>
+                  <textarea
+                    value={rejectReason}
+                    onChange={(e) => setRejectReason(e.target.value)}
+                    placeholder="Please provide a reason for rejecting this document..."
+                    rows={4}
+                    className="w-full px-3 py-2 border border-gray-300 dark:border-gray-600 rounded-md bg-white dark:bg-slate-700 text-gray-900 dark:text-white placeholder-gray-400 focus:ring-2 focus:ring-red-500 focus:border-transparent"
+                    autoFocus
+                  />
+                </div>
+
+                <div className="flex space-x-3">
+                  <button
+                    onClick={handleRejectCancel}
+                    className="flex-1 py-2 px-4 border border-gray-300 dark:border-gray-600 text-gray-700 dark:text-gray-300 rounded-md hover:bg-gray-50 dark:hover:bg-slate-700"
+                  >
+                    Cancel
+                  </button>
+                  <button
+                    onClick={handleRejectConfirm}
+                    disabled={rejecting || !rejectReason.trim()}
+                    className={`flex-1 py-2 px-4 rounded-md text-white font-medium transition-colors ${
+                      rejecting || !rejectReason.trim()
+                        ? 'bg-gray-400 cursor-not-allowed'
+                        : 'bg-red-600 hover:bg-red-700'
+                    }`}
+                  >
+                    {rejecting ? 'Rejecting...' : 'Reject Document'}
+                  </button>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }

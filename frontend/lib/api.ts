@@ -105,34 +105,18 @@ export interface ActivityItem {
   created_at: string;
 }
 
-// Helper to get token
-function getAuthToken(): string | null {
-  if (typeof window !== 'undefined') {
-    return localStorage.getItem('access_token');
-  }
-  return null;
-}
-
-function getRefreshToken(): string | null {
-  if (typeof window !== 'undefined') {
-    return localStorage.getItem('refresh_token');
-  }
-  return null;
-}
-
 // Token refresh state to prevent multiple simultaneous refresh attempts
 let isRefreshing = false;
 let refreshPromise: Promise<boolean> | null = null;
 
+/**
+ * Attempt to refresh the access token using the httpOnly refresh_token cookie.
+ * The backend sets new httpOnly cookies on success - no localStorage needed.
+ */
 async function tryRefreshToken(): Promise<boolean> {
   // If already refreshing, wait for the existing refresh to complete
   if (isRefreshing && refreshPromise) {
     return refreshPromise;
-  }
-
-  const refreshToken = getRefreshToken();
-  if (!refreshToken) {
-    return false;
   }
 
   isRefreshing = true;
@@ -141,21 +125,15 @@ async function tryRefreshToken(): Promise<boolean> {
       const res = await fetch(`${API_URL}/api/v1/auth/refresh`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ refresh_token: refreshToken }),
+        credentials: 'include', // Send httpOnly cookies
       });
 
       if (!res.ok) {
         return false;
       }
 
-      const data = await res.json();
-
-      // Save new tokens
-      if (typeof window !== 'undefined') {
-        localStorage.setItem('access_token', data.access_token);
-        localStorage.setItem('refresh_token', data.refresh_token);
-      }
-
+      // Backend sets new httpOnly cookies automatically via Set-Cookie header
+      // No need to store tokens client-side
       return true;
     } catch {
       return false;
@@ -172,33 +150,37 @@ async function tryRefreshToken(): Promise<boolean> {
 // Fix #36: Use custom event instead of window.location.href for SPA-friendly redirect
 export const AUTH_EXPIRED_EVENT = 'auth-expired';
 
+/**
+ * Clear auth state and trigger redirect to login.
+ * Note: httpOnly cookies are cleared by the backend on logout via Set-Cookie.
+ * We only clear client-side user data here.
+ */
 function clearAuthAndRedirect(): void {
   if (typeof window !== 'undefined') {
-    localStorage.removeItem('access_token');
-    localStorage.removeItem('refresh_token');
-    localStorage.removeItem('user');
+    // Clear user data from sessionStorage (tokens are in httpOnly cookies, not accessible here)
+    sessionStorage.removeItem('user');
 
     // Dispatch custom event for React components to handle
     window.dispatchEvent(new CustomEvent(AUTH_EXPIRED_EVENT));
   }
 }
 
-// Helper to make authenticated requests with automatic token refresh
+/**
+ * Helper to make authenticated requests with automatic token refresh.
+ * Uses httpOnly cookies for authentication (credentials: 'include').
+ * No localStorage token handling needed - cookies are sent automatically.
+ */
 async function authFetch(url: string, options: RequestInit = {}): Promise<Response> {
   const makeRequest = async () => {
-    const token = getAuthToken();
     const headers: HeadersInit = {
       'Content-Type': 'application/json',
       ...(options.headers || {}),
     };
 
-    if (token) {
-      (headers as Record<string, string>)['Authorization'] = `Bearer ${token}`;
-    }
-
     return fetch(`${API_URL}${url}`, {
       ...options,
       headers,
+      credentials: 'include', // Send httpOnly cookies automatically
     });
   };
 
@@ -1582,4 +1564,89 @@ export async function unregisterPushTokenByValue(token: string): Promise<void> {
     body: JSON.stringify({ token }),
   });
   if (!res.ok) throw new Error('Failed to unregister push token');
+}
+
+// ============================================================================
+// Portal API (Client-facing portal)
+// ============================================================================
+
+export interface PortalUser {
+  id: string;
+  email: string;
+  name: string;
+  role: string;
+  two_factor_enabled: boolean;
+}
+
+export interface PortalDashboard {
+  client_name: string;
+  pending_documents: number;
+  upcoming_deadlines: number;
+  active_services: number;
+  recent_activity: Array<{
+    id: string;
+    type: string;
+    description: string;
+    created_at: string;
+  }>;
+}
+
+export interface PortalDocument {
+  id: string;
+  name: string;
+  type_name?: string;
+  status: string;
+  expiry_date?: string;
+  created_at: string;
+}
+
+export interface PortalService {
+  id: string;
+  name: string;
+  status: string;
+  deadline?: string;
+  docs_required: number;
+  docs_received: number;
+}
+
+export async function getPortalMe(): Promise<{ user: PortalUser }> {
+  const res = await authFetch('/api/v1/portal/me');
+  if (!res.ok) throw new Error('Failed to fetch portal user');
+  return res.json();
+}
+
+export async function getPortalDashboard(): Promise<PortalDashboard> {
+  const res = await authFetch('/api/v1/portal/dashboard');
+  if (!res.ok) throw new Error('Failed to fetch portal dashboard');
+  return res.json();
+}
+
+export async function getPortalDocuments(): Promise<{ documents: PortalDocument[] }> {
+  const res = await authFetch('/api/v1/portal/documents');
+  if (!res.ok) throw new Error('Failed to fetch portal documents');
+  return res.json();
+}
+
+export async function getPortalServices(): Promise<{ services: PortalService[] }> {
+  const res = await authFetch('/api/v1/portal/services');
+  if (!res.ok) throw new Error('Failed to fetch portal services');
+  return res.json();
+}
+
+/**
+ * Logout the user by calling the backend logout endpoint (which clears cookies)
+ * and clearing any client-side state.
+ */
+export async function logout(): Promise<void> {
+  try {
+    // Call backend logout to clear httpOnly cookies
+    await authFetch('/api/v1/auth/logout', { method: 'POST' });
+  } catch {
+    // Continue with client-side cleanup even if backend call fails
+  }
+  // Clear client-side state
+  if (typeof window !== 'undefined') {
+    sessionStorage.removeItem('user');
+    window.dispatchEvent(new CustomEvent(AUTH_EXPIRED_EVENT));
+  }
 }

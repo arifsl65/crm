@@ -161,7 +161,7 @@ func ValidateMagicBytes(cfg MagicByteConfig) gin.HandlerFunc {
 		}
 
 		// Detect actual file type
-		detectedType := detectFileType(header_bytes)
+		detectedType := DetectFileType(header_bytes)
 		claimedType := header.Header.Get("Content-Type")
 
 		log.Debug().
@@ -219,8 +219,9 @@ func ValidateMagicBytes(cfg MagicByteConfig) gin.HandlerFunc {
 	}
 }
 
-// detectFileType detects file type based on magic bytes.
-func detectFileType(data []byte) string {
+// DetectFileType detects file type based on magic bytes.
+// Exported for use by handlers that need direct validation.
+func DetectFileType(data []byte) string {
 	for mimeType, magic := range MagicBytes {
 		if magic == nil {
 			continue // Skip text types (no magic bytes)
@@ -323,4 +324,57 @@ func ValidateImageUpload() gin.HandlerFunc {
 		MaxFileSize:       10 * 1024 * 1024, // 10MB
 		FormFieldName:     "image",
 	})
+}
+
+// AllowedDocumentMimeTypes is the set of MIME types allowed for document uploads.
+// Used by handlers that need to check types without using the middleware.
+var AllowedDocumentMimeTypes = map[string]bool{
+	"application/pdf":  true,
+	"image/jpeg":       true,
+	"image/png":        true,
+	"image/gif":        true,
+	"image/webp":       true,
+	"image/bmp":        true,
+	"application/zip":  true,
+	"application/msword": true,
+	"application/vnd.openxmlformats-officedocument.wordprocessingml.document": true,
+	"application/vnd.openxmlformats-officedocument.spreadsheetml.sheet":       true,
+	"application/vnd.openxmlformats-officedocument.presentationml.presentation": true,
+	"application/vnd.ms-excel": true,
+	"text/csv":                 true,
+	"text/plain":               true,
+}
+
+// ValidateMagicBytesForMime checks if the file content matches the claimed MIME type.
+// Returns true if the magic bytes match or if the type has no magic bytes (text files).
+// Used by handlers that need direct validation without the middleware.
+func ValidateMagicBytesForMime(data []byte, claimedMime string) bool {
+	expected, exists := MagicBytes[claimedMime]
+
+	// No magic bytes to check for text files
+	if expected == nil || !exists {
+		// For text files, do a basic check for binary content
+		if isTextType(claimedMime) {
+			// Check first 512 bytes for binary content
+			checkLen := 512
+			if len(data) < checkLen {
+				checkLen = len(data)
+			}
+			for i := 0; i < checkLen; i++ {
+				// Allow common text characters
+				if data[i] < 0x09 || (data[i] > 0x0D && data[i] < 0x20 && data[i] != 0x1B) {
+					if data[i] != 0x00 { // Allow UTF-16 BOM
+						return false // Binary content found
+					}
+				}
+			}
+		}
+		return true
+	}
+
+	if len(data) < len(expected) {
+		return false
+	}
+
+	return bytes.Equal(data[:len(expected)], expected)
 }

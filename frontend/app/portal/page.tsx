@@ -3,71 +3,17 @@
 import { useEffect, useState, useCallback } from 'react';
 import { useRouter } from 'next/navigation';
 import { useToast } from '@/components';
-
-interface PortalUser {
-  id: string;
-  email: string;
-  name: string;
-  role: string;
-  two_factor_enabled: boolean;
-}
-
-interface PortalDashboard {
-  client_name: string;
-  pending_documents: number;
-  upcoming_deadlines: number;
-  active_services: number;
-  recent_activity: Array<{
-    id: string;
-    type: string;
-    description: string;
-    created_at: string;
-  }>;
-}
-
-interface PortalDocument {
-  id: string;
-  name: string;
-  type_name?: string;
-  status: string;
-  expiry_date?: string;
-  created_at: string;
-}
-
-interface PortalService {
-  id: string;
-  name: string;
-  status: string;
-  deadline?: string;
-  docs_required: number;
-  docs_received: number;
-}
-
-const API_URL = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8080';
-
-function getAuthToken(): string | null {
-  if (typeof window !== 'undefined') {
-    return localStorage.getItem('access_token');
-  }
-  return null;
-}
-
-async function portalFetch(url: string, options: RequestInit = {}): Promise<Response> {
-  const token = getAuthToken();
-  const headers: HeadersInit = {
-    'Content-Type': 'application/json',
-    ...(options.headers || {}),
-  };
-
-  if (token) {
-    (headers as Record<string, string>)['Authorization'] = `Bearer ${token}`;
-  }
-
-  return fetch(`${API_URL}${url}`, {
-    ...options,
-    headers,
-  });
-}
+import {
+  PortalUser,
+  PortalDashboard,
+  PortalDocument,
+  PortalService,
+  getPortalMe,
+  getPortalDashboard,
+  getPortalDocuments,
+  getPortalServices,
+  logout,
+} from '@/lib/api';
 
 export default function PortalPage() {
   const router = useRouter();
@@ -84,19 +30,9 @@ export default function PortalPage() {
   }, []);
 
   const checkAuth = async () => {
-    const token = getAuthToken();
-    if (!token) {
-      router.push('/login');
-      return;
-    }
-
     try {
-      // Get user info
-      const userRes = await portalFetch('/api/v1/portal/me');
-      if (!userRes.ok) {
-        throw new Error('Not authenticated');
-      }
-      const userData = await userRes.json();
+      // Get user info using shared API
+      const userData = await getPortalMe();
 
       // Check if user is a client
       if (userData.user?.role !== 'client') {
@@ -107,9 +43,7 @@ export default function PortalPage() {
       setUser(userData.user);
       fetchDashboard();
     } catch {
-      localStorage.removeItem('access_token');
-      localStorage.removeItem('refresh_token');
-      localStorage.removeItem('user');
+      // Auth failed, redirect to login
       router.push('/login');
     }
   };
@@ -117,26 +51,17 @@ export default function PortalPage() {
   const fetchDashboard = useCallback(async () => {
     try {
       setLoading(true);
-      const [dashRes, docsRes, servicesRes] = await Promise.all([
-        portalFetch('/api/v1/portal/dashboard'),
-        portalFetch('/api/v1/portal/documents'),
-        portalFetch('/api/v1/portal/services'),
+      const [dashData, docsData, servicesData] = await Promise.all([
+        getPortalDashboard().catch(() => null),
+        getPortalDocuments().catch(() => ({ documents: [] })),
+        getPortalServices().catch(() => ({ services: [] })),
       ]);
 
-      if (dashRes.ok) {
-        const data = await dashRes.json();
-        setDashboard(data);
+      if (dashData) {
+        setDashboard(dashData);
       }
-
-      if (docsRes.ok) {
-        const data = await docsRes.json();
-        setDocuments(data.documents || []);
-      }
-
-      if (servicesRes.ok) {
-        const data = await servicesRes.json();
-        setServices(data.services || []);
-      }
+      setDocuments(docsData.documents || []);
+      setServices(servicesData.services || []);
     } catch (err) {
       console.error('Failed to fetch portal data:', err);
     } finally {
@@ -144,10 +69,8 @@ export default function PortalPage() {
     }
   }, []);
 
-  const handleLogout = () => {
-    localStorage.removeItem('access_token');
-    localStorage.removeItem('refresh_token');
-    localStorage.removeItem('user');
+  const handleLogout = async () => {
+    await logout();
     router.push('/login');
   };
 

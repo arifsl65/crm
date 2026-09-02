@@ -198,6 +198,8 @@ type ConfirmationStatement struct {
 type CHOfficersResponse struct {
 	Items          []CHOfficer `json:"items"`
 	TotalResults   int         `json:"total_results"`
+	StartIndex     int         `json:"start_index"`
+	ItemsPerPage   int         `json:"items_per_page"`
 	ActiveCount    int         `json:"active_count"`
 	ResignedCount  int         `json:"resigned_count"`
 	InactiveCount  int         `json:"inactive_count"`
@@ -229,6 +231,8 @@ type CHDateOfBirth struct {
 type CHPSCResponse struct {
 	Items        []CHPSC `json:"items"`
 	TotalResults int     `json:"total_results"`
+	StartIndex   int     `json:"start_index"`
+	ItemsPerPage int     `json:"items_per_page"`
 	ActiveCount  int     `json:"active_count"`
 	CeasedCount  int     `json:"ceased_count"`
 }
@@ -619,20 +623,9 @@ func (h *CompaniesHouseHandler) SyncClient(c *gin.Context) {
 
 // syncDirectors fetches officers from Companies House and syncs them to the directors table.
 // Returns the count of directors synced and any error.
+// Handles pagination for companies with more than 35 officers (CH API default page size).
 func (h *CompaniesHouseHandler) syncDirectors(c *gin.Context, clientID, tenantID uuid.UUID, companyNumber string) (int, error) {
 	ctx := c.Request.Context()
-
-	// Fetch officers from Companies House
-	apiURL := fmt.Sprintf("%s/company/%s/officers", h.cfg.BaseURL, companyNumber)
-	results, err := h.makeRequest(ctx, apiURL)
-	if err != nil {
-		return 0, fmt.Errorf("failed to fetch officers: %w", err)
-	}
-
-	var officersResp CHOfficersResponse
-	if err := json.Unmarshal(results, &officersResp); err != nil {
-		return 0, fmt.Errorf("failed to parse officers response: %w", err)
-	}
 
 	// Get TenantDB for RLS-protected operations
 	tenantDB, ok := middleware.GetTenantDB(c)
@@ -641,7 +634,7 @@ func (h *CompaniesHouseHandler) syncDirectors(c *gin.Context, clientID, tenantID
 	}
 
 	// Mark all existing directors as inactive before sync
-	_, err = tenantDB.Exec(c, `
+	_, err := tenantDB.Exec(c, `
 		UPDATE directors SET is_active = false
 		WHERE client_id = $1 AND tenant_id = $2
 	`, clientID, tenantID)
@@ -650,7 +643,30 @@ func (h *CompaniesHouseHandler) syncDirectors(c *gin.Context, clientID, tenantID
 	}
 
 	syncedCount := 0
-	for _, officer := range officersResp.Items {
+	startIndex := 0
+	totalResults := 0
+
+	// Paginate through all officers
+	for {
+		// Fetch officers from Companies House with pagination
+		apiURL := fmt.Sprintf("%s/company/%s/officers?start_index=%d", h.cfg.BaseURL, companyNumber, startIndex)
+		results, err := h.makeRequest(ctx, apiURL)
+		if err != nil {
+			return syncedCount, fmt.Errorf("failed to fetch officers (page %d): %w", startIndex, err)
+		}
+
+		var officersResp CHOfficersResponse
+		if err := json.Unmarshal(results, &officersResp); err != nil {
+			return syncedCount, fmt.Errorf("failed to parse officers response: %w", err)
+		}
+
+		// Track total for logging
+		if totalResults == 0 {
+			totalResults = officersResp.TotalResults
+		}
+
+		// Process this page of officers
+		for _, officer := range officersResp.Items {
 		// Only sync directors and secretaries
 		role := "director"
 		if officer.OfficerRole == "secretary" || officer.OfficerRole == "corporate-secretary" {
@@ -700,17 +716,34 @@ func (h *CompaniesHouseHandler) syncDirectors(c *gin.Context, clientID, tenantID
 				is_active = EXCLUDED.is_active
 		`, tenantID, clientID, officer.Name, role, appointedDate, resignedDate, officer.Nationality, dobMonth, dobYear, isActive)
 
-		if err != nil {
-			log.Warn().Err(err).Str("name", officer.Name).Msg("Failed to upsert director")
-			continue
+			if err != nil {
+				log.Warn().Err(err).Str("name", officer.Name).Msg("Failed to upsert director")
+				continue
+			}
+			syncedCount++
 		}
-		syncedCount++
+
+		// Check if we need to fetch more pages
+		// Companies House typically returns 35 items per page
+		itemsPerPage := officersResp.ItemsPerPage
+		if itemsPerPage == 0 {
+			itemsPerPage = 35 // Default CH page size
+		}
+		startIndex += len(officersResp.Items)
+		if startIndex >= officersResp.TotalResults || len(officersResp.Items) == 0 {
+			break // All items fetched or empty response
+		}
+
+		log.Debug().
+			Int("start_index", startIndex).
+			Int("total", officersResp.TotalResults).
+			Msg("Fetching next page of officers")
 	}
 
 	log.Info().
 		Str("client_id", clientID.String()).
 		Str("company_number", companyNumber).
-		Int("total_officers", officersResp.TotalResults).
+		Int("total_officers", totalResults).
 		Int("synced", syncedCount).
 		Msg("Directors synced from Companies House")
 
@@ -719,24 +752,9 @@ func (h *CompaniesHouseHandler) syncDirectors(c *gin.Context, clientID, tenantID
 
 // syncPSC fetches Persons with Significant Control from Companies House and syncs them.
 // Returns the count of PSC records synced and any error.
+// Handles pagination for companies with more than 25 PSC records.
 func (h *CompaniesHouseHandler) syncPSC(c *gin.Context, clientID, tenantID uuid.UUID, companyNumber string) (int, error) {
 	ctx := c.Request.Context()
-
-	// Fetch PSC from Companies House
-	apiURL := fmt.Sprintf("%s/company/%s/persons-with-significant-control", h.cfg.BaseURL, companyNumber)
-	results, err := h.makeRequest(ctx, apiURL)
-	if err != nil {
-		// PSC endpoint may return 404 for companies without PSC
-		if err.Error() == "not_found" {
-			return 0, nil
-		}
-		return 0, fmt.Errorf("failed to fetch PSC: %w", err)
-	}
-
-	var pscResp CHPSCResponse
-	if err := json.Unmarshal(results, &pscResp); err != nil {
-		return 0, fmt.Errorf("failed to parse PSC response: %w", err)
-	}
 
 	// Get TenantDB for RLS-protected operations
 	tenantDB, ok := middleware.GetTenantDB(c)
@@ -745,7 +763,7 @@ func (h *CompaniesHouseHandler) syncPSC(c *gin.Context, clientID, tenantID uuid.
 	}
 
 	// Mark all existing PSC as inactive before sync
-	_, err = tenantDB.Exec(c, `
+	_, err := tenantDB.Exec(c, `
 		UPDATE psc SET is_active = false
 		WHERE client_id = $1 AND tenant_id = $2
 	`, clientID, tenantID)
@@ -754,7 +772,37 @@ func (h *CompaniesHouseHandler) syncPSC(c *gin.Context, clientID, tenantID uuid.
 	}
 
 	syncedCount := 0
-	for _, psc := range pscResp.Items {
+	startIndex := 0
+	totalResults := 0
+
+	// Paginate through all PSC records
+	for {
+		// Fetch PSC from Companies House with pagination
+		apiURL := fmt.Sprintf("%s/company/%s/persons-with-significant-control?start_index=%d", h.cfg.BaseURL, companyNumber, startIndex)
+		results, err := h.makeRequest(ctx, apiURL)
+		if err != nil {
+			// PSC endpoint may return 404 for companies without PSC
+			if err.Error() == "not_found" {
+				if startIndex == 0 {
+					return 0, nil // No PSC for this company
+				}
+				break // No more pages
+			}
+			return syncedCount, fmt.Errorf("failed to fetch PSC (page %d): %w", startIndex, err)
+		}
+
+		var pscResp CHPSCResponse
+		if err := json.Unmarshal(results, &pscResp); err != nil {
+			return syncedCount, fmt.Errorf("failed to parse PSC response: %w", err)
+		}
+
+		// Track total for logging
+		if totalResults == 0 {
+			totalResults = pscResp.TotalResults
+		}
+
+		// Process this page of PSC records
+		for _, psc := range pscResp.Items {
 		// Skip non-individual PSC for now (corporate entities, etc.)
 		if psc.Kind != "" && psc.Kind != "individual-person-with-significant-control" {
 			continue
@@ -795,17 +843,34 @@ func (h *CompaniesHouseHandler) syncPSC(c *gin.Context, clientID, tenantID uuid.
 				is_active = EXCLUDED.is_active
 		`, tenantID, clientID, psc.Name, ownershipPct, notifiedDate, ceasedDate, naturesJSON, isActive)
 
-		if err != nil {
-			log.Warn().Err(err).Str("name", psc.Name).Msg("Failed to upsert PSC")
-			continue
+			if err != nil {
+				log.Warn().Err(err).Str("name", psc.Name).Msg("Failed to upsert PSC")
+				continue
+			}
+			syncedCount++
 		}
-		syncedCount++
+
+		// Check if we need to fetch more pages
+		// Companies House typically returns 25 items per page for PSC
+		itemsPerPage := pscResp.ItemsPerPage
+		if itemsPerPage == 0 {
+			itemsPerPage = 25 // Default CH page size for PSC
+		}
+		startIndex += len(pscResp.Items)
+		if startIndex >= pscResp.TotalResults || len(pscResp.Items) == 0 {
+			break // All items fetched or empty response
+		}
+
+		log.Debug().
+			Int("start_index", startIndex).
+			Int("total", pscResp.TotalResults).
+			Msg("Fetching next page of PSC records")
 	}
 
 	log.Info().
 		Str("client_id", clientID.String()).
 		Str("company_number", companyNumber).
-		Int("total_psc", pscResp.TotalResults).
+		Int("total_psc", totalResults).
 		Int("synced", syncedCount).
 		Msg("PSC synced from Companies House")
 

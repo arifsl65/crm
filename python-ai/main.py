@@ -4,6 +4,7 @@ Accountant CRM - Python AI Service
 FastAPI application providing AI-powered document processing endpoints.
 """
 
+import asyncio
 import io
 import sys
 from contextlib import asynccontextmanager
@@ -459,8 +460,10 @@ async def extract_text(
             if not extracted_text and IMAGE_SUPPORT:
                 extraction_method = "vision_ocr"
                 try:
-                    # Convert PDF to images
-                    images = convert_from_bytes(file_data, dpi=150, first_page=1, last_page=5)
+                    # Convert PDF to images (run in thread pool to avoid blocking event loop)
+                    images = await asyncio.to_thread(
+                        convert_from_bytes, file_data, dpi=150, first_page=1, last_page=5
+                    )
                     all_text = []
 
                     groq_client = get_groq_client()

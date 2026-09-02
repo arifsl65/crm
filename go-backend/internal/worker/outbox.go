@@ -95,7 +95,18 @@ func (w *OutboxWorker) run() {
 }
 
 func (w *OutboxWorker) processBatch() {
-	ctx := context.Background()
+	// Create a context that will be cancelled when stopCh is closed
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	// Listen for stop signal and cancel context
+	go func() {
+		select {
+		case <-w.stopCh:
+			cancel()
+		case <-ctx.Done():
+		}
+	}()
 
 	// Check if email client is configured
 	if w.emailClient == nil || !w.emailClient.IsConfigured() {
@@ -105,6 +116,10 @@ func (w *OutboxWorker) processBatch() {
 	// Fetch pending outbox entries
 	entries, err := w.fetchPendingEntries(ctx)
 	if err != nil {
+		if ctx.Err() != nil {
+			log.Debug().Msg("Outbox worker stopping - context cancelled during fetch")
+			return
+		}
 		log.Error().Err(err).Msg("Failed to fetch outbox entries")
 		return
 	}
@@ -116,8 +131,20 @@ func (w *OutboxWorker) processBatch() {
 	log.Debug().Int("count", len(entries)).Msg("Processing outbox entries")
 
 	for _, entry := range entries {
+		// Check for graceful shutdown before processing each entry
+		select {
+		case <-ctx.Done():
+			log.Info().Int("remaining", len(entries)).Msg("Outbox worker stopping - graceful shutdown during batch")
+			return
+		default:
+		}
+
 		err := w.processEntry(ctx, entry)
 		if err != nil {
+			if ctx.Err() != nil {
+				log.Debug().Msg("Outbox worker stopping - context cancelled during entry processing")
+				return
+			}
 			log.Error().Err(err).Str("id", entry.ID.String()).Msg("Failed to process outbox entry")
 			w.incrementAttempts(ctx, entry.ID)
 		} else {

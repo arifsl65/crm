@@ -95,6 +95,84 @@ type OutboxPayload struct {
 	ClientID  *uuid.UUID `json:"client_id,omitempty"`
 }
 
+// queueEmailParams contains parameters for queueing an email.
+type queueEmailParams struct {
+	TenantID   uuid.UUID
+	UserID     uuid.UUID
+	ToEmail    string
+	ToName     *string
+	FromEmail  string
+	Subject    string
+	BodyHTML   string
+	BodyText   string
+	ClientID   *uuid.UUID
+	TemplateID *uuid.UUID
+	EmailType  string
+}
+
+// queueEmail creates an email record and outbox entry in a single transaction.
+// This is the common logic shared between Send and SendFromTemplate.
+func (h *EmailHandler) queueEmail(c *gin.Context, tenantDB *middleware.TenantDB, params queueEmailParams) (*Email, error) {
+	ctx := c.Request.Context()
+	id := uuid.New()
+	now := time.Now()
+
+	var e Email
+	err := tenantDB.Transaction(c, func(tx pgx.Tx) error {
+		// Insert email record with status 'queued'
+		query := `
+			INSERT INTO emails (
+				id, tenant_id, client_id, staff_id, template_id, direction,
+				to_email, to_name, from_email, subject, body_html, body_text,
+				type, status, is_read, created_at
+			) VALUES ($1, $2, $3, $4, $5, 'outbound', $6, $7, $8, $9, $10, $11, $12, 'queued', true, $13)
+			RETURNING id, tenant_id, client_id, staff_id, template_id, direction,
+			          to_email, to_name, from_email, subject, body_html, body_text,
+			          type, status, is_read, created_at
+		`
+		err := tx.QueryRow(ctx, query,
+			id, params.TenantID, params.ClientID, params.UserID, params.TemplateID,
+			params.ToEmail, params.ToName, params.FromEmail, params.Subject, params.BodyHTML, &params.BodyText,
+			params.EmailType, now,
+		).Scan(
+			&e.ID, &e.TenantID, &e.ClientID, &e.StaffID, &e.TemplateID, &e.Direction,
+			&e.ToEmail, &e.ToName, &e.FromEmail, &e.Subject, &e.BodyHTML, &e.BodyText,
+			&e.Type, &e.Status, &e.IsRead, &e.CreatedAt,
+		)
+		if err != nil {
+			return err
+		}
+
+		// Insert into outbox for async processing
+		payload := OutboxPayload{
+			EmailID:   id,
+			ToEmail:   params.ToEmail,
+			ToName:    params.ToName,
+			FromEmail: params.FromEmail,
+			Subject:   params.Subject,
+			BodyHTML:  params.BodyHTML,
+			BodyText:  params.BodyText,
+			ClientID:  params.ClientID,
+		}
+		payloadJSON, err := json.Marshal(payload)
+		if err != nil {
+			return fmt.Errorf("failed to marshal outbox payload: %w", err)
+		}
+
+		_, err = tx.Exec(ctx, `
+			INSERT INTO outbox (tenant_id, event_type, payload, created_at)
+			VALUES ($1, 'email_send', $2, $3)
+		`, params.TenantID, payloadJSON, now)
+
+		return err
+	})
+
+	if err != nil {
+		return nil, err
+	}
+	return &e, nil
+}
+
 // List returns all emails for the tenant.
 // GET /api/v1/emails
 func (h *EmailHandler) List(c *gin.Context) {
@@ -349,61 +427,20 @@ func (h *EmailHandler) Send(c *gin.Context) {
 		bodyText = *req.BodyText
 	}
 
-	// Create email record and outbox entry in a single transaction
-	// NO HTTP calls inside the transaction!
-	id := uuid.New()
-	now := time.Now()
-
-	var e Email
-	err := tenantDB.Transaction(c, func(tx pgx.Tx) error {
-		// Insert email record with status 'queued'
-		query := `
-			INSERT INTO emails (
-				id, tenant_id, client_id, staff_id, template_id, direction,
-				to_email, to_name, from_email, subject, body_html, body_text,
-				type, status, is_read, created_at
-			) VALUES ($1, $2, $3, $4, $5, 'outbound', $6, $7, $8, $9, $10, $11, $12, 'queued', true, $13)
-			RETURNING id, tenant_id, client_id, staff_id, template_id, direction,
-			          to_email, to_name, from_email, subject, body_html, body_text,
-			          type, status, is_read, created_at
-		`
-		err := tx.QueryRow(ctx, query,
-			id, tenantID, req.ClientID, userID, req.TemplateID,
-			req.ToEmail, req.ToName, h.emailClient.GetFromEmail(), req.Subject, req.BodyHTML, &bodyText,
-			emailType, now,
-		).Scan(
-			&e.ID, &e.TenantID, &e.ClientID, &e.StaffID, &e.TemplateID, &e.Direction,
-			&e.ToEmail, &e.ToName, &e.FromEmail, &e.Subject, &e.BodyHTML, &e.BodyText,
-			&e.Type, &e.Status, &e.IsRead, &e.CreatedAt,
-		)
-		if err != nil {
-			return err
-		}
-
-		// Insert into outbox for async processing
-		payload := OutboxPayload{
-			EmailID:   id,
-			ToEmail:   req.ToEmail,
-			ToName:    req.ToName,
-			FromEmail: h.emailClient.GetFromEmail(),
-			Subject:   req.Subject,
-			BodyHTML:  req.BodyHTML,
-			BodyText:  bodyText,
-			ClientID:  req.ClientID,
-		}
-		payloadJSON, err := json.Marshal(payload)
-		if err != nil {
-			return fmt.Errorf("failed to marshal outbox payload: %w", err)
-		}
-
-		_, err = tx.Exec(ctx, `
-			INSERT INTO outbox (tenant_id, event_type, payload, created_at)
-			VALUES ($1, 'email_send', $2, $3)
-		`, tenantID, payloadJSON, now)
-
-		return err
+	// Queue email using common helper
+	e, err := h.queueEmail(c, tenantDB, queueEmailParams{
+		TenantID:   tenantID,
+		UserID:     userID,
+		ToEmail:    req.ToEmail,
+		ToName:     req.ToName,
+		FromEmail:  h.emailClient.GetFromEmail(),
+		Subject:    req.Subject,
+		BodyHTML:   req.BodyHTML,
+		BodyText:   bodyText,
+		ClientID:   req.ClientID,
+		TemplateID: req.TemplateID,
+		EmailType:  emailType,
 	})
-
 	if err != nil {
 		log.Error().Err(err).Msg("Failed to queue email")
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to queue email"})
@@ -609,60 +646,20 @@ func (h *EmailHandler) SendFromTemplate(c *gin.Context) {
 		return
 	}
 
-	// Create email record and outbox entry in a single transaction
-	id := uuid.New()
-	now := time.Now()
-
-	var e Email
-	err = tenantDB.Transaction(c, func(tx pgx.Tx) error {
-		// Insert email record with status 'queued'
-		query := `
-			INSERT INTO emails (
-				id, tenant_id, client_id, staff_id, template_id, direction,
-				to_email, to_name, from_email, subject, body_html, body_text,
-				type, status, is_read, created_at
-			) VALUES ($1, $2, $3, $4, $5, 'outbound', $6, $7, $8, $9, $10, $11, $12, 'queued', true, $13)
-			RETURNING id, tenant_id, client_id, staff_id, template_id, direction,
-			          to_email, to_name, from_email, subject, body_html, body_text,
-			          type, status, is_read, created_at
-		`
-		err := tx.QueryRow(ctx, query,
-			id, tenantID, req.ClientID, userID, req.TemplateID,
-			req.ToEmail, req.ToName, h.emailClient.GetFromEmail(), subject, bodyHTML, &bodyText,
-			template.Type, now,
-		).Scan(
-			&e.ID, &e.TenantID, &e.ClientID, &e.StaffID, &e.TemplateID, &e.Direction,
-			&e.ToEmail, &e.ToName, &e.FromEmail, &e.Subject, &e.BodyHTML, &e.BodyText,
-			&e.Type, &e.Status, &e.IsRead, &e.CreatedAt,
-		)
-		if err != nil {
-			return err
-		}
-
-		// Insert into outbox for async processing
-		payload := OutboxPayload{
-			EmailID:   id,
-			ToEmail:   req.ToEmail,
-			ToName:    req.ToName,
-			FromEmail: h.emailClient.GetFromEmail(),
-			Subject:   subject,
-			BodyHTML:  bodyHTML,
-			BodyText:  bodyText,
-			ClientID:  req.ClientID,
-		}
-		payloadJSON, err := json.Marshal(payload)
-		if err != nil {
-			return fmt.Errorf("failed to marshal outbox payload: %w", err)
-		}
-
-		_, err = tx.Exec(ctx, `
-			INSERT INTO outbox (tenant_id, event_type, payload, created_at)
-			VALUES ($1, 'email_send', $2, $3)
-		`, tenantID, payloadJSON, now)
-
-		return err
+	// Queue email using common helper
+	e, err := h.queueEmail(c, tenantDB, queueEmailParams{
+		TenantID:   tenantID,
+		UserID:     userID,
+		ToEmail:    req.ToEmail,
+		ToName:     req.ToName,
+		FromEmail:  h.emailClient.GetFromEmail(),
+		Subject:    subject,
+		BodyHTML:   bodyHTML,
+		BodyText:   bodyText,
+		ClientID:   req.ClientID,
+		TemplateID: &req.TemplateID,
+		EmailType:  template.Type,
 	})
-
 	if err != nil {
 		log.Error().Err(err).Msg("Failed to queue template email")
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to queue email"})

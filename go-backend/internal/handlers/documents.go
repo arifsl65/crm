@@ -1,7 +1,6 @@
 package handlers
 
 import (
-	"bytes"
 	"crypto/rand"
 	"encoding/hex"
 	"fmt"
@@ -24,70 +23,8 @@ import (
 	"github.com/accountant-crm/go-backend/internal/storage"
 )
 
-// Magic byte signatures for file type validation
-// These are the first few bytes that identify file types
-var magicBytes = map[string][]byte{
-	"application/pdf":  {0x25, 0x50, 0x44, 0x46}, // %PDF
-	"image/jpeg":       {0xFF, 0xD8, 0xFF},
-	"image/png":        {0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A},
-	"image/gif":        {0x47, 0x49, 0x46, 0x38}, // GIF8
-	"application/zip":  {0x50, 0x4B, 0x03, 0x04},
-	"image/webp":       {0x52, 0x49, 0x46, 0x46}, // RIFF (need to check WEBP later)
-	"application/msword": {0xD0, 0xCF, 0x11, 0xE0}, // OLE compound doc
-	"application/vnd.openxmlformats-officedocument.wordprocessingml.document": {0x50, 0x4B, 0x03, 0x04}, // DOCX (ZIP-based)
-	"application/vnd.openxmlformats-officedocument.spreadsheetml.sheet":       {0x50, 0x4B, 0x03, 0x04}, // XLSX (ZIP-based)
-	"application/vnd.ms-excel": {0xD0, 0xCF, 0x11, 0xE0}, // XLS (OLE)
-	"text/csv":                 nil,                      // No magic bytes for text files
-	"text/plain":               nil,
-}
-
-// Allowed MIME types for document uploads
-var allowedMimeTypes = map[string]bool{
-	"application/pdf":  true,
-	"image/jpeg":       true,
-	"image/png":        true,
-	"image/gif":        true,
-	"image/webp":       true,
-	"application/zip":  true,
-	"application/msword": true,
-	"application/vnd.openxmlformats-officedocument.wordprocessingml.document": true,
-	"application/vnd.openxmlformats-officedocument.spreadsheetml.sheet":       true,
-	"application/vnd.ms-excel": true,
-	"text/csv":                 true,
-	"text/plain":               true,
-}
-
-// validateMagicBytes checks if the file content matches the claimed MIME type
-func validateMagicBytes(data []byte, claimedMime string) bool {
-	expected, exists := magicBytes[claimedMime]
-
-	// No magic bytes to check for text files
-	if expected == nil || !exists {
-		// For text files, do a basic check for binary content
-		if strings.HasPrefix(claimedMime, "text/") {
-			// Check first 512 bytes for binary content
-			checkLen := 512
-			if len(data) < checkLen {
-				checkLen = len(data)
-			}
-			for i := 0; i < checkLen; i++ {
-				// Allow common text characters
-				if data[i] < 0x09 || (data[i] > 0x0D && data[i] < 0x20 && data[i] != 0x1B) {
-					if data[i] != 0x00 { // Allow UTF-16 BOM
-						return false // Binary content found
-					}
-				}
-			}
-		}
-		return true
-	}
-
-	if len(data) < len(expected) {
-		return false
-	}
-
-	return bytes.Equal(data[:len(expected)], expected)
-}
+// Note: Magic byte validation consolidated in middleware/magicbyte.go
+// Use middleware.AllowedDocumentMimeTypes and middleware.ValidateMagicBytesForMime
 
 // MaxUploadSize is the maximum file size (50MB)
 const MaxUploadSize = 50 * 1024 * 1024
@@ -1576,16 +1513,16 @@ func (h *DocumentHandler) Upload(c *gin.Context) {
 	defer file.Close()
 
 	// Read only first 512 bytes for MIME detection (avoids buffering 50MB in memory)
-	magicBytes := make([]byte, 512)
-	n, err := io.ReadFull(file, magicBytes)
+	fileHeader := make([]byte, 512)
+	n, err := io.ReadFull(file, fileHeader)
 	if err != nil && err != io.ErrUnexpectedEOF && err != io.EOF {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed_to_read_file"})
 		return
 	}
-	magicBytes = magicBytes[:n] // Trim to actual bytes read
+	fileHeader = fileHeader[:n] // Trim to actual bytes read
 
 	// Detect MIME type from content
-	detectedMime := http.DetectContentType(magicBytes)
+	detectedMime := http.DetectContentType(fileHeader)
 
 	// Get claimed MIME type from header
 	claimedMime := header.Header.Get("Content-Type")
@@ -1593,8 +1530,8 @@ func (h *DocumentHandler) Upload(c *gin.Context) {
 		claimedMime = detectedMime
 	}
 
-	// Validate MIME type is allowed
-	if !allowedMimeTypes[detectedMime] && !allowedMimeTypes[claimedMime] {
+	// Validate MIME type is allowed (using consolidated middleware types)
+	if !middleware.AllowedDocumentMimeTypes[detectedMime] && !middleware.AllowedDocumentMimeTypes[claimedMime] {
 		c.JSON(http.StatusBadRequest, gin.H{
 			"error":   "invalid_file_type",
 			"message": fmt.Sprintf("File type '%s' is not allowed", detectedMime),
@@ -1602,8 +1539,8 @@ func (h *DocumentHandler) Upload(c *gin.Context) {
 		return
 	}
 
-	// Validate magic bytes match claimed type
-	if !validateMagicBytes(magicBytes, detectedMime) {
+	// Validate magic bytes match claimed type (using consolidated middleware function)
+	if !middleware.ValidateMagicBytesForMime(fileHeader, detectedMime) {
 		log.Warn().
 			Str("document_id", documentID.String()).
 			Str("claimed_mime", claimedMime).
@@ -1857,17 +1794,18 @@ func (h *DocumentHandler) UploadViaQR(c *gin.Context) {
 	defer file.Close()
 
 	// Read only first 512 bytes for MIME detection (avoids buffering large files in memory)
-	magicBytes := make([]byte, 512)
-	n, err := io.ReadFull(file, magicBytes)
+	fileHeader := make([]byte, 512)
+	n, err := io.ReadFull(file, fileHeader)
 	if err != nil && err != io.ErrUnexpectedEOF && err != io.EOF {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed_to_read_file"})
 		return
 	}
-	magicBytes = magicBytes[:n]
+	fileHeader = fileHeader[:n]
 
-	detectedMime := http.DetectContentType(magicBytes)
+	detectedMime := http.DetectContentType(fileHeader)
 
-	if !allowedMimeTypes[detectedMime] {
+	// Validate MIME type is allowed (using consolidated middleware types)
+	if !middleware.AllowedDocumentMimeTypes[detectedMime] {
 		c.JSON(http.StatusBadRequest, gin.H{
 			"error":   "invalid_file_type",
 			"message": fmt.Sprintf("File type '%s' is not allowed", detectedMime),
@@ -1875,7 +1813,8 @@ func (h *DocumentHandler) UploadViaQR(c *gin.Context) {
 		return
 	}
 
-	if !validateMagicBytes(magicBytes, detectedMime) {
+	// Validate magic bytes match claimed type (using consolidated middleware function)
+	if !middleware.ValidateMagicBytesForMime(fileHeader, detectedMime) {
 		c.JSON(http.StatusBadRequest, gin.H{
 			"error":   "invalid_file_content",
 			"message": "File content does not match its declared type",

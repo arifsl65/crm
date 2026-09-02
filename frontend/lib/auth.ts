@@ -6,6 +6,7 @@ export interface User {
   name: string;
   role: string;
   tenant_id: string;
+  two_factor_enabled?: boolean;
 }
 
 export interface AuthResponse {
