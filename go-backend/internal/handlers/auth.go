@@ -828,7 +828,8 @@ func (h *AuthHandler) updatePasswordAndClearToken(ctx context.Context, userID uu
 // GetMe returns the current user's profile.
 // GET /api/v1/auth/me
 func (h *AuthHandler) GetMe(c *gin.Context) {
-	userID, _ := middleware.GetUserID(c)
+	userID, ok := middleware.GetUserID(c)
+	log.Debug().Str("userID", userID.String()).Bool("ok", ok).Msg("GetMe: extracted userID from context")
 
 	tenantDB, ok := middleware.GetTenantDB(c)
 	if !ok {
@@ -840,7 +841,7 @@ func (h *AuthHandler) GetMe(c *gin.Context) {
 	}
 
 	query := `
-		SELECT id, tenant_id, email, name, role, phone, avatar_url, preferences,
+		SELECT id, tenant_id, email, COALESCE(CONCAT(first_name, ' ', last_name), '') as name, role, phone, avatar_url, settings,
 		       last_login_at, created_at
 		FROM users WHERE id = $1 AND deleted_at IS NULL
 	`
@@ -853,17 +854,18 @@ func (h *AuthHandler) GetMe(c *gin.Context) {
 		Role        string
 		Phone       *string
 		AvatarURL   *string
-		Preferences []byte // JSONB as bytes
+		Settings    []byte // JSONB as bytes
 		LastLoginAt *time.Time
 		CreatedAt   time.Time
 	}
 
 	err := tenantDB.QueryRowScan(c, []interface{}{
 		&user.ID, &user.TenantID, &user.Email, &user.Name, &user.Role,
-		&user.Phone, &user.AvatarURL, &user.Preferences,
+		&user.Phone, &user.AvatarURL, &user.Settings,
 		&user.LastLoginAt, &user.CreatedAt,
 	}, query, userID)
 	if err != nil {
+		log.Debug().Err(err).Str("userID", userID.String()).Str("tenantID", tenantDB.TenantID()).Str("role", tenantDB.Role()).Msg("GetMe: QueryRowScan failed")
 		c.JSON(http.StatusNotFound, gin.H{
 			"error":   "not_found",
 			"message": "User not found",
@@ -876,13 +878,13 @@ func (h *AuthHandler) GetMe(c *gin.Context) {
 		tenantIDStr = user.TenantID.String()
 	}
 
-	// Parse preferences JSONB
-	var preferences map[string]interface{}
-	if len(user.Preferences) > 0 {
-		_ = json.Unmarshal(user.Preferences, &preferences)
+	// Parse settings JSONB (returned as "preferences" for API compatibility)
+	var settings map[string]interface{}
+	if len(user.Settings) > 0 {
+		_ = json.Unmarshal(user.Settings, &settings)
 	}
-	if preferences == nil {
-		preferences = map[string]interface{}{}
+	if settings == nil {
+		settings = map[string]interface{}{}
 	}
 
 	c.JSON(http.StatusOK, gin.H{
@@ -893,7 +895,7 @@ func (h *AuthHandler) GetMe(c *gin.Context) {
 		"role":          user.Role,
 		"phone":         user.Phone,
 		"avatar_url":    user.AvatarURL,
-		"preferences":   preferences,
+		"settings":      settings,
 		"last_login_at": user.LastLoginAt,
 		"created_at":    user.CreatedAt,
 	})
@@ -901,15 +903,15 @@ func (h *AuthHandler) GetMe(c *gin.Context) {
 
 // UpdateMeRequest is the request body for updating user profile.
 type UpdateMeRequest struct {
-	Name        *string                `json:"name,omitempty"`
-	Phone       *string                `json:"phone,omitempty"`
-	AvatarURL   *string                `json:"avatar_url,omitempty"`
-	Preferences map[string]interface{} `json:"preferences,omitempty"` // e.g., {"theme": "dark"}
+	Name      *string                `json:"name,omitempty"`       // Will be split into first_name and last_name
+	Phone     *string                `json:"phone,omitempty"`
+	AvatarURL *string                `json:"avatar_url,omitempty"`
+	Settings  map[string]interface{} `json:"settings,omitempty"` // e.g., {"theme": "dark"}
 }
 
 // UpdateMe updates the current user's profile.
 // PATCH /api/v1/auth/me
-// Supports: name, phone, avatar_url, preferences (including theme)
+// Supports: name (splits into first_name/last_name), phone, avatar_url, settings (including theme)
 func (h *AuthHandler) UpdateMe(c *gin.Context) {
 	userID, _ := middleware.GetUserID(c)
 	ctx := c.Request.Context()
@@ -929,8 +931,18 @@ func (h *AuthHandler) UpdateMe(c *gin.Context) {
 	argNum := 1
 
 	if req.Name != nil {
-		setClauses = append(setClauses, fmt.Sprintf("name = $%d", argNum))
-		args = append(args, *req.Name)
+		// Split name into first_name and last_name
+		parts := strings.SplitN(*req.Name, " ", 2)
+		firstName := parts[0]
+		lastName := ""
+		if len(parts) > 1 {
+			lastName = parts[1]
+		}
+		setClauses = append(setClauses, fmt.Sprintf("first_name = $%d", argNum))
+		args = append(args, firstName)
+		argNum++
+		setClauses = append(setClauses, fmt.Sprintf("last_name = $%d", argNum))
+		args = append(args, lastName)
 		argNum++
 	}
 	if req.Phone != nil {
@@ -943,10 +955,10 @@ func (h *AuthHandler) UpdateMe(c *gin.Context) {
 		args = append(args, *req.AvatarURL)
 		argNum++
 	}
-	if req.Preferences != nil {
-		// Merge with existing preferences using JSONB || operator
-		setClauses = append(setClauses, fmt.Sprintf("preferences = COALESCE(preferences, '{}'::jsonb) || $%d::jsonb", argNum))
-		args = append(args, req.Preferences)
+	if req.Settings != nil {
+		// Merge with existing settings using JSONB || operator
+		setClauses = append(setClauses, fmt.Sprintf("settings = COALESCE(settings, '{}'::jsonb) || $%d::jsonb", argNum))
+		args = append(args, req.Settings)
 		argNum++
 	}
 

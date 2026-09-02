@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5"
 	"github.com/rs/zerolog/log"
 
 	"github.com/accountant-crm/go-backend/internal/database"
@@ -135,23 +136,27 @@ func (w *OutboxWorker) fetchPendingEntries(ctx context.Context) ([]OutboxEntry, 
 		FOR UPDATE SKIP LOCKED
 	`
 
-	rows, err := w.db.Query(ctx, query, w.batchSize)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-
 	var entries []OutboxEntry
-	for rows.Next() {
-		var e OutboxEntry
-		err := rows.Scan(&e.ID, &e.TenantID, &e.EventType, &e.Payload, &e.CreatedAt, &e.Attempts)
-		if err != nil {
-			return nil, err
-		}
-		entries = append(entries, e)
-	}
 
-	return entries, rows.Err()
+	// Use SuperAdminTransaction to bypass RLS - worker needs cross-tenant access
+	err := w.db.SuperAdminTransaction(ctx, func(tx pgx.Tx) error {
+		rows, err := tx.Query(ctx, query, w.batchSize)
+		if err != nil {
+			return err
+		}
+		defer rows.Close()
+
+		for rows.Next() {
+			var e OutboxEntry
+			if err := rows.Scan(&e.ID, &e.TenantID, &e.EventType, &e.Payload, &e.CreatedAt, &e.Attempts); err != nil {
+				return err
+			}
+			entries = append(entries, e)
+		}
+		return rows.Err()
+	})
+
+	return entries, err
 }
 
 func (w *OutboxWorker) processEntry(ctx context.Context, entry OutboxEntry) error {
@@ -179,11 +184,15 @@ func (w *OutboxWorker) processEmailSend(ctx context.Context, entry OutboxEntry) 
 	}
 
 	// Update email record with sent status and resend_id
-	_, err = w.db.Exec(ctx, `
-		UPDATE emails
-		SET status = 'sent', resend_id = $1, sent_at = NOW()
-		WHERE id = $2 AND tenant_id = $3
-	`, resendID, payload.EmailID, entry.TenantID)
+	// Use TenantTransaction with the entry's tenant_id for RLS
+	err = w.db.TenantTransaction(ctx, entry.TenantID.String(), "staff", func(tx pgx.Tx) error {
+		_, err := tx.Exec(ctx, `
+			UPDATE emails
+			SET status = 'sent', resend_id = $1, sent_at = NOW()
+			WHERE id = $2 AND tenant_id = $3
+		`, resendID, payload.EmailID, entry.TenantID)
+		return err
+	})
 
 	if err != nil {
 		log.Error().Err(err).Str("email_id", payload.EmailID.String()).Msg("Failed to update email status after sending")
@@ -212,11 +221,15 @@ func (w *OutboxWorker) processChaseEmailSend(ctx context.Context, entry OutboxEn
 	}
 
 	// Update email record with sent status and resend_id
-	_, err = w.db.Exec(ctx, `
-		UPDATE emails
-		SET status = 'sent', resend_id = $1, sent_at = NOW()
-		WHERE id = $2 AND tenant_id = $3
-	`, resendID, payload.EmailID, entry.TenantID)
+	// Use TenantTransaction with the entry's tenant_id for RLS
+	err = w.db.TenantTransaction(ctx, entry.TenantID.String(), "staff", func(tx pgx.Tx) error {
+		_, err := tx.Exec(ctx, `
+			UPDATE emails
+			SET status = 'sent', resend_id = $1, sent_at = NOW()
+			WHERE id = $2 AND tenant_id = $3
+		`, resendID, payload.EmailID, entry.TenantID)
+		return err
+	})
 
 	if err != nil {
 		log.Error().Err(err).Str("email_id", payload.EmailID.String()).Msg("Failed to update chase email status")
@@ -233,14 +246,20 @@ func (w *OutboxWorker) processChaseEmailSend(ctx context.Context, entry OutboxEn
 }
 
 func (w *OutboxWorker) markPublished(ctx context.Context, id uuid.UUID) {
-	_, err := w.db.Exec(ctx, `UPDATE outbox SET published_at = NOW() WHERE id = $1`, id)
+	err := w.db.SuperAdminTransaction(ctx, func(tx pgx.Tx) error {
+		_, err := tx.Exec(ctx, `UPDATE outbox SET published_at = NOW() WHERE id = $1`, id)
+		return err
+	})
 	if err != nil {
 		log.Error().Err(err).Str("id", id.String()).Msg("Failed to mark outbox entry as published")
 	}
 }
 
 func (w *OutboxWorker) incrementAttempts(ctx context.Context, id uuid.UUID) {
-	_, err := w.db.Exec(ctx, `UPDATE outbox SET attempts = attempts + 1 WHERE id = $1`, id)
+	err := w.db.SuperAdminTransaction(ctx, func(tx pgx.Tx) error {
+		_, err := tx.Exec(ctx, `UPDATE outbox SET attempts = attempts + 1 WHERE id = $1`, id)
+		return err
+	})
 	if err != nil {
 		log.Error().Err(err).Str("id", id.String()).Msg("Failed to increment outbox attempts")
 	}

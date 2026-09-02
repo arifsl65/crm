@@ -34,15 +34,25 @@ func TenantRLS(pool *database.Pool) gin.HandlerFunc {
 		if tid, exists := c.Get(AuthTenantID); exists {
 			if id, ok := tid.(uuid.UUID); ok {
 				tenantID = id.String()
+			} else {
+				log.Warn().Interface("tid_type", tid).Msg("TenantRLS: tenant_id is not uuid.UUID")
 			}
+		} else {
+			log.Warn().Msg("TenantRLS: AuthTenantID not found in context")
 		}
 
 		// Get role from context (set by JWTAuth)
 		if r, exists := c.Get(AuthRole); exists {
 			if roleStr, ok := r.(string); ok {
 				role = roleStr
+			} else {
+				log.Warn().Interface("role_type", r).Msg("TenantRLS: role is not string")
 			}
+		} else {
+			log.Warn().Msg("TenantRLS: AuthRole not found in context")
 		}
+
+		log.Debug().Str("tenantID", tenantID).Str("role", role).Str("path", c.Request.URL.Path).Msg("TenantRLS: Creating TenantDB")
 
 		// Create tenant-scoped DB accessor
 		tenantDB := &TenantDB{
