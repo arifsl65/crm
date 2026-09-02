@@ -29,6 +29,7 @@ import (
 	"github.com/accountant-crm/go-backend/internal/email"
 	"github.com/accountant-crm/go-backend/internal/handlers"
 	"github.com/accountant-crm/go-backend/internal/middleware"
+	"github.com/accountant-crm/go-backend/internal/oauth"
 	"github.com/accountant-crm/go-backend/internal/storage"
 	"github.com/accountant-crm/go-backend/internal/websocket"
 	"github.com/accountant-crm/go-backend/internal/worker"
@@ -37,14 +38,15 @@ import (
 // Application holds all the application dependencies.
 // This struct reduces the number of parameters passed to setupRouter.
 type Application struct {
-	Config    *config.Config
-	DB        *database.Pool
-	Redis     *cache.Client
-	AIClient  *ai.Client
-	JWT       *auth.JWTManager
-	Audit     *audit.Logger
-	Handlers  *Handlers
-	WSHub     *websocket.Hub
+	Config      *config.Config
+	DB          *database.Pool
+	Redis       *cache.Client
+	AIClient    *ai.Client
+	JWT         *auth.JWTManager
+	Audit       *audit.Logger
+	Handlers    *Handlers
+	WSHub       *websocket.Hub
+	RateLimiter *middleware.AuthRateLimiter
 }
 
 // Handlers holds all HTTP handler instances.
@@ -69,6 +71,7 @@ type Handlers struct {
 	Notification *handlers.NotificationHandler
 	Settings     *handlers.SettingsHandler
 	ESign        *handlers.ESignHandler
+	Portal       *handlers.PortalHandler
 }
 
 func main() {
@@ -168,17 +171,29 @@ func main() {
 	// Initialize audit logger
 	auditLogger := audit.NewLogger(db)
 
-	// Initialize encryptor for sensitive data (IMAP passwords)
+	// Initialize encryptor for sensitive data (IMAP passwords, OAuth tokens)
 	var encryptor *crypto.Encryptor
 	encryptor, err = crypto.NewEncryptorFromEnv()
 	if err != nil {
 		if err == crypto.ErrKeyNotConfigured {
-			log.Warn().Msg("ENCRYPTION_KEY not configured - IMAP credential storage will be disabled")
+			log.Warn().Msg("ENCRYPTION_KEY not configured - IMAP/OAuth credential storage will be disabled")
 		} else {
 			log.Error().Err(err).Msg("Failed to initialize encryptor")
 		}
 	} else {
 		log.Info().Msg("Credential encryption configured (AES-256-GCM)")
+	}
+
+	// Initialize OAuth service for email account connections
+	var oauthService *oauth.Service
+	if cfg.OAuth.Google.Enabled || cfg.OAuth.Microsoft.Enabled {
+		oauthService = oauth.NewService(redis, encryptor, cfg.OAuth)
+		log.Info().
+			Bool("google", cfg.OAuth.Google.Enabled).
+			Bool("microsoft", cfg.OAuth.Microsoft.Enabled).
+			Msg("OAuth service initialized")
+	} else {
+		log.Info().Msg("OAuth not configured - email OAuth connections disabled")
 	}
 
 	// Initialize WebSocket hub
@@ -187,13 +202,14 @@ func main() {
 
 	// Build Application with all dependencies
 	app := &Application{
-		Config:   cfg,
-		DB:       db,
-		Redis:    redis,
-		AIClient: aiClient,
-		JWT:      jwtManager,
-		Audit:    auditLogger,
-		WSHub:    wsHub,
+		Config:      cfg,
+		DB:          db,
+		Redis:       redis,
+		AIClient:    aiClient,
+		JWT:         jwtManager,
+		Audit:       auditLogger,
+		WSHub:       wsHub,
+		RateLimiter: authRateLimiter,
 		Handlers: &Handlers{
 			Auth:           handlers.NewAuthHandler(db, jwtManager, sessionManager, emailClient, cfg.FrontendURL, authRateLimiter, auditLogger, redis),
 			Tenant:         handlers.NewTenantHandler(db),
@@ -210,11 +226,12 @@ func main() {
 			// Email module handlers
 			Email:         handlers.NewEmailHandler(db, emailClient, auditLogger, authRateLimiter),
 			EmailTemplate: handlers.NewEmailTemplateHandler(db, auditLogger),
-			EmailAccount:  handlers.NewEmailAccountHandler(db, auditLogger, encryptor),
+			EmailAccount:  handlers.NewEmailAccountHandler(db, auditLogger, encryptor, oauthService),
 			ChaseLog:     handlers.NewChaseLogHandler(db, emailClient, auditLogger, authRateLimiter),
 			Notification: handlers.NewNotificationHandler(db, auditLogger),
 			Settings:     handlers.NewSettingsHandler(db, auditLogger),
-			ESign:        handlers.NewESignHandler(db, auditLogger),
+			ESign:        handlers.NewESignHandler(db, auditLogger, emailClient, cfg.FrontendURL),
+			Portal:       handlers.NewPortalHandler(db),
 		},
 	}
 
@@ -659,6 +676,19 @@ func setupRouter(app *Application) *gin.Engine {
 			esign.GET("/:id", middleware.ValidateUUID("id"), h.ESign.Get)
 			esign.POST("/:id/send", middleware.ValidateUUID("id"), h.ESign.Send)
 			esign.DELETE("/:id", middleware.ValidateUUID("id"), h.ESign.Delete)
+		}
+
+		// Client Portal routes (client role only)
+		portal := protected.Group("/portal")
+		portal.Use(middleware.RequireRole("client"))
+		{
+			portal.GET("/dashboard", h.Portal.Dashboard)
+			portal.GET("/me", h.Portal.GetProfile)
+			portal.PATCH("/me", h.Portal.UpdateProfile)
+			portal.GET("/documents", h.Portal.ListDocuments)
+			portal.GET("/services", h.Portal.ListServices)
+			portal.GET("/deadlines", h.Portal.ListDeadlines)
+			portal.POST("/password", app.RateLimiter.PasswordChangeLimit(), h.Portal.ChangePassword)
 		}
 
 		// WebSocket routes (protected)

@@ -53,6 +53,9 @@ var (
 
 	// Chase bulk email: 10 per tenant per hour (bulk sends)
 	ChaseRateLimit = RateLimitConfig{MaxAttempts: 10, Window: time.Hour}
+
+	// Portal password change: 3 per user per hour (brute force protection)
+	PasswordChangeRateLimit = RateLimitConfig{MaxAttempts: 3, Window: time.Hour}
 )
 
 // checkRateLimit checks if the rate limit is exceeded for a given key.
@@ -181,6 +184,34 @@ func (rl *AuthRateLimiter) CheckIdempotencyKey(ctx context.Context, tenantID, ke
 	}
 	// If currentCount > 1, this is a duplicate request
 	return result.CurrentCount > 1, nil
+}
+
+// PasswordChangeLimit middleware for /portal/password endpoint.
+// Limits password changes to 3 per hour per user (brute force protection).
+func (rl *AuthRateLimiter) PasswordChangeLimit() gin.HandlerFunc {
+	return func(c *gin.Context) {
+		userID, exists := GetUserID(c)
+		if !exists {
+			c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{"error": "unauthorized"})
+			return
+		}
+
+		key := fmt.Sprintf("ratelimit:password-change:%s", userID.String())
+		allowed, count, ttl, err := rl.checkRateLimit(c.Request.Context(), key, PasswordChangeRateLimit)
+		if err != nil {
+			log.Error().Err(err).Msg("Rate limit check failed")
+			// Allow request on error to avoid blocking legitimate users
+			c.Next()
+			return
+		}
+
+		if !allowed {
+			RateLimitExceededWithLog(c, "password-change", userID.String(), count, ttl)
+			return
+		}
+
+		c.Next()
+	}
 }
 
 // GetRateLimiter retrieves the rate limiter from gin context.
