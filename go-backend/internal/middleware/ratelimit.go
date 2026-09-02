@@ -47,6 +47,12 @@ var (
 
 	// Refresh: 10 per token family, 1 hour
 	RefreshRateLimit = RateLimitConfig{MaxAttempts: 10, Window: time.Hour}
+
+	// Email send: 100 per tenant per hour (prevents quota exhaustion)
+	EmailSendRateLimit = RateLimitConfig{MaxAttempts: 100, Window: time.Hour}
+
+	// Chase bulk email: 10 per tenant per hour (bulk sends)
+	ChaseRateLimit = RateLimitConfig{MaxAttempts: 10, Window: time.Hour}
 )
 
 // checkRateLimit checks if the rate limit is exceeded for a given key.
@@ -150,6 +156,31 @@ func (rl *AuthRateLimiter) Check2FARate(ctx context.Context, sessionID string) (
 func (rl *AuthRateLimiter) CheckBackupCodeRate(ctx context.Context, ip, email string) (bool, int, int, error) {
 	key := fmt.Sprintf("ratelimit:backup-code:%s:%s", ip, email)
 	return rl.checkRateLimit(ctx, key, BackupCodeRateLimit)
+}
+
+// CheckEmailSendRate checks email sending rate limit by tenant.
+func (rl *AuthRateLimiter) CheckEmailSendRate(ctx context.Context, tenantID string) (bool, int, int, error) {
+	key := fmt.Sprintf("ratelimit:email-send:%s", tenantID)
+	return rl.checkRateLimit(ctx, key, EmailSendRateLimit)
+}
+
+// CheckChaseRate checks chase bulk email rate limit by tenant.
+func (rl *AuthRateLimiter) CheckChaseRate(ctx context.Context, tenantID string) (bool, int, int, error) {
+	key := fmt.Sprintf("ratelimit:chase:%s", tenantID)
+	return rl.checkRateLimit(ctx, key, ChaseRateLimit)
+}
+
+// CheckIdempotencyKey checks if an idempotency key has been used.
+// Returns true if the key exists (duplicate request).
+func (rl *AuthRateLimiter) CheckIdempotencyKey(ctx context.Context, tenantID, key string) (bool, error) {
+	cacheKey := fmt.Sprintf("idempotency:%s:%s", tenantID, key)
+	// Use rate limit check with max 1 to detect duplicates
+	result, err := rl.redis.RateLimitCheck(ctx, cacheKey, 1, 86400) // 24 hour TTL
+	if err != nil {
+		return false, err
+	}
+	// If currentCount > 1, this is a duplicate request
+	return result.CurrentCount > 1, nil
 }
 
 // GetRateLimiter retrieves the rate limiter from gin context.

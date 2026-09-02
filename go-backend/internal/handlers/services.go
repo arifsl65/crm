@@ -122,7 +122,7 @@ func (h *ServiceHandler) List(c *gin.Context) {
 		       s.status, s.priority, s.risk_level, s.deadline, s.kanban_position,
 		       s.docs_required, s.docs_received, s.hmrc_reference, s.filed_at,
 		       s.completed_at, s.completion_notes, s.version, s.created_at, s.updated_at,
-		       c.company_name as client_name, u.name as staff_name
+		       c.company_name as client_name, COALESCE(CONCAT(u.first_name, ' ', u.last_name), '') as staff_name
 		FROM services s
 		LEFT JOIN clients c ON s.client_id = c.id
 		LEFT JOIN users u ON s.staff_id = u.id
@@ -256,7 +256,7 @@ func (h *ServiceHandler) Get(c *gin.Context) {
 		       s.status, s.priority, s.risk_level, s.deadline, s.kanban_position,
 		       s.docs_required, s.docs_received, s.hmrc_reference, s.filed_at,
 		       s.completed_at, s.completion_notes, s.version, s.created_at, s.updated_at,
-		       c.company_name as client_name, u.name as staff_name
+		       c.company_name as client_name, COALESCE(CONCAT(u.first_name, ' ', u.last_name), '') as staff_name
 		FROM services s
 		LEFT JOIN clients c ON s.client_id = c.id
 		LEFT JOIN users u ON s.staff_id = u.id

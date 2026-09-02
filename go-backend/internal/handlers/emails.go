@@ -1,6 +1,7 @@
 package handlers
 
 import (
+	"encoding/json"
 	"fmt"
 	"net/http"
 	"strconv"
@@ -23,14 +24,16 @@ type EmailHandler struct {
 	db          *database.Pool
 	emailClient *email.Client
 	audit       *audit.Logger
+	rateLimiter *middleware.AuthRateLimiter
 }
 
 // NewEmailHandler creates a new email handler.
-func NewEmailHandler(db *database.Pool, emailClient *email.Client, auditLogger *audit.Logger) *EmailHandler {
+func NewEmailHandler(db *database.Pool, emailClient *email.Client, auditLogger *audit.Logger, rateLimiter *middleware.AuthRateLimiter) *EmailHandler {
 	return &EmailHandler{
 		db:          db,
 		emailClient: emailClient,
 		audit:       auditLogger,
+		rateLimiter: rateLimiter,
 	}
 }
 
@@ -50,7 +53,7 @@ type Email struct {
 	Subject      string     `json:"subject"`
 	BodyHTML     string     `json:"body_html"`
 	BodyText     *string    `json:"body_text,omitempty"`
-	Type         string     `json:"type"` // chase, notification, invite, manual
+	Type         string     `json:"type"`   // chase, notification, invite, manual
 	Status       string     `json:"status"` // queued, sent, delivered, opened, clicked, bounced, complained
 	ResendID     *string    `json:"resend_id,omitempty"`
 	IsRead       bool       `json:"is_read"`
@@ -68,14 +71,27 @@ type Email struct {
 
 // SendEmailRequest represents the request to send an email.
 type SendEmailRequest struct {
-	ToEmail    string     `json:"to_email" binding:"required,email"`
-	ToName     *string    `json:"to_name,omitempty"`
-	Subject    string     `json:"subject" binding:"required"`
-	BodyHTML   string     `json:"body_html" binding:"required"`
-	BodyText   *string    `json:"body_text,omitempty"`
-	ClientID   *uuid.UUID `json:"client_id,omitempty"`
-	TemplateID *uuid.UUID `json:"template_id,omitempty"`
-	Type       string     `json:"type" binding:"omitempty,oneof=chase notification invite manual"`
+	ToEmail        string     `json:"to_email" binding:"required,email"`
+	ToName         *string    `json:"to_name,omitempty"`
+	Subject        string     `json:"subject" binding:"required"`
+	BodyHTML       string     `json:"body_html" binding:"required"`
+	BodyText       *string    `json:"body_text,omitempty"`
+	ClientID       *uuid.UUID `json:"client_id,omitempty"`
+	TemplateID     *uuid.UUID `json:"template_id,omitempty"`
+	Type           string     `json:"type" binding:"omitempty,oneof=chase notification invite manual"`
+	IdempotencyKey string     `json:"idempotency_key,omitempty"` // Optional idempotency key
+}
+
+// OutboxPayload represents the email payload stored in the outbox.
+type OutboxPayload struct {
+	EmailID   uuid.UUID  `json:"email_id"`
+	ToEmail   string     `json:"to_email"`
+	ToName    *string    `json:"to_name,omitempty"`
+	FromEmail string     `json:"from_email"`
+	Subject   string     `json:"subject"`
+	BodyHTML  string     `json:"body_html"`
+	BodyText  string     `json:"body_text"`
+	ClientID  *uuid.UUID `json:"client_id,omitempty"`
 }
 
 // List returns all emails for the tenant.
@@ -114,7 +130,7 @@ func (h *EmailHandler) List(c *gin.Context) {
 		       e.from_email, e.subject, e.body_html, e.body_text, e.type, e.status,
 		       e.resend_id, e.is_read, e.ai_summary, e.sentiment,
 		       e.sent_at, e.opened_at, e.bounced_at, e.bounce_reason, e.created_at,
-		       cl.company_name as client_name, u.name as staff_name
+		       cl.company_name as client_name, COALESCE(CONCAT(u.first_name, ' ', u.last_name), '') as staff_name
 		FROM emails e
 		LEFT JOIN clients cl ON e.client_id = cl.id
 		LEFT JOIN users u ON e.staff_id = u.id
@@ -233,7 +249,7 @@ func (h *EmailHandler) Get(c *gin.Context) {
 		       e.from_email, e.subject, e.body_html, e.body_text, e.type, e.status,
 		       e.resend_id, e.is_read, e.ai_summary, e.sentiment,
 		       e.sent_at, e.opened_at, e.bounced_at, e.bounce_reason, e.created_at,
-		       cl.company_name as client_name, u.name as staff_name
+		       cl.company_name as client_name, COALESCE(CONCAT(u.first_name, ' ', u.last_name), '') as staff_name
 		FROM emails e
 		LEFT JOIN clients cl ON e.client_id = cl.id
 		LEFT JOIN users u ON e.staff_id = u.id
@@ -269,7 +285,7 @@ func (h *EmailHandler) Get(c *gin.Context) {
 	c.JSON(http.StatusOK, e)
 }
 
-// Send sends a new email and stores it in the database.
+// Send queues a new email for sending via the outbox pattern.
 // POST /api/v1/emails
 func (h *EmailHandler) Send(c *gin.Context) {
 	ctx := c.Request.Context()
@@ -287,6 +303,31 @@ func (h *EmailHandler) Send(c *gin.Context) {
 	if err := c.ShouldBindJSON(&req); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		return
+	}
+
+	// Check rate limit
+	if h.rateLimiter != nil {
+		allowed, count, ttl, err := h.rateLimiter.CheckEmailSendRate(ctx, tenantID.String())
+		if err != nil {
+			log.Error().Err(err).Msg("Failed to check email rate limit")
+		} else if !allowed {
+			middleware.RateLimitExceededWithLog(c, "email-send", tenantID.String(), count, ttl)
+			return
+		}
+	}
+
+	// Check idempotency key if provided
+	if req.IdempotencyKey != "" && h.rateLimiter != nil {
+		isDuplicate, err := h.rateLimiter.CheckIdempotencyKey(ctx, tenantID.String(), req.IdempotencyKey)
+		if err != nil {
+			log.Error().Err(err).Msg("Failed to check idempotency key")
+		} else if isDuplicate {
+			c.JSON(http.StatusConflict, gin.H{
+				"error":   "duplicate_request",
+				"message": "This request has already been processed",
+			})
+			return
+		}
 	}
 
 	// Default type
@@ -307,48 +348,64 @@ func (h *EmailHandler) Send(c *gin.Context) {
 		bodyText = *req.BodyText
 	}
 
-	// Send via Resend
-	resendID, err := h.emailClient.SendWithID(req.ToEmail, req.Subject, req.BodyHTML, bodyText)
-	if err != nil {
-		log.Error().Err(err).Str("to", req.ToEmail).Msg("Failed to send email via Resend")
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to send email"})
-		return
-	}
-
-	// Store in database
+	// Create email record and outbox entry in a single transaction
+	// NO HTTP calls inside the transaction!
 	id := uuid.New()
 	now := time.Now()
 
 	var e Email
-	err = tenantDB.Transaction(c, func(tx pgx.Tx) error {
+	err := tenantDB.Transaction(c, func(tx pgx.Tx) error {
+		// Insert email record with status 'queued'
 		query := `
 			INSERT INTO emails (
 				id, tenant_id, client_id, staff_id, template_id, direction,
 				to_email, to_name, from_email, subject, body_html, body_text,
-				type, status, resend_id, is_read, sent_at, created_at
-			) VALUES ($1, $2, $3, $4, $5, 'outbound', $6, $7, $8, $9, $10, $11, $12, 'sent', $13, true, $14, $14)
+				type, status, is_read, created_at
+			) VALUES ($1, $2, $3, $4, $5, 'outbound', $6, $7, $8, $9, $10, $11, $12, 'queued', true, $13)
 			RETURNING id, tenant_id, client_id, staff_id, template_id, direction,
 			          to_email, to_name, from_email, subject, body_html, body_text,
-			          type, status, resend_id, is_read, sent_at, created_at
+			          type, status, is_read, created_at
 		`
-		return tx.QueryRow(ctx, query,
+		err := tx.QueryRow(ctx, query,
 			id, tenantID, req.ClientID, userID, req.TemplateID,
-			req.ToEmail, req.ToName, h.emailClient.GetFromEmail(), req.Subject, req.BodyHTML, req.BodyText,
-			emailType, resendID, now,
+			req.ToEmail, req.ToName, h.emailClient.GetFromEmail(), req.Subject, req.BodyHTML, &bodyText,
+			emailType, now,
 		).Scan(
 			&e.ID, &e.TenantID, &e.ClientID, &e.StaffID, &e.TemplateID, &e.Direction,
 			&e.ToEmail, &e.ToName, &e.FromEmail, &e.Subject, &e.BodyHTML, &e.BodyText,
-			&e.Type, &e.Status, &e.ResendID, &e.IsRead, &e.SentAt, &e.CreatedAt,
+			&e.Type, &e.Status, &e.IsRead, &e.CreatedAt,
 		)
+		if err != nil {
+			return err
+		}
+
+		// Insert into outbox for async processing
+		payload := OutboxPayload{
+			EmailID:   id,
+			ToEmail:   req.ToEmail,
+			ToName:    req.ToName,
+			FromEmail: h.emailClient.GetFromEmail(),
+			Subject:   req.Subject,
+			BodyHTML:  req.BodyHTML,
+			BodyText:  bodyText,
+			ClientID:  req.ClientID,
+		}
+		payloadJSON, err := json.Marshal(payload)
+		if err != nil {
+			return fmt.Errorf("failed to marshal outbox payload: %w", err)
+		}
+
+		_, err = tx.Exec(ctx, `
+			INSERT INTO outbox (tenant_id, event_type, payload, created_at)
+			VALUES ($1, 'email_send', $2, $3)
+		`, tenantID, payloadJSON, now)
+
+		return err
 	})
 
 	if err != nil {
-		log.Error().Err(err).Msg("Failed to store sent email")
-		// Email was sent but not stored - log but don't fail
-		c.JSON(http.StatusCreated, gin.H{
-			"message":   "Email sent but failed to store record",
-			"resend_id": resendID,
-		})
+		log.Error().Err(err).Msg("Failed to queue email")
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to queue email"})
 		return
 	}
 
@@ -357,9 +414,13 @@ func (h *EmailHandler) Send(c *gin.Context) {
 		"to":      req.ToEmail,
 		"subject": req.Subject,
 		"type":    emailType,
+		"status":  "queued",
 	})
 
-	c.JSON(http.StatusCreated, e)
+	c.JSON(http.StatusAccepted, gin.H{
+		"email":   e,
+		"message": "Email queued for delivery",
+	})
 }
 
 // MarkRead marks an email as read.
@@ -416,6 +477,7 @@ func (h *EmailHandler) GetStats(c *gin.Context) {
 			COUNT(*) FILTER (WHERE status = 'delivered') as delivered,
 			COUNT(*) FILTER (WHERE status = 'opened') as opened,
 			COUNT(*) FILTER (WHERE status = 'bounced') as bounced,
+			COUNT(*) FILTER (WHERE status = 'queued') as queued,
 			COUNT(*) FILTER (WHERE is_read = false AND direction = 'inbound') as unread
 		FROM emails
 		WHERE tenant_id = $1 AND created_at > NOW() - INTERVAL '30 days'
@@ -428,12 +490,13 @@ func (h *EmailHandler) GetStats(c *gin.Context) {
 		Delivered int `json:"delivered"`
 		Opened    int `json:"opened"`
 		Bounced   int `json:"bounced"`
+		Queued    int `json:"queued"`
 		Unread    int `json:"unread"`
 	}
 
 	err := tenantDB.QueryRowScan(c, []interface{}{
 		&stats.Total, &stats.Sent, &stats.Received, &stats.Delivered,
-		&stats.Opened, &stats.Bounced, &stats.Unread,
+		&stats.Opened, &stats.Bounced, &stats.Queued, &stats.Unread,
 	}, query, tenantID)
 
 	if err != nil {
@@ -445,7 +508,7 @@ func (h *EmailHandler) GetStats(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{"stats": stats})
 }
 
-// SendFromTemplate sends an email using a template.
+// SendFromTemplate queues an email using a template via the outbox pattern.
 // POST /api/v1/emails/send-template
 func (h *EmailHandler) SendFromTemplate(c *gin.Context) {
 	ctx := c.Request.Context()
@@ -460,16 +523,42 @@ func (h *EmailHandler) SendFromTemplate(c *gin.Context) {
 	}
 
 	var req struct {
-		TemplateID   uuid.UUID          `json:"template_id" binding:"required"`
-		ToEmail      string             `json:"to_email" binding:"required,email"`
-		ToName       *string            `json:"to_name,omitempty"`
-		ClientID     *uuid.UUID         `json:"client_id,omitempty"`
-		Placeholders map[string]string  `json:"placeholders,omitempty"`
+		TemplateID     uuid.UUID         `json:"template_id" binding:"required"`
+		ToEmail        string            `json:"to_email" binding:"required,email"`
+		ToName         *string           `json:"to_name,omitempty"`
+		ClientID       *uuid.UUID        `json:"client_id,omitempty"`
+		Placeholders   map[string]string `json:"placeholders,omitempty"`
+		IdempotencyKey string            `json:"idempotency_key,omitempty"`
 	}
 
 	if err := c.ShouldBindJSON(&req); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		return
+	}
+
+	// Check rate limit
+	if h.rateLimiter != nil {
+		allowed, count, ttl, err := h.rateLimiter.CheckEmailSendRate(ctx, tenantID.String())
+		if err != nil {
+			log.Error().Err(err).Msg("Failed to check email rate limit")
+		} else if !allowed {
+			middleware.RateLimitExceededWithLog(c, "email-send-template", tenantID.String(), count, ttl)
+			return
+		}
+	}
+
+	// Check idempotency key if provided
+	if req.IdempotencyKey != "" && h.rateLimiter != nil {
+		isDuplicate, err := h.rateLimiter.CheckIdempotencyKey(ctx, tenantID.String(), req.IdempotencyKey)
+		if err != nil {
+			log.Error().Err(err).Msg("Failed to check idempotency key")
+		} else if isDuplicate {
+			c.JSON(http.StatusConflict, gin.H{
+				"error":   "duplicate_request",
+				"message": "This request has already been processed",
+			})
+			return
+		}
 	}
 
 	// Get template
@@ -516,47 +605,63 @@ func (h *EmailHandler) SendFromTemplate(c *gin.Context) {
 		return
 	}
 
-	// Send via Resend
-	resendID, err := h.emailClient.SendWithID(req.ToEmail, subject, bodyHTML, bodyText)
-	if err != nil {
-		log.Error().Err(err).Str("to", req.ToEmail).Msg("Failed to send template email via Resend")
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to send email"})
-		return
-	}
-
-	// Store in database
+	// Create email record and outbox entry in a single transaction
 	id := uuid.New()
 	now := time.Now()
 
 	var e Email
 	err = tenantDB.Transaction(c, func(tx pgx.Tx) error {
+		// Insert email record with status 'queued'
 		query := `
 			INSERT INTO emails (
 				id, tenant_id, client_id, staff_id, template_id, direction,
 				to_email, to_name, from_email, subject, body_html, body_text,
-				type, status, resend_id, is_read, sent_at, created_at
-			) VALUES ($1, $2, $3, $4, $5, 'outbound', $6, $7, $8, $9, $10, $11, $12, 'sent', $13, true, $14, $14)
+				type, status, is_read, created_at
+			) VALUES ($1, $2, $3, $4, $5, 'outbound', $6, $7, $8, $9, $10, $11, $12, 'queued', true, $13)
 			RETURNING id, tenant_id, client_id, staff_id, template_id, direction,
 			          to_email, to_name, from_email, subject, body_html, body_text,
-			          type, status, resend_id, is_read, sent_at, created_at
+			          type, status, is_read, created_at
 		`
-		return tx.QueryRow(ctx, query,
+		err := tx.QueryRow(ctx, query,
 			id, tenantID, req.ClientID, userID, req.TemplateID,
 			req.ToEmail, req.ToName, h.emailClient.GetFromEmail(), subject, bodyHTML, &bodyText,
-			template.Type, resendID, now,
+			template.Type, now,
 		).Scan(
 			&e.ID, &e.TenantID, &e.ClientID, &e.StaffID, &e.TemplateID, &e.Direction,
 			&e.ToEmail, &e.ToName, &e.FromEmail, &e.Subject, &e.BodyHTML, &e.BodyText,
-			&e.Type, &e.Status, &e.ResendID, &e.IsRead, &e.SentAt, &e.CreatedAt,
+			&e.Type, &e.Status, &e.IsRead, &e.CreatedAt,
 		)
+		if err != nil {
+			return err
+		}
+
+		// Insert into outbox for async processing
+		payload := OutboxPayload{
+			EmailID:   id,
+			ToEmail:   req.ToEmail,
+			ToName:    req.ToName,
+			FromEmail: h.emailClient.GetFromEmail(),
+			Subject:   subject,
+			BodyHTML:  bodyHTML,
+			BodyText:  bodyText,
+			ClientID:  req.ClientID,
+		}
+		payloadJSON, err := json.Marshal(payload)
+		if err != nil {
+			return fmt.Errorf("failed to marshal outbox payload: %w", err)
+		}
+
+		_, err = tx.Exec(ctx, `
+			INSERT INTO outbox (tenant_id, event_type, payload, created_at)
+			VALUES ($1, 'email_send', $2, $3)
+		`, tenantID, payloadJSON, now)
+
+		return err
 	})
 
 	if err != nil {
-		log.Error().Err(err).Msg("Failed to store sent template email")
-		c.JSON(http.StatusCreated, gin.H{
-			"message":   "Email sent but failed to store record",
-			"resend_id": resendID,
-		})
+		log.Error().Err(err).Msg("Failed to queue template email")
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to queue email"})
 		return
 	}
 
@@ -565,7 +670,11 @@ func (h *EmailHandler) SendFromTemplate(c *gin.Context) {
 		"to":          req.ToEmail,
 		"subject":     subject,
 		"template_id": req.TemplateID.String(),
+		"status":      "queued",
 	})
 
-	c.JSON(http.StatusCreated, e)
+	c.JSON(http.StatusAccepted, gin.H{
+		"email":   e,
+		"message": "Email queued for delivery",
+	})
 }

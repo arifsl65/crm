@@ -1,6 +1,7 @@
 package handlers
 
 import (
+	"encoding/json"
 	"fmt"
 	"net/http"
 	"strconv"
@@ -23,14 +24,16 @@ type ChaseLogHandler struct {
 	db          *database.Pool
 	emailClient *email.Client
 	audit       *audit.Logger
+	rateLimiter *middleware.AuthRateLimiter
 }
 
 // NewChaseLogHandler creates a new chase log handler.
-func NewChaseLogHandler(db *database.Pool, emailClient *email.Client, auditLogger *audit.Logger) *ChaseLogHandler {
+func NewChaseLogHandler(db *database.Pool, emailClient *email.Client, auditLogger *audit.Logger, rateLimiter *middleware.AuthRateLimiter) *ChaseLogHandler {
 	return &ChaseLogHandler{
 		db:          db,
 		emailClient: emailClient,
 		audit:       auditLogger,
+		rateLimiter: rateLimiter,
 	}
 }
 
@@ -50,17 +53,17 @@ type ChaseLog struct {
 
 // ChaseLogClient represents a client in a chase log.
 type ChaseLogClient struct {
-	ID           uuid.UUID  `json:"id"`
-	TenantID     uuid.UUID  `json:"tenant_id"`
-	ChaseLogID   uuid.UUID  `json:"chase_log_id"`
-	ClientID     uuid.UUID  `json:"client_id"`
-	EmailID      *uuid.UUID `json:"email_id,omitempty"`
-	CreatedAt    time.Time  `json:"created_at"`
+	ID          uuid.UUID  `json:"id"`
+	TenantID    uuid.UUID  `json:"tenant_id"`
+	ChaseLogID  uuid.UUID  `json:"chase_log_id"`
+	ClientID    uuid.UUID  `json:"client_id"`
+	EmailID     *uuid.UUID `json:"email_id,omitempty"`
+	CreatedAt   time.Time  `json:"created_at"`
 	// Computed fields from client/email
-	ClientName   *string    `json:"client_name,omitempty"`
-	ClientEmail  *string    `json:"client_email,omitempty"`
-	EmailStatus  *string    `json:"email_status,omitempty"`
-	EmailSentAt  *time.Time `json:"email_sent_at,omitempty"`
+	ClientName  *string    `json:"client_name,omitempty"`
+	ClientEmail *string    `json:"client_email,omitempty"`
+	EmailStatus *string    `json:"email_status,omitempty"`
+	EmailSentAt *time.Time `json:"email_sent_at,omitempty"`
 }
 
 // ChaseLogDetail represents a chase log with its clients.
@@ -71,9 +74,21 @@ type ChaseLogDetail struct {
 
 // CreateChaseRequest represents the request to create a chase.
 type CreateChaseRequest struct {
-	TemplateID   uuid.UUID   `json:"template_id" binding:"required"`
-	ClientIDs    []uuid.UUID `json:"client_ids" binding:"required,min=1"`
+	TemplateID   uuid.UUID         `json:"template_id" binding:"required"`
+	ClientIDs    []uuid.UUID       `json:"client_ids" binding:"required,min=1"`
 	Placeholders map[string]string `json:"placeholders,omitempty"`
+}
+
+// ChaseOutboxPayload represents the payload for a chase email in the outbox.
+type ChaseOutboxPayload struct {
+	ChaseLogID uuid.UUID  `json:"chase_log_id"`
+	EmailID    uuid.UUID  `json:"email_id"`
+	ClientID   uuid.UUID  `json:"client_id"`
+	ToEmail    string     `json:"to_email"`
+	FromEmail  string     `json:"from_email"`
+	Subject    string     `json:"subject"`
+	BodyHTML   string     `json:"body_html"`
+	BodyText   string     `json:"body_text"`
 }
 
 // List returns all chase logs for the tenant.
@@ -97,7 +112,7 @@ func (h *ChaseLogHandler) List(c *gin.Context) {
 
 	query := `
 		SELECT cl.id, cl.tenant_id, cl.initiated_by, cl.total_sent, cl.delivered,
-		       cl.opened, cl.bounced, cl.created_at, u.name as initiated_by_name
+		       cl.opened, cl.bounced, cl.created_at, COALESCE(CONCAT(u.first_name, ' ', u.last_name), '') as initiated_by_name
 		FROM chase_logs cl
 		LEFT JOIN users u ON cl.initiated_by = u.id
 		WHERE cl.tenant_id = $1
@@ -161,7 +176,7 @@ func (h *ChaseLogHandler) Get(c *gin.Context) {
 		&detail.Opened, &detail.Bounced, &detail.CreatedAt, &detail.InitiatedByName,
 	}, `
 		SELECT cl.id, cl.tenant_id, cl.initiated_by, cl.total_sent, cl.delivered,
-		       cl.opened, cl.bounced, cl.created_at, u.name as initiated_by_name
+		       cl.opened, cl.bounced, cl.created_at, COALESCE(CONCAT(u.first_name, ' ', u.last_name), '') as initiated_by_name
 		FROM chase_logs cl
 		LEFT JOIN users u ON cl.initiated_by = u.id
 		WHERE cl.id = $1 AND cl.tenant_id = $2
@@ -213,7 +228,7 @@ func (h *ChaseLogHandler) Get(c *gin.Context) {
 	c.JSON(http.StatusOK, detail)
 }
 
-// Create creates a new chase and sends emails to selected clients.
+// Create creates a new chase and queues emails for selected clients via outbox pattern.
 // POST /api/v1/chase-logs
 func (h *ChaseLogHandler) Create(c *gin.Context) {
 	ctx := c.Request.Context()
@@ -231,6 +246,17 @@ func (h *ChaseLogHandler) Create(c *gin.Context) {
 	if err := c.ShouldBindJSON(&req); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		return
+	}
+
+	// Check rate limit for chase bulk emails
+	if h.rateLimiter != nil {
+		allowed, count, ttl, err := h.rateLimiter.CheckChaseRate(ctx, tenantID.String())
+		if err != nil {
+			log.Error().Err(err).Msg("Failed to check chase rate limit")
+		} else if !allowed {
+			middleware.RateLimitExceededWithLog(c, "chase", tenantID.String(), count, ttl)
+			return
+		}
 	}
 
 	// Check if email client is configured
@@ -301,23 +327,23 @@ func (h *ChaseLogHandler) Create(c *gin.Context) {
 		return
 	}
 
-	// Create chase log
+	// Create chase log and queue emails in a single transaction
+	// NO HTTP calls inside the transaction!
 	chaseLogID := uuid.New()
 	now := time.Now()
-	totalSent := 0
 	var chaseLogClients []ChaseLogClient
 
 	err = tenantDB.Transaction(c, func(tx pgx.Tx) error {
-		// Insert chase log
+		// Insert chase log with total_sent = number of clients (will be queued)
 		_, err := tx.Exec(ctx, `
 			INSERT INTO chase_logs (id, tenant_id, initiated_by, total_sent, delivered, opened, bounced, created_at)
-			VALUES ($1, $2, $3, 0, 0, 0, 0, $4)
-		`, chaseLogID, tenantID, userID, now)
+			VALUES ($1, $2, $3, $4, 0, 0, 0, $5)
+		`, chaseLogID, tenantID, userID, len(clients), now)
 		if err != nil {
 			return err
 		}
 
-		// Send emails and create chase_log_clients records
+		// Create email records and outbox entries for each client
 		for _, client := range clients {
 			// Replace placeholders
 			subject := template.Subject
@@ -340,28 +366,19 @@ func (h *ChaseLogHandler) Create(c *gin.Context) {
 				bodyText = strings.ReplaceAll(bodyText, placeholder, value)
 			}
 
-			// Send email
-			resendID, err := h.emailClient.SendWithID(client.Email, subject, bodyHTML, bodyText)
-			if err != nil {
-				log.Error().Err(err).Str("to", client.Email).Msg("Failed to send chase email")
-				// Continue with other clients
-				continue
-			}
-
-			// Insert email record
+			// Insert email record with status 'queued'
 			emailID := uuid.New()
 			_, err = tx.Exec(ctx, `
 				INSERT INTO emails (
 					id, tenant_id, client_id, staff_id, template_id, direction,
 					to_email, from_email, subject, body_html, body_text,
-					type, status, resend_id, is_read, sent_at, created_at
-				) VALUES ($1, $2, $3, $4, $5, 'outbound', $6, $7, $8, $9, $10, 'chase', 'sent', $11, true, $12, $12)
+					type, status, is_read, created_at
+				) VALUES ($1, $2, $3, $4, $5, 'outbound', $6, $7, $8, $9, $10, 'chase', 'queued', true, $11)
 			`, emailID, tenantID, client.ID, userID, req.TemplateID,
-				client.Email, h.emailClient.GetFromEmail(), subject, bodyHTML, bodyText,
-				resendID, now)
+				client.Email, h.emailClient.GetFromEmail(), subject, bodyHTML, bodyText, now)
 			if err != nil {
 				log.Error().Err(err).Msg("Failed to insert chase email record")
-				continue
+				return err
 			}
 
 			// Insert chase_log_client
@@ -372,10 +389,33 @@ func (h *ChaseLogHandler) Create(c *gin.Context) {
 			`, clcID, tenantID, chaseLogID, client.ID, emailID, now, now)
 			if err != nil {
 				log.Error().Err(err).Msg("Failed to insert chase log client")
-				continue
+				return err
 			}
 
-			totalSent++
+			// Insert into outbox for async processing
+			payload := ChaseOutboxPayload{
+				ChaseLogID: chaseLogID,
+				EmailID:    emailID,
+				ClientID:   client.ID,
+				ToEmail:    client.Email,
+				FromEmail:  h.emailClient.GetFromEmail(),
+				Subject:    subject,
+				BodyHTML:   bodyHTML,
+				BodyText:   bodyText,
+			}
+			payloadJSON, err := json.Marshal(payload)
+			if err != nil {
+				return fmt.Errorf("failed to marshal chase outbox payload: %w", err)
+			}
+
+			_, err = tx.Exec(ctx, `
+				INSERT INTO outbox (tenant_id, event_type, payload, created_at)
+				VALUES ($1, 'chase_email_send', $2, $3)
+			`, tenantID, payloadJSON, now)
+			if err != nil {
+				return err
+			}
+
 			chaseLogClients = append(chaseLogClients, ChaseLogClient{
 				ID:          clcID,
 				TenantID:    tenantID,
@@ -388,9 +428,7 @@ func (h *ChaseLogHandler) Create(c *gin.Context) {
 			})
 		}
 
-		// Update total_sent
-		_, err = tx.Exec(ctx, `UPDATE chase_logs SET total_sent = $1 WHERE id = $2`, totalSent, chaseLogID)
-		return err
+		return nil
 	})
 
 	if err != nil {
@@ -401,18 +439,18 @@ func (h *ChaseLogHandler) Create(c *gin.Context) {
 
 	// Audit log
 	h.audit.LogEntity(ctx, audit.ActionChaseCreate, &userID, &tenantID, "chase_log", &chaseLogID, c.ClientIP(), map[string]interface{}{
-		"template_id": req.TemplateID.String(),
-		"total_sent":  totalSent,
-		"clients":     len(req.ClientIDs),
+		"template_id":   req.TemplateID.String(),
+		"emails_queued": len(clients),
+		"clients":       len(req.ClientIDs),
 	})
 
-	c.JSON(http.StatusCreated, gin.H{
+	c.JSON(http.StatusAccepted, gin.H{
 		"chase_log": ChaseLogDetail{
 			ChaseLog: ChaseLog{
 				ID:          chaseLogID,
 				TenantID:    tenantID,
 				InitiatedBy: userID,
-				TotalSent:   totalSent,
+				TotalSent:   len(clients),
 				Delivered:   0,
 				Opened:      0,
 				Bounced:     0,
@@ -420,6 +458,7 @@ func (h *ChaseLogHandler) Create(c *gin.Context) {
 			},
 			Clients: chaseLogClients,
 		},
+		"message": fmt.Sprintf("%d emails queued for delivery", len(clients)),
 	})
 }
 

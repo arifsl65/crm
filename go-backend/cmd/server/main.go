@@ -24,12 +24,14 @@ import (
 	"github.com/accountant-crm/go-backend/internal/auth"
 	"github.com/accountant-crm/go-backend/internal/cache"
 	"github.com/accountant-crm/go-backend/internal/config"
+	"github.com/accountant-crm/go-backend/internal/crypto"
 	"github.com/accountant-crm/go-backend/internal/database"
 	"github.com/accountant-crm/go-backend/internal/email"
 	"github.com/accountant-crm/go-backend/internal/handlers"
 	"github.com/accountant-crm/go-backend/internal/middleware"
 	"github.com/accountant-crm/go-backend/internal/storage"
 	"github.com/accountant-crm/go-backend/internal/websocket"
+	"github.com/accountant-crm/go-backend/internal/worker"
 )
 
 // Application holds all the application dependencies.
@@ -163,6 +165,19 @@ func main() {
 	// Initialize audit logger
 	auditLogger := audit.NewLogger(db)
 
+	// Initialize encryptor for sensitive data (IMAP passwords)
+	var encryptor *crypto.Encryptor
+	encryptor, err = crypto.NewEncryptorFromEnv()
+	if err != nil {
+		if err == crypto.ErrKeyNotConfigured {
+			log.Warn().Msg("ENCRYPTION_KEY not configured - IMAP credential storage will be disabled")
+		} else {
+			log.Error().Err(err).Msg("Failed to initialize encryptor")
+		}
+	} else {
+		log.Info().Msg("Credential encryption configured (AES-256-GCM)")
+	}
+
 	// Initialize WebSocket hub
 	wsHub := websocket.NewHub(redis)
 	go wsHub.Run()
@@ -190,12 +205,16 @@ func main() {
 			CompaniesHouse: handlers.NewCompaniesHouseHandler(db, redis, cfg.CompaniesHouse),
 			WebSocket:      websocket.NewHandler(wsHub, jwtManager, redis),
 			// Email module handlers
-			Email:         handlers.NewEmailHandler(db, emailClient, auditLogger),
+			Email:         handlers.NewEmailHandler(db, emailClient, auditLogger, authRateLimiter),
 			EmailTemplate: handlers.NewEmailTemplateHandler(db, auditLogger),
-			EmailAccount:  handlers.NewEmailAccountHandler(db, auditLogger),
-			ChaseLog:      handlers.NewChaseLogHandler(db, emailClient, auditLogger),
+			EmailAccount:  handlers.NewEmailAccountHandler(db, auditLogger, encryptor),
+			ChaseLog:      handlers.NewChaseLogHandler(db, emailClient, auditLogger, authRateLimiter),
 		},
 	}
+
+	// Initialize and start outbox worker for async email processing
+	outboxWorker := worker.NewOutboxWorker(db, emailClient)
+	outboxWorker.Start()
 
 	// Setup Gin router
 	router := setupRouter(app)
@@ -225,6 +244,9 @@ func main() {
 	<-quit
 
 	log.Info().Msg("Shutting down server...")
+
+	// Stop outbox worker first
+	outboxWorker.Stop()
 
 	// Graceful shutdown with timeout
 	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), cfg.Server.ShutdownTimeout)

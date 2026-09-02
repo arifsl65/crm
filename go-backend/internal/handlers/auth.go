@@ -479,8 +479,9 @@ func (h *AuthHandler) getUserByEmail(ctx context.Context, email string, tenantID
 		if tenantID != nil {
 			// Tenant-scoped lookup
 			query := `
-				SELECT id, tenant_id, email, password, name, role, status,
-				       failed_login_attempts, locked_until
+				SELECT id, tenant_id, email, password_hash,
+				       COALESCE(CONCAT(first_name, ' ', last_name), '') as name,
+				       role, status, failed_login_attempts, locked_until
 				FROM users
 				WHERE email = $1 AND tenant_id = $2 AND deleted_at IS NULL
 			`
@@ -511,8 +512,9 @@ func (h *AuthHandler) getUserByEmail(ctx context.Context, email string, tenantID
 
 		// Single tenant or super_admin - proceed with lookup
 		query := `
-			SELECT id, tenant_id, email, password, name, role, status,
-			       failed_login_attempts, locked_until
+			SELECT id, tenant_id, email, password_hash,
+			       COALESCE(CONCAT(first_name, ' ', last_name), '') as name,
+			       role, status, failed_login_attempts, locked_until
 			FROM users
 			WHERE email = $1 AND deleted_at IS NULL
 		`
@@ -765,7 +767,7 @@ type userRecordForReset struct {
 }
 
 func (h *AuthHandler) getUserByEmailForReset(ctx context.Context, email string) (*userRecordForReset, error) {
-	query := `SELECT id, email, name FROM users WHERE email = $1 AND deleted_at IS NULL`
+	query := `SELECT id, email, COALESCE(CONCAT(first_name, ' ', last_name), '') as name FROM users WHERE email = $1 AND deleted_at IS NULL`
 	var user userRecordForReset
 	var qErr error
 	if err := h.db.SuperAdminTransaction(ctx, func(tx pgx.Tx) error {
@@ -1004,7 +1006,7 @@ func (h *AuthHandler) ChangePassword(c *gin.Context) {
 	// Get current password hash
 	var currentHash string
 	err := h.db.SuperAdminTransaction(ctx, func(tx pgx.Tx) error {
-		return tx.QueryRow(ctx, `SELECT password FROM users WHERE id = $1`, userID).Scan(&currentHash)
+		return tx.QueryRow(ctx, `SELECT password_hash FROM users WHERE id = $1`, userID).Scan(&currentHash)
 	})
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{
@@ -1036,7 +1038,7 @@ func (h *AuthHandler) ChangePassword(c *gin.Context) {
 
 	// Update password
 	err = h.db.SuperAdminTransaction(ctx, func(tx pgx.Tx) error {
-		_, err := tx.Exec(ctx, `UPDATE users SET password = $1, updated_at = NOW() WHERE id = $2`, newHash, userID)
+		_, err := tx.Exec(ctx, `UPDATE users SET password_hash = $1, password_changed_at = NOW(), updated_at = NOW() WHERE id = $2`, newHash, userID)
 		return err
 	})
 	if err != nil {
@@ -1218,7 +1220,7 @@ func (h *AuthHandler) VerifyMagicLink(c *gin.Context) {
 	var user userRecord
 	err = h.db.SuperAdminTransaction(ctx, func(tx pgx.Tx) error {
 		return tx.QueryRow(ctx, `
-			SELECT id, tenant_id, email, name, role FROM users WHERE id = $1 AND deleted_at IS NULL
+			SELECT id, tenant_id, email, COALESCE(CONCAT(first_name, ' ', last_name), '') as name, role FROM users WHERE id = $1 AND deleted_at IS NULL
 		`, userID).Scan(&user.ID, &user.TenantID, &user.Email, &user.Name, &user.Role)
 	})
 	if err != nil {
@@ -1519,7 +1521,7 @@ func (h *AuthHandler) Disable2FA(c *gin.Context) {
 	// Verify password before allowing 2FA disable
 	var passwordHash string
 	err := h.db.SuperAdminTransaction(ctx, func(tx pgx.Tx) error {
-		return tx.QueryRow(ctx, `SELECT password FROM users WHERE id = $1`, userID).Scan(&passwordHash)
+		return tx.QueryRow(ctx, `SELECT password_hash FROM users WHERE id = $1`, userID).Scan(&passwordHash)
 	})
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{

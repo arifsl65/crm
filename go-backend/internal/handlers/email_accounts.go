@@ -12,21 +12,24 @@ import (
 	"github.com/rs/zerolog/log"
 
 	"github.com/accountant-crm/go-backend/internal/audit"
+	"github.com/accountant-crm/go-backend/internal/crypto"
 	"github.com/accountant-crm/go-backend/internal/database"
 	"github.com/accountant-crm/go-backend/internal/middleware"
 )
 
 // EmailAccountHandler handles email account operations.
 type EmailAccountHandler struct {
-	db    *database.Pool
-	audit *audit.Logger
+	db        *database.Pool
+	audit     *audit.Logger
+	encryptor *crypto.Encryptor
 }
 
 // NewEmailAccountHandler creates a new email account handler.
-func NewEmailAccountHandler(db *database.Pool, auditLogger *audit.Logger) *EmailAccountHandler {
+func NewEmailAccountHandler(db *database.Pool, auditLogger *audit.Logger, encryptor *crypto.Encryptor) *EmailAccountHandler {
 	return &EmailAccountHandler{
-		db:    db,
-		audit: auditLogger,
+		db:        db,
+		audit:     auditLogger,
+		encryptor: encryptor,
 	}
 }
 
@@ -101,7 +104,7 @@ func (h *EmailAccountHandler) List(c *gin.Context) {
 		SELECT ea.id, ea.tenant_id, ea.user_id, ea.email, ea.type, ea.auth_method,
 		       ea.provider, ea.imap_host, ea.imap_port, ea.status, ea.last_sync_at,
 		       ea.error_message, ea.oauth_expires_at, ea.created_at, ea.updated_at,
-		       u.name as user_name
+		       COALESCE(CONCAT(u.first_name, ' ', u.last_name), '') as user_name
 		FROM email_accounts ea
 		LEFT JOIN users u ON ea.user_id = u.id
 		WHERE ea.tenant_id = $1
@@ -194,7 +197,7 @@ func (h *EmailAccountHandler) Get(c *gin.Context) {
 		SELECT ea.id, ea.tenant_id, ea.user_id, ea.email, ea.type, ea.auth_method,
 		       ea.provider, ea.imap_host, ea.imap_port, ea.status, ea.last_sync_at,
 		       ea.error_message, ea.oauth_expires_at, ea.created_at, ea.updated_at,
-		       u.name as user_name
+		       COALESCE(CONCAT(u.first_name, ' ', u.last_name), '') as user_name
 		FROM email_accounts ea
 		LEFT JOIN users u ON ea.user_id = u.id
 		WHERE ea.id = $1 AND ea.tenant_id = $2
@@ -266,6 +269,23 @@ func (h *EmailAccountHandler) CreateIMAP(c *gin.Context) {
 		return
 	}
 
+	// Encrypt the IMAP password before storing
+	var encryptedPassword string
+	if h.encryptor != nil {
+		var encErr error
+		encryptedPassword, encErr = h.encryptor.Encrypt(req.IMAPPassword)
+		if encErr != nil {
+			log.Error().Err(encErr).Msg("Failed to encrypt IMAP password")
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to secure credentials"})
+			return
+		}
+	} else {
+		// Encryption not configured - reject storing plaintext passwords
+		log.Error().Msg("ENCRYPTION_KEY not configured - cannot store IMAP credentials securely")
+		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "Credential encryption not configured"})
+		return
+	}
+
 	// Insert new account
 	id := uuid.New()
 	var a EmailAccount
@@ -282,7 +302,7 @@ func (h *EmailAccountHandler) CreateIMAP(c *gin.Context) {
 		`
 		return tx.QueryRow(ctx, query,
 			id, tenantID, req.UserID, req.Email, accountType,
-			req.IMAPHost, imapPort, req.IMAPPassword,
+			req.IMAPHost, imapPort, encryptedPassword,
 		).Scan(
 			&a.ID, &a.TenantID, &a.UserID, &a.Email, &a.Type, &a.AuthMethod, &a.Provider,
 			&a.IMAPHost, &a.IMAPPort, &a.Status, &a.LastSyncAt, &a.ErrorMessage,
@@ -354,9 +374,22 @@ func (h *EmailAccountHandler) Update(c *gin.Context) {
 		argNum++
 	}
 	if req.IMAPPassword != nil {
-		updates = append(updates, "imap_password = $"+strconv.Itoa(argNum))
-		args = append(args, *req.IMAPPassword)
-		argNum++
+		// Encrypt the new password
+		if h.encryptor != nil {
+			encryptedPassword, encErr := h.encryptor.Encrypt(*req.IMAPPassword)
+			if encErr != nil {
+				log.Error().Err(encErr).Msg("Failed to encrypt IMAP password")
+				c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to secure credentials"})
+				return
+			}
+			updates = append(updates, "imap_password = $"+strconv.Itoa(argNum))
+			args = append(args, encryptedPassword)
+			argNum++
+		} else {
+			log.Error().Msg("ENCRYPTION_KEY not configured - cannot update IMAP credentials securely")
+			c.JSON(http.StatusServiceUnavailable, gin.H{"error": "Credential encryption not configured"})
+			return
+		}
 	}
 	if req.Type != nil {
 		updates = append(updates, "type = $"+strconv.Itoa(argNum))
