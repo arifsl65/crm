@@ -68,6 +68,15 @@ const (
 	ActionEmailAccountDelete  Action = "email_account_delete"
 	ActionEmailAccountSync    Action = "email_account_sync"
 	ActionChaseCreate         Action = "chase_create"
+
+	// Notification actions
+	ActionNotificationCreate Action = "notification_create"
+
+	// E-Sign actions
+	ActionESignCreate Action = "e_sign_create"
+	ActionESignSend   Action = "e_sign_send"
+	ActionESignDelete Action = "e_sign_delete"
+	ActionESignSigned Action = "e_sign_signed"
 )
 
 // Logger handles audit logging to the database.

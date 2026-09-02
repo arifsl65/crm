@@ -1042,3 +1042,295 @@ export async function deleteEmailTemplate(id: string): Promise<void> {
   });
   if (!res.ok) throw new Error('Failed to delete email template');
 }
+
+// Notifications API
+export interface Notification {
+  id: string;
+  tenant_id: string;
+  user_id: string;
+  type: 'document' | 'deadline' | 'email' | 'system' | 'reminder';
+  title: string;
+  message: string;
+  entity_type?: string;
+  entity_id?: string;
+  link?: string;
+  is_read: boolean;
+  remind_at?: string;
+  dismissed_at?: string;
+  created_at: string;
+}
+
+export async function getNotifications(params?: {
+  limit?: number;
+  offset?: number;
+  unread?: boolean;
+  type?: string;
+}): Promise<{ notifications: Notification[]; count: number; unread_count: number }> {
+  const searchParams = new URLSearchParams();
+  if (params?.limit) searchParams.set('limit', String(params.limit));
+  if (params?.offset) searchParams.set('offset', String(params.offset));
+  if (params?.unread) searchParams.set('unread', 'true');
+  if (params?.type) searchParams.set('type', params.type);
+
+  const res = await authFetch(`/api/v1/notifications?${searchParams}`);
+  if (!res.ok) throw new Error('Failed to fetch notifications');
+  return res.json();
+}
+
+export async function getNotification(id: string): Promise<{ notification: Notification }> {
+  const res = await authFetch(`/api/v1/notifications/${id}`);
+  if (!res.ok) throw new Error('Failed to fetch notification');
+  return res.json();
+}
+
+export async function getUnreadNotificationCount(): Promise<{ unread_count: number }> {
+  const res = await authFetch('/api/v1/notifications/unread-count');
+  if (!res.ok) throw new Error('Failed to fetch unread count');
+  return res.json();
+}
+
+export async function markNotificationRead(id: string): Promise<void> {
+  const res = await authFetch(`/api/v1/notifications/${id}/read`, {
+    method: 'PATCH',
+  });
+  if (!res.ok) throw new Error('Failed to mark notification as read');
+}
+
+export async function markAllNotificationsRead(): Promise<{ count: number }> {
+  const res = await authFetch('/api/v1/notifications/read-all', {
+    method: 'POST',
+  });
+  if (!res.ok) throw new Error('Failed to mark all notifications as read');
+  return res.json();
+}
+
+export async function dismissNotification(id: string): Promise<void> {
+  const res = await authFetch(`/api/v1/notifications/${id}`, {
+    method: 'DELETE',
+  });
+  if (!res.ok) throw new Error('Failed to dismiss notification');
+}
+
+export async function dismissAllNotifications(): Promise<{ count: number }> {
+  const res = await authFetch('/api/v1/notifications/dismiss-all', {
+    method: 'POST',
+  });
+  if (!res.ok) throw new Error('Failed to dismiss all notifications');
+  return res.json();
+}
+
+// Settings API
+export interface CompanySettings {
+  id: string;
+  tenant_id: string;
+  firm_name: string;
+  email: string;
+  phone?: string;
+  address?: string;
+  logo_url?: string;
+  stripe_account_id?: string;
+  stripe_connected: boolean;
+  reminder_rules?: {
+    day3?: boolean;
+    day7?: boolean;
+    day14?: boolean;
+  };
+  updated_by?: string;
+  created_at: string;
+  updated_at: string;
+}
+
+export async function getSettings(): Promise<{ settings: CompanySettings }> {
+  const res = await authFetch('/api/v1/settings');
+  if (!res.ok) throw new Error('Failed to fetch settings');
+  return res.json();
+}
+
+export async function updateSettings(data: Partial<CompanySettings>): Promise<void> {
+  const res = await authFetch('/api/v1/settings', {
+    method: 'PATCH',
+    body: JSON.stringify(data),
+  });
+  if (!res.ok) {
+    const error = await res.json();
+    throw new Error(error.message || 'Failed to update settings');
+  }
+}
+
+export async function getBranding(): Promise<{ branding: { firm_name: string; logo_url?: string; email: string; phone?: string } }> {
+  const res = await authFetch('/api/v1/settings/branding');
+  if (!res.ok) throw new Error('Failed to fetch branding');
+  return res.json();
+}
+
+export async function updateBranding(data: { firm_name?: string; logo_url?: string }): Promise<void> {
+  const res = await authFetch('/api/v1/settings/branding', {
+    method: 'PATCH',
+    body: JSON.stringify(data),
+  });
+  if (!res.ok) {
+    const error = await res.json();
+    throw new Error(error.message || 'Failed to update branding');
+  }
+}
+
+// Users/Staff API
+export interface User {
+  id: string;
+  tenant_id: string;
+  email: string;
+  name: string;
+  role: 'super_admin' | 'tenant_admin' | 'staff' | 'client';
+  phone?: string;
+  avatar_url?: string;
+  is_active: boolean;
+  two_factor_enabled: boolean;
+  last_login_at?: string;
+  created_at: string;
+  updated_at: string;
+}
+
+export async function getUsers(params?: {
+  limit?: number;
+  offset?: number;
+  role?: string;
+  search?: string;
+}): Promise<{ users: User[]; count: number }> {
+  const searchParams = new URLSearchParams();
+  if (params?.limit) searchParams.set('limit', String(params.limit));
+  if (params?.offset) searchParams.set('offset', String(params.offset));
+  if (params?.role) searchParams.set('role', params.role);
+  if (params?.search) searchParams.set('search', params.search);
+
+  const res = await authFetch(`/api/v1/users?${searchParams}`);
+  if (!res.ok) throw new Error('Failed to fetch users');
+  return res.json();
+}
+
+export async function getUser(id: string): Promise<{ user: User }> {
+  const res = await authFetch(`/api/v1/users/${id}`);
+  if (!res.ok) throw new Error('Failed to fetch user');
+  return res.json();
+}
+
+export async function createUser(data: {
+  email: string;
+  name: string;
+  role: string;
+  phone?: string;
+}): Promise<{ user: User }> {
+  const res = await authFetch('/api/v1/users', {
+    method: 'POST',
+    body: JSON.stringify(data),
+  });
+  if (!res.ok) {
+    const error = await res.json();
+    throw new Error(error.message || 'Failed to create user');
+  }
+  return res.json();
+}
+
+export async function updateUser(id: string, data: Partial<User>): Promise<void> {
+  const res = await authFetch(`/api/v1/users/${id}`, {
+    method: 'PATCH',
+    body: JSON.stringify(data),
+  });
+  if (!res.ok) {
+    const error = await res.json();
+    throw new Error(error.message || 'Failed to update user');
+  }
+}
+
+export async function deleteUser(id: string): Promise<void> {
+  const res = await authFetch(`/api/v1/users/${id}`, {
+    method: 'DELETE',
+  });
+  if (!res.ok) throw new Error('Failed to delete user');
+}
+
+export async function restoreUser(id: string): Promise<void> {
+  const res = await authFetch(`/api/v1/users/${id}/restore`, {
+    method: 'POST',
+  });
+  if (!res.ok) throw new Error('Failed to restore user');
+}
+
+// E-Sign API
+export interface ESignRequest {
+  id: string;
+  tenant_id: string;
+  client_id: string;
+  document_id?: string;
+  template_type: string;
+  status: 'pending' | 'signed' | 'expired' | 'declined';
+  signer_email: string;
+  signer_name?: string;
+  sent_at?: string;
+  signed_at?: string;
+  expires_at?: string;
+  signature_data?: Record<string, unknown>;
+  auto_create_service: boolean;
+  service_type_id?: string;
+  created_service_id?: string;
+  created_at: string;
+  client_name?: string;
+}
+
+export async function getESignRequests(params?: {
+  limit?: number;
+  offset?: number;
+  status?: string;
+  client_id?: string;
+}): Promise<{ e_sign_requests: ESignRequest[]; count: number }> {
+  const searchParams = new URLSearchParams();
+  if (params?.limit) searchParams.set('limit', String(params.limit));
+  if (params?.offset) searchParams.set('offset', String(params.offset));
+  if (params?.status) searchParams.set('status', params.status);
+  if (params?.client_id) searchParams.set('client_id', params.client_id);
+
+  const res = await authFetch(`/api/v1/e-sign?${searchParams}`);
+  if (!res.ok) throw new Error('Failed to fetch e-sign requests');
+  return res.json();
+}
+
+export async function getESignRequest(id: string): Promise<{ e_sign_request: ESignRequest }> {
+  const res = await authFetch(`/api/v1/e-sign/${id}`);
+  if (!res.ok) throw new Error('Failed to fetch e-sign request');
+  return res.json();
+}
+
+export async function createESignRequest(data: {
+  client_id: string;
+  document_id?: string;
+  template_type: string;
+  signer_email: string;
+  signer_name?: string;
+  expires_in_days?: number;
+  auto_create_service?: boolean;
+  service_type_id?: string;
+}): Promise<{ e_sign_request: ESignRequest }> {
+  const res = await authFetch('/api/v1/e-sign', {
+    method: 'POST',
+    body: JSON.stringify(data),
+  });
+  if (!res.ok) {
+    const error = await res.json();
+    throw new Error(error.message || 'Failed to create e-sign request');
+  }
+  return res.json();
+}
+
+export async function sendESignRequest(id: string): Promise<{ message: string }> {
+  const res = await authFetch(`/api/v1/e-sign/${id}/send`, {
+    method: 'POST',
+  });
+  if (!res.ok) throw new Error('Failed to send e-sign request');
+  return res.json();
+}
+
+export async function deleteESignRequest(id: string): Promise<void> {
+  const res = await authFetch(`/api/v1/e-sign/${id}`, {
+    method: 'DELETE',
+  });
+  if (!res.ok) throw new Error('Failed to delete e-sign request');
+}

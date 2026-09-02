@@ -65,7 +65,10 @@ type Handlers struct {
 	Email         *handlers.EmailHandler
 	EmailTemplate *handlers.EmailTemplateHandler
 	EmailAccount  *handlers.EmailAccountHandler
-	ChaseLog      *handlers.ChaseLogHandler
+	ChaseLog     *handlers.ChaseLogHandler
+	Notification *handlers.NotificationHandler
+	Settings     *handlers.SettingsHandler
+	ESign        *handlers.ESignHandler
 }
 
 func main() {
@@ -208,7 +211,10 @@ func main() {
 			Email:         handlers.NewEmailHandler(db, emailClient, auditLogger, authRateLimiter),
 			EmailTemplate: handlers.NewEmailTemplateHandler(db, auditLogger),
 			EmailAccount:  handlers.NewEmailAccountHandler(db, auditLogger, encryptor),
-			ChaseLog:      handlers.NewChaseLogHandler(db, emailClient, auditLogger, authRateLimiter),
+			ChaseLog:     handlers.NewChaseLogHandler(db, emailClient, auditLogger, authRateLimiter),
+			Notification: handlers.NewNotificationHandler(db, auditLogger),
+			Settings:     handlers.NewSettingsHandler(db, auditLogger),
+			ESign:        handlers.NewESignHandler(db, auditLogger),
 		},
 	}
 
@@ -469,6 +475,13 @@ func setupRouter(app *Application) *gin.Engine {
 			qr.POST("/:token/upload", h.Document.UploadViaQR)
 		}
 
+		// E-Sign public routes (no auth required)
+		esignPublic := v1.Group("/e-sign/sign")
+		{
+			esignPublic.GET("/:token", h.ESign.GetSigningPage)
+			esignPublic.POST("/:token", h.ESign.SubmitSignature)
+		}
+
 		// Dashboard routes
 		dashboard := protected.Group("/dashboard")
 		{
@@ -614,6 +627,38 @@ func setupRouter(app *Application) *gin.Engine {
 			chaseLogs.GET("/stats", h.ChaseLog.GetStats)
 			chaseLogs.POST("", middleware.RequireRole("super_admin", "tenant_admin", "staff"), h.ChaseLog.Create)
 			chaseLogs.GET("/:id", middleware.ValidateUUID("id"), h.ChaseLog.Get)
+		}
+
+		// Notification routes
+		notifications := protected.Group("/notifications")
+		{
+			notifications.GET("", h.Notification.List)
+			notifications.GET("/unread-count", h.Notification.GetUnreadCount)
+			notifications.POST("", middleware.RequireRole("super_admin", "tenant_admin"), h.Notification.Create)
+			notifications.POST("/read-all", h.Notification.MarkAllRead)
+			notifications.POST("/dismiss-all", h.Notification.DismissAll)
+			notifications.GET("/:id", middleware.ValidateUUID("id"), h.Notification.Get)
+			notifications.PATCH("/:id/read", middleware.ValidateUUID("id"), h.Notification.MarkRead)
+			notifications.DELETE("/:id", middleware.ValidateUUID("id"), h.Notification.Dismiss)
+		}
+
+		// Settings routes
+		settings := protected.Group("/settings")
+		{
+			settings.GET("", h.Settings.Get)
+			settings.PATCH("", middleware.RequireRole("super_admin", "tenant_admin"), h.Settings.Update)
+			settings.GET("/branding", h.Settings.GetBranding)
+			settings.PATCH("/branding", middleware.RequireRole("super_admin", "tenant_admin"), h.Settings.UpdateBranding)
+		}
+
+		// E-Sign routes
+		esign := protected.Group("/e-sign")
+		{
+			esign.GET("", h.ESign.List)
+			esign.POST("", middleware.RequireRole("super_admin", "tenant_admin", "staff"), h.ESign.Create)
+			esign.GET("/:id", middleware.ValidateUUID("id"), h.ESign.Get)
+			esign.POST("/:id/send", middleware.ValidateUUID("id"), h.ESign.Send)
+			esign.DELETE("/:id", middleware.ValidateUUID("id"), h.ESign.Delete)
 		}
 
 		// WebSocket routes (protected)
