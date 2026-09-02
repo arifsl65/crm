@@ -50,6 +50,44 @@ func NewAuthHandler(db *database.Pool, jwt *auth.JWTManager, session *auth.Sessi
 	}
 }
 
+// setAuthCookies sets httpOnly cookies for access and refresh tokens.
+// This is more secure than localStorage as cookies are not accessible via JavaScript.
+func (h *AuthHandler) setAuthCookies(c *gin.Context, accessToken, refreshToken string) {
+	// Determine if we're in production (HTTPS)
+	secure := c.Request.TLS != nil || c.GetHeader("X-Forwarded-Proto") == "https"
+
+	// Access token cookie - short lived (15 minutes)
+	c.SetCookie(
+		"access_token",   // name
+		accessToken,      // value
+		15*60,            // maxAge in seconds (15 minutes)
+		"/",              // path
+		"",               // domain (empty = current domain)
+		secure,           // secure (HTTPS only in production)
+		true,             // httpOnly (not accessible via JavaScript)
+	)
+	c.SetSameSite(http.SameSiteStrictMode)
+
+	// Refresh token cookie - longer lived (7 days)
+	c.SetCookie(
+		"refresh_token",  // name
+		refreshToken,     // value
+		7*24*60*60,       // maxAge in seconds (7 days)
+		"/",              // path
+		"",               // domain
+		secure,           // secure
+		true,             // httpOnly
+	)
+}
+
+// clearAuthCookies removes auth cookies on logout.
+func (h *AuthHandler) clearAuthCookies(c *gin.Context) {
+	secure := c.Request.TLS != nil || c.GetHeader("X-Forwarded-Proto") == "https"
+
+	c.SetCookie("access_token", "", -1, "/", "", secure, true)
+	c.SetCookie("refresh_token", "", -1, "/", "", secure, true)
+}
+
 type LoginRequest struct {
 	Email        string `json:"email" binding:"required,email"`
 	Password     string `json:"password" binding:"required,min=8"`
@@ -214,6 +252,9 @@ func (h *AuthHandler) Login(c *gin.Context) {
 	// Audit log successful login
 	h.audit.LogAuth(ctx, audit.ActionLogin, &user.ID, user.TenantID, ipAddress, userAgent, true, "")
 
+	// Set httpOnly cookies for secure token storage (prevents XSS token theft)
+	h.setAuthCookies(c, tokenPair.AccessToken, tokenPair.RefreshToken)
+
 	c.JSON(http.StatusOK, AuthResponse{
 		AccessToken:  tokenPair.AccessToken,
 		RefreshToken: tokenPair.RefreshToken,
@@ -301,6 +342,9 @@ func (h *AuthHandler) Register(c *gin.Context) {
 	// Audit log successful registration
 	h.audit.LogAuth(ctx, audit.ActionRegister, &userID, &tenantID, ipAddress, userAgent, true, "")
 
+	// Set httpOnly cookies for secure token storage
+	h.setAuthCookies(c, tokenPair.AccessToken, tokenPair.RefreshToken)
+
 	c.JSON(http.StatusCreated, AuthResponse{
 		AccessToken:  tokenPair.AccessToken,
 		RefreshToken: tokenPair.RefreshToken,
@@ -317,10 +361,21 @@ func (h *AuthHandler) Register(c *gin.Context) {
 
 func (h *AuthHandler) Refresh(c *gin.Context) {
 	var req RefreshRequest
-	if err := c.ShouldBindJSON(&req); err != nil {
+	// Body is optional - can use cookie instead
+	_ = c.ShouldBindJSON(&req)
+
+	// Try to get refresh token from cookie if not in body
+	if req.RefreshToken == "" {
+		cookieToken, err := c.Cookie("refresh_token")
+		if err == nil && cookieToken != "" {
+			req.RefreshToken = cookieToken
+		}
+	}
+
+	if req.RefreshToken == "" {
 		c.JSON(http.StatusBadRequest, gin.H{
 			"error":   "validation_error",
-			"message": "Invalid request body",
+			"message": "Refresh token required",
 		})
 		return
 	}
@@ -397,6 +452,9 @@ func (h *AuthHandler) Refresh(c *gin.Context) {
 		// Continue anyway - token rotation not critical
 	}
 
+	// Set httpOnly cookies for secure token storage
+	h.setAuthCookies(c, tokenPair.AccessToken, tokenPair.RefreshToken)
+
 	c.JSON(http.StatusOK, gin.H{
 		"access_token":  tokenPair.AccessToken,
 		"refresh_token": tokenPair.RefreshToken,
@@ -432,6 +490,9 @@ func (h *AuthHandler) Logout(c *gin.Context) {
 			}
 		}
 	}
+
+	// Clear httpOnly auth cookies
+	h.clearAuthCookies(c)
 
 	if req.RevokeAll {
 		// Revoke all user sessions
@@ -479,8 +540,8 @@ func (h *AuthHandler) getUserByEmail(ctx context.Context, email string, tenantID
 		if tenantID != nil {
 			// Tenant-scoped lookup
 			query := `
-				SELECT id, tenant_id, email, password_hash,
-				       COALESCE(CONCAT(first_name, ' ', last_name), '') as name,
+				SELECT id, tenant_id, email, password,
+				       COALESCE(name, '') as name,
 				       role, status, failed_login_attempts, locked_until
 				FROM users
 				WHERE email = $1 AND tenant_id = $2 AND deleted_at IS NULL
@@ -512,8 +573,8 @@ func (h *AuthHandler) getUserByEmail(ctx context.Context, email string, tenantID
 
 		// Single tenant or super_admin - proceed with lookup
 		query := `
-			SELECT id, tenant_id, email, password_hash,
-			       COALESCE(CONCAT(first_name, ' ', last_name), '') as name,
+			SELECT id, tenant_id, email, password,
+			       COALESCE(name, '') as name,
 			       role, status, failed_login_attempts, locked_until
 			FROM users
 			WHERE email = $1 AND deleted_at IS NULL
@@ -767,7 +828,7 @@ type userRecordForReset struct {
 }
 
 func (h *AuthHandler) getUserByEmailForReset(ctx context.Context, email string) (*userRecordForReset, error) {
-	query := `SELECT id, email, COALESCE(CONCAT(first_name, ' ', last_name), '') as name FROM users WHERE email = $1 AND deleted_at IS NULL`
+	query := `SELECT id, email, COALESCE(name, '') as name FROM users WHERE email = $1 AND deleted_at IS NULL`
 	var user userRecordForReset
 	var qErr error
 	if err := h.db.SuperAdminTransaction(ctx, func(tx pgx.Tx) error {
@@ -841,7 +902,7 @@ func (h *AuthHandler) GetMe(c *gin.Context) {
 	}
 
 	query := `
-		SELECT id, tenant_id, email, COALESCE(CONCAT(first_name, ' ', last_name), '') as name, role, phone, avatar_url, settings,
+		SELECT id, tenant_id, email, COALESCE(name, '') as name, role, phone, avatar_url, preferences,
 		       last_login_at, created_at
 		FROM users WHERE id = $1 AND deleted_at IS NULL
 	`
@@ -903,7 +964,7 @@ func (h *AuthHandler) GetMe(c *gin.Context) {
 
 // UpdateMeRequest is the request body for updating user profile.
 type UpdateMeRequest struct {
-	Name      *string                `json:"name,omitempty"`       // Will be split into first_name and last_name
+	Name      *string                `json:"name,omitempty"`
 	Phone     *string                `json:"phone,omitempty"`
 	AvatarURL *string                `json:"avatar_url,omitempty"`
 	Settings  map[string]interface{} `json:"settings,omitempty"` // e.g., {"theme": "dark"}
@@ -911,7 +972,7 @@ type UpdateMeRequest struct {
 
 // UpdateMe updates the current user's profile.
 // PATCH /api/v1/auth/me
-// Supports: name (splits into first_name/last_name), phone, avatar_url, settings (including theme)
+// Supports: name, phone, avatar_url, settings (including theme)
 func (h *AuthHandler) UpdateMe(c *gin.Context) {
 	userID, _ := middleware.GetUserID(c)
 	ctx := c.Request.Context()
@@ -931,18 +992,8 @@ func (h *AuthHandler) UpdateMe(c *gin.Context) {
 	argNum := 1
 
 	if req.Name != nil {
-		// Split name into first_name and last_name
-		parts := strings.SplitN(*req.Name, " ", 2)
-		firstName := parts[0]
-		lastName := ""
-		if len(parts) > 1 {
-			lastName = parts[1]
-		}
-		setClauses = append(setClauses, fmt.Sprintf("first_name = $%d", argNum))
-		args = append(args, firstName)
-		argNum++
-		setClauses = append(setClauses, fmt.Sprintf("last_name = $%d", argNum))
-		args = append(args, lastName)
+		setClauses = append(setClauses, fmt.Sprintf("name = $%d", argNum))
+		args = append(args, *req.Name)
 		argNum++
 	}
 	if req.Phone != nil {
@@ -956,8 +1007,8 @@ func (h *AuthHandler) UpdateMe(c *gin.Context) {
 		argNum++
 	}
 	if req.Settings != nil {
-		// Merge with existing settings using JSONB || operator
-		setClauses = append(setClauses, fmt.Sprintf("settings = COALESCE(settings, '{}'::jsonb) || $%d::jsonb", argNum))
+		// Merge with existing preferences using JSONB || operator
+		setClauses = append(setClauses, fmt.Sprintf("preferences = COALESCE(preferences, '{}'::jsonb) || $%d::jsonb", argNum))
 		args = append(args, req.Settings)
 		argNum++
 	}
@@ -1018,7 +1069,7 @@ func (h *AuthHandler) ChangePassword(c *gin.Context) {
 	// Get current password hash
 	var currentHash string
 	err := h.db.SuperAdminTransaction(ctx, func(tx pgx.Tx) error {
-		return tx.QueryRow(ctx, `SELECT password_hash FROM users WHERE id = $1`, userID).Scan(&currentHash)
+		return tx.QueryRow(ctx, `SELECT password FROM users WHERE id = $1`, userID).Scan(&currentHash)
 	})
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{
@@ -1050,7 +1101,7 @@ func (h *AuthHandler) ChangePassword(c *gin.Context) {
 
 	// Update password
 	err = h.db.SuperAdminTransaction(ctx, func(tx pgx.Tx) error {
-		_, err := tx.Exec(ctx, `UPDATE users SET password_hash = $1, password_changed_at = NOW(), updated_at = NOW() WHERE id = $2`, newHash, userID)
+		_, err := tx.Exec(ctx, `UPDATE users SET password = $1, updated_at = NOW() WHERE id = $2`, newHash, userID)
 		return err
 	})
 	if err != nil {
@@ -1232,7 +1283,7 @@ func (h *AuthHandler) VerifyMagicLink(c *gin.Context) {
 	var user userRecord
 	err = h.db.SuperAdminTransaction(ctx, func(tx pgx.Tx) error {
 		return tx.QueryRow(ctx, `
-			SELECT id, tenant_id, email, COALESCE(CONCAT(first_name, ' ', last_name), '') as name, role FROM users WHERE id = $1 AND deleted_at IS NULL
+			SELECT id, tenant_id, email, COALESCE(name, '') as name, role FROM users WHERE id = $1 AND deleted_at IS NULL
 		`, userID).Scan(&user.ID, &user.TenantID, &user.Email, &user.Name, &user.Role)
 	})
 	if err != nil {
@@ -1533,7 +1584,7 @@ func (h *AuthHandler) Disable2FA(c *gin.Context) {
 	// Verify password before allowing 2FA disable
 	var passwordHash string
 	err := h.db.SuperAdminTransaction(ctx, func(tx pgx.Tx) error {
-		return tx.QueryRow(ctx, `SELECT password_hash FROM users WHERE id = $1`, userID).Scan(&passwordHash)
+		return tx.QueryRow(ctx, `SELECT password FROM users WHERE id = $1`, userID).Scan(&passwordHash)
 	})
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{
@@ -1674,13 +1725,16 @@ func (h *AuthHandler) VerifyBackupCode(c *gin.Context) {
 		return
 	}
 
-	// Verify backup code
+	// Verify and consume backup code atomically (prevents TOCTOU race condition)
+	// Fix: Combined SELECT + UPDATE into single atomic UPDATE...RETURNING
 	codeHash := hashTokenString(normalizeBackupCode(req.BackupCode))
 	var codeID uuid.UUID
 	err = h.db.SuperAdminTransaction(ctx, func(tx pgx.Tx) error {
 		return tx.QueryRow(ctx, `
-			SELECT id FROM totp_backup_codes
+			UPDATE totp_backup_codes
+			SET used_at = NOW()
 			WHERE user_id = $1 AND code_hash = $2 AND used_at IS NULL
+			RETURNING id
 		`, user.ID, codeHash).Scan(&codeID)
 	})
 	if err != nil {
@@ -1689,15 +1743,6 @@ func (h *AuthHandler) VerifyBackupCode(c *gin.Context) {
 			"message": "Invalid email, password, or backup code",
 		})
 		return
-	}
-
-	// Mark code as used
-	err = h.db.SuperAdminTransaction(ctx, func(tx pgx.Tx) error {
-		_, err := tx.Exec(ctx, `UPDATE totp_backup_codes SET used_at = NOW() WHERE id = $1`, codeID)
-		return err
-	})
-	if err != nil {
-		log.Error().Err(err).Msg("Failed to mark backup code as used")
 	}
 
 	// Count remaining codes

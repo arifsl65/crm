@@ -168,10 +168,10 @@ func (h *DashboardHandler) GetStats(c *gin.Context) {
 
 	// Recent activity from audit logs
 	err := tenantDB.Query(c, `
-		SELECT al.id, al.action, al.entity_type, al.entity_id, COALESCE(CONCAT(u.first_name, ' ', u.last_name), ''), al.created_at
+		SELECT al.id, al.action, al.entity_type, al.entity_id, COALESCE(u.name, ''), al.created_at
 		FROM audit_logs al
 		LEFT JOIN users u ON al.user_id = u.id
-		WHERE al.tenant_id = $1 AND al.success = true
+		WHERE al.tenant_id = $1 AND al.severity = 'info'
 		ORDER BY al.created_at DESC
 		LIMIT 10
 	`, []interface{}{tenantID}, func(rows pgx.Rows) error {
@@ -370,14 +370,14 @@ func (h *DashboardHandler) GetClientWorkload(c *gin.Context) {
 
 	var workload []map[string]interface{}
 	err := tenantDB.Query(c, `
-		SELECT u.id, COALESCE(CONCAT(u.first_name, ' ', u.last_name), ''),
+		SELECT u.id, COALESCE(u.name, ''),
 		       COUNT(sc.client_id) as client_count,
 		       COUNT(s.id) FILTER (WHERE s.status = 'in_progress') as active_services
 		FROM users u
 		LEFT JOIN staff_clients sc ON u.id = sc.staff_id
 		LEFT JOIN services s ON sc.client_id = s.client_id AND s.staff_id = u.id
 		WHERE u.tenant_id = $1 AND u.role = 'staff' AND u.deleted_at IS NULL
-		GROUP BY u.id, u.first_name, u.last_name
+		GROUP BY u.id, u.name
 		ORDER BY client_count DESC
 	`, []interface{}{tenantID}, func(rows pgx.Rows) error {
 		var id uuid.UUID

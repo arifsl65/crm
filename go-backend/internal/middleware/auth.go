@@ -27,25 +27,34 @@ type TokenBlocklist interface {
 
 func JWTAuth(jwtManager *auth.JWTManager, blocklist TokenBlocklist) gin.HandlerFunc {
 	return func(c *gin.Context) {
+		var token string
+
+		// Try Authorization header first
 		authHeader := c.GetHeader("Authorization")
-		if authHeader == "" {
+		if authHeader != "" {
+			parts := strings.SplitN(authHeader, " ", 2)
+			if len(parts) == 2 && strings.EqualFold(parts[0], "bearer") {
+				token = parts[1]
+			}
+		}
+
+		// Fall back to httpOnly cookie if no header
+		if token == "" {
+			cookieToken, err := c.Cookie("access_token")
+			if err == nil && cookieToken != "" {
+				token = cookieToken
+			}
+		}
+
+		if token == "" {
 			c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{
 				"error":   "missing_token",
-				"message": "Authorization header required",
+				"message": "Authorization required",
 			})
 			return
 		}
 
-		parts := strings.SplitN(authHeader, " ", 2)
-		if len(parts) != 2 || !strings.EqualFold(parts[0], "bearer") {
-			c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{
-				"error":   "invalid_token",
-				"message": "Invalid authorization header format",
-			})
-			return
-		}
-
-		claims, err := jwtManager.ValidateToken(parts[1])
+		claims, err := jwtManager.ValidateToken(token)
 		if err != nil {
 			if err == auth.ErrExpiredToken {
 				c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{

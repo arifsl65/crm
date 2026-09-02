@@ -2,6 +2,7 @@
 
 import { useEffect, useState, useCallback } from 'react';
 import Link from 'next/link';
+import DOMPurify from 'dompurify';
 import { useAuth } from '@/components/auth-guard';
 import {
   Email,
@@ -430,7 +431,7 @@ export default function EmailPage() {
               <div className="p-4 overflow-auto max-h-[calc(100vh-400px)]">
                 <div
                   className="prose dark:prose-invert max-w-none"
-                  dangerouslySetInnerHTML={{ __html: selectedEmail.body_html }}
+                  dangerouslySetInnerHTML={{ __html: DOMPurify.sanitize(selectedEmail.body_html || '') }}
                 />
               </div>
 

@@ -864,7 +864,7 @@ func (h *ClientHandler) ListNotes(c *gin.Context) {
 	var notes []ClientNote
 	err = tenantDB.Query(c, `
 		SELECT cn.id, cn.tenant_id, cn.client_id, cn.staff_id, cn.note,
-		       cn.created_at, cn.updated_at, COALESCE(CONCAT(u.first_name, ' ', u.last_name), '') as staff_name
+		       cn.created_at, cn.updated_at, COALESCE(u.name, '') as staff_name
 		FROM client_notes cn
 		LEFT JOIN users u ON cn.staff_id = u.id
 		WHERE cn.client_id = $1 AND cn.tenant_id = $2
@@ -1169,7 +1169,7 @@ func (h *ClientHandler) GetEmails(c *gin.Context) {
 	err = tenantDB.Query(c, `
 		SELECT e.id, e.tenant_id, e.client_id, e.staff_id, e.direction,
 		       e.to_email, e.from_email, e.subject, e.status, e.is_read,
-		       e.sent_at, e.created_at, COALESCE(CONCAT(u.first_name, ' ', u.last_name), '') as staff_name
+		       e.sent_at, e.created_at, COALESCE(u.name, '') as staff_name
 		FROM emails e
 		LEFT JOIN users u ON e.staff_id = u.id
 		WHERE e.client_id = $1 AND e.tenant_id = $2

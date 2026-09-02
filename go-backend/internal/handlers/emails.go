@@ -130,7 +130,7 @@ func (h *EmailHandler) List(c *gin.Context) {
 		       e.from_email, e.subject, e.body_html, e.body_text, e.type, e.status,
 		       e.resend_id, e.is_read, e.ai_summary, e.sentiment,
 		       e.sent_at, e.opened_at, e.bounced_at, e.bounce_reason, e.created_at,
-		       cl.company_name as client_name, COALESCE(CONCAT(u.first_name, ' ', u.last_name), '') as staff_name
+		       cl.company_name as client_name, COALESCE(u.name, '') as staff_name
 		FROM emails e
 		LEFT JOIN clients cl ON e.client_id = cl.id
 		LEFT JOIN users u ON e.staff_id = u.id
@@ -249,7 +249,7 @@ func (h *EmailHandler) Get(c *gin.Context) {
 		       e.from_email, e.subject, e.body_html, e.body_text, e.type, e.status,
 		       e.resend_id, e.is_read, e.ai_summary, e.sentiment,
 		       e.sent_at, e.opened_at, e.bounced_at, e.bounce_reason, e.created_at,
-		       cl.company_name as client_name, COALESCE(CONCAT(u.first_name, ' ', u.last_name), '') as staff_name
+		       cl.company_name as client_name, COALESCE(u.name, '') as staff_name
 		FROM emails e
 		LEFT JOIN clients cl ON e.client_id = cl.id
 		LEFT JOIN users u ON e.staff_id = u.id

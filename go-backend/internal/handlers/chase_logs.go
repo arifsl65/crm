@@ -112,7 +112,7 @@ func (h *ChaseLogHandler) List(c *gin.Context) {
 
 	query := `
 		SELECT cl.id, cl.tenant_id, cl.initiated_by, cl.total_sent, cl.delivered,
-		       cl.opened, cl.bounced, cl.created_at, COALESCE(CONCAT(u.first_name, ' ', u.last_name), '') as initiated_by_name
+		       cl.opened, cl.bounced, cl.created_at, COALESCE(u.name, '') as initiated_by_name
 		FROM chase_logs cl
 		LEFT JOIN users u ON cl.initiated_by = u.id
 		WHERE cl.tenant_id = $1
@@ -176,7 +176,7 @@ func (h *ChaseLogHandler) Get(c *gin.Context) {
 		&detail.Opened, &detail.Bounced, &detail.CreatedAt, &detail.InitiatedByName,
 	}, `
 		SELECT cl.id, cl.tenant_id, cl.initiated_by, cl.total_sent, cl.delivered,
-		       cl.opened, cl.bounced, cl.created_at, COALESCE(CONCAT(u.first_name, ' ', u.last_name), '') as initiated_by_name
+		       cl.opened, cl.bounced, cl.created_at, COALESCE(u.name, '') as initiated_by_name
 		FROM chase_logs cl
 		LEFT JOIN users u ON cl.initiated_by = u.id
 		WHERE cl.id = $1 AND cl.tenant_id = $2

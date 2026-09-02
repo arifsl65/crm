@@ -212,7 +212,7 @@ func (h *DocumentHandler) List(c *gin.Context) {
 		       d.name, d.original_name, d.file_size, d.mime_type, d.status, d.access,
 		       d.version, d.expiry_date, d.chase_count, d.last_chased_at, d.ai_summary,
 		       d.created_at, d.updated_at,
-		       c.company_name as client_name, dt.name as type_name, COALESCE(CONCAT(u.first_name, ' ', u.last_name), '') as uploaded_by_name
+		       c.company_name as client_name, dt.name as type_name, COALESCE(u.name, '') as uploaded_by_name
 		FROM documents d
 		LEFT JOIN clients c ON d.client_id = c.id
 		LEFT JOIN document_types dt ON d.type_id = dt.id
@@ -349,7 +349,7 @@ func (h *DocumentHandler) Get(c *gin.Context) {
 		       d.version, d.parent_id, d.requested_at, d.expiry_date, d.request_note,
 		       d.upload_note, d.review_note, d.reviewed_by, d.reviewed_at,
 		       d.chase_count, d.last_chased_at, d.ai_summary, d.created_at, d.updated_at,
-		       c.company_name as client_name, dt.name as type_name, COALESCE(CONCAT(u.first_name, ' ', u.last_name), '') as uploaded_by_name
+		       c.company_name as client_name, dt.name as type_name, COALESCE(u.name, '') as uploaded_by_name
 		FROM documents d
 		LEFT JOIN clients c ON d.client_id = c.id
 		LEFT JOIN document_types dt ON d.type_id = dt.id
@@ -1009,7 +1009,7 @@ func (h *DocumentHandler) GetVersions(c *gin.Context) {
 			INNER JOIN version_chain vc ON d.id = vc.parent_id
 			WHERE d.tenant_id = $2
 		)
-		SELECT vc.id, vc.version, vc.name, vc.file_size, vc.created_at, COALESCE(CONCAT(u.first_name, ' ', u.last_name), '') as uploaded_by_name
+		SELECT vc.id, vc.version, vc.name, vc.file_size, vc.created_at, COALESCE(u.name, '') as uploaded_by_name
 		FROM version_chain vc
 		LEFT JOIN users u ON vc.uploaded_by = u.id
 		ORDER BY vc.version DESC
@@ -1288,7 +1288,7 @@ func (h *DocumentHandler) ListFirm(c *gin.Context) {
 
 	query.WriteString(`
 		SELECT d.id, d.name, d.original_name, d.file_size, d.mime_type, d.status, d.access,
-		       d.created_at, d.updated_at, COALESCE(CONCAT(u.first_name, ' ', u.last_name), '') as uploaded_by_name
+		       d.created_at, d.updated_at, COALESCE(u.name, '') as uploaded_by_name
 		FROM documents d
 		LEFT JOIN users u ON d.uploaded_by = u.id
 		WHERE d.tenant_id = $1 AND d.client_id IS NULL
