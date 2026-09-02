@@ -103,7 +103,10 @@ export function saveAuth(auth: AuthResponse): void {
   if (typeof window !== 'undefined') {
     localStorage.setItem('access_token', auth.access_token);
     localStorage.setItem('refresh_token', auth.refresh_token);
-    localStorage.setItem('user', JSON.stringify(auth.user));
+    // Only save user if it exists to prevent storing "undefined" string
+    if (auth.user) {
+      localStorage.setItem('user', JSON.stringify(auth.user));
+    }
   }
 }
 
@@ -117,7 +120,16 @@ export function getAccessToken(): string | null {
 export function getUser(): User | null {
   if (typeof window !== 'undefined') {
     const user = localStorage.getItem('user');
-    return user ? JSON.parse(user) : null;
+    if (!user || user === 'undefined') {
+      return null;
+    }
+    try {
+      return JSON.parse(user);
+    } catch {
+      // Invalid JSON in localStorage, clear it
+      localStorage.removeItem('user');
+      return null;
+    }
   }
   return null;
 }
