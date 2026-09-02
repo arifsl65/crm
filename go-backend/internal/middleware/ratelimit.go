@@ -33,6 +33,9 @@ var (
 	// Login: 100 attempts per IP+email, 15min window (increased for E2E testing)
 	LoginRateLimit = RateLimitConfig{MaxAttempts: 100, Window: 15 * time.Minute}
 
+	// Registration: 5 per IP per hour (prevents mass account creation)
+	RegisterRateLimit = RateLimitConfig{MaxAttempts: 5, Window: time.Hour}
+
 	// Password reset request: 3 per email, 1 hour
 	ResetPasswordRateLimit = RateLimitConfig{MaxAttempts: 3, Window: time.Hour}
 
@@ -111,6 +114,13 @@ func (rl *AuthRateLimiter) ResetPasswordRateLimit() gin.HandlerFunc {
 func (rl *AuthRateLimiter) CheckResetPasswordRate(ctx context.Context, email string) (bool, int, int, error) {
 	key := fmt.Sprintf("ratelimit:reset-password:%s", email)
 	return rl.checkRateLimit(ctx, key, ResetPasswordRateLimit)
+}
+
+// CheckRegisterRate checks registration rate limit by IP address.
+// Prevents mass account creation attacks.
+func (rl *AuthRateLimiter) CheckRegisterRate(ctx context.Context, ip string) (bool, int, int, error) {
+	key := fmt.Sprintf("ratelimit:register:%s", ip)
+	return rl.checkRateLimit(ctx, key, RegisterRateLimit)
 }
 
 // MagicLinkRateLimit middleware for /auth/magic-link endpoint.

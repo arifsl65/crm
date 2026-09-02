@@ -313,13 +313,13 @@ func (h *UserHandler) Create(c *gin.Context) {
 		"user":    user,
 	}
 	if inviteToken != nil {
-		response["invite_token"] = *inviteToken
+		// SECURITY: Never expose invite_token in API response - it's a credential
+		// The token is sent via email. If email is not configured, admin must configure it.
+		response["invite_sent"] = true
 		response["invite_expires_at"] = inviteExpires
-		response["invite_url"] = "/invite/" + *inviteToken
-		log.Warn().
+		log.Info().
 			Str("email", req.Email).
-			Str("invite_token", *inviteToken).
-			Msg("User created via invitation; email client not configured, returning token in response")
+			Msg("User created with invitation; invite token generated (not exposed in response)")
 	}
 
 	c.JSON(http.StatusCreated, response)
@@ -640,6 +640,13 @@ func (h *UserHandler) Delete(c *gin.Context) {
 			"message": "Failed to delete user",
 		})
 		return
+	}
+
+	// SECURITY: Revoke all user's refresh tokens to invalidate their sessions
+	// This prevents deleted users from continuing to use existing tokens
+	if err := h.sessionManager.RevokeAllUserTokens(c.Request.Context(), id); err != nil {
+		log.Error().Err(err).Str("user_id", id.String()).Msg("Failed to revoke tokens for deleted user")
+		// Continue anyway - user is already soft deleted
 	}
 
 	c.JSON(http.StatusOK, gin.H{

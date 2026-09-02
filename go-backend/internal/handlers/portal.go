@@ -2,6 +2,7 @@ package handlers
 
 import (
 	"net/http"
+	"strconv"
 	"time"
 
 	"github.com/gin-gonic/gin"
@@ -295,17 +296,17 @@ func (h *PortalHandler) UpdateProfile(c *gin.Context) {
 
 	if req.ContactName != nil {
 		argCount++
-		setClauses = append(setClauses, "contact_name = $"+string(rune('0'+argCount)))
+		setClauses = append(setClauses, "contact_name = $"+strconv.Itoa(argCount))
 		args = append(args, *req.ContactName)
 	}
 	if req.Phone != nil {
 		argCount++
-		setClauses = append(setClauses, "phone = $"+string(rune('0'+argCount)))
+		setClauses = append(setClauses, "phone = $"+strconv.Itoa(argCount))
 		args = append(args, *req.Phone)
 	}
 	if req.Address != nil {
 		argCount++
-		setClauses = append(setClauses, "address = $"+string(rune('0'+argCount)))
+		setClauses = append(setClauses, "address = $"+strconv.Itoa(argCount))
 		args = append(args, *req.Address)
 	}
 
@@ -321,7 +322,7 @@ func (h *PortalHandler) UpdateProfile(c *gin.Context) {
 	for i := 1; i < len(setClauses); i++ {
 		query += ", " + setClauses[i]
 	}
-	query += " WHERE user_id = $" + string(rune('0'+argCount+1)) + " AND tenant_id = $" + string(rune('0'+argCount+2))
+	query += " WHERE user_id = $" + strconv.Itoa(argCount+1) + " AND tenant_id = $" + strconv.Itoa(argCount+2)
 	query += " RETURNING id, company_name, contact_name, email, phone, address"
 
 	var profile PortalProfile

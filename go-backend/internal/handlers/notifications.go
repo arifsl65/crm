@@ -216,14 +216,27 @@ func (h *NotificationHandler) Create(c *gin.Context) {
 		return
 	}
 
-	// Verify target user belongs to the same tenant
-	var userExists bool
-	err := tenantDB.QueryRowScan(c, []interface{}{&userExists},
-		`SELECT EXISTS(SELECT 1 FROM users WHERE id = $1 AND tenant_id = $2)`,
+	// Verify target user belongs to the same tenant AND check role authorization
+	var targetUserRole string
+	err := tenantDB.QueryRowScan(c, []interface{}{&targetUserRole},
+		`SELECT role FROM users WHERE id = $1 AND tenant_id = $2 AND deleted_at IS NULL`,
 		req.UserID, tenantID)
-	if err != nil || !userExists {
+	if err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "User not found in tenant"})
 		return
+	}
+
+	// SECURITY: Staff cannot send notifications to admins (privilege escalation prevention)
+	// Only tenant_admin or super_admin can notify anyone
+	currentRole, _ := middleware.GetRole(c)
+	if currentRole == "staff" {
+		if targetUserRole == "tenant_admin" || targetUserRole == "super_admin" {
+			c.JSON(http.StatusForbidden, gin.H{
+				"error":   "forbidden",
+				"message": "Staff cannot send notifications to administrators",
+			})
+			return
+		}
 	}
 
 	notificationID := uuid.New()

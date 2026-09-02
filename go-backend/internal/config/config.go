@@ -28,7 +28,22 @@ type Config struct {
 	Email          EmailConfig
 	CompaniesHouse CompaniesHouseConfig
 	OSS            OSSConfig
+	OAuth          OAuthConfig
 	FrontendURL    string
+}
+
+// OAuthConfig holds OAuth provider settings.
+type OAuthConfig struct {
+	Google    OAuthProviderConfig
+	Microsoft OAuthProviderConfig
+}
+
+// OAuthProviderConfig holds settings for a single OAuth provider.
+type OAuthProviderConfig struct {
+	ClientID     string
+	ClientSecret string
+	RedirectURL  string
+	Enabled      bool
 }
 
 // OSSConfig holds Alibaba Cloud OSS storage settings.
@@ -351,6 +366,22 @@ func Load() (*Config, error) {
 		AccessKeySecret: getEnv("ALIBABA_ACCESS_KEY_SECRET", ""),
 		Endpoint:        getEnv("OSS_ENDPOINT", "https://oss-eu-west-1.aliyuncs.com"),
 		Bucket:          getEnv("OSS_BUCKET_UPLOADS", "fzco-uploads"),
+	}
+
+	// OAuth config
+	cfg.OAuth = OAuthConfig{
+		Google: OAuthProviderConfig{
+			ClientID:     getEnv("GOOGLE_CLIENT_ID", ""),
+			ClientSecret: getEnv("GOOGLE_CLIENT_SECRET", ""),
+			RedirectURL:  getEnv("GOOGLE_REDIRECT_URL", cfg.FrontendURL+"/api/v1/email-accounts/oauth/google/callback"),
+			Enabled:      getEnvBool("GOOGLE_OAUTH_ENABLED", false),
+		},
+		Microsoft: OAuthProviderConfig{
+			ClientID:     getEnv("MICROSOFT_CLIENT_ID", ""),
+			ClientSecret: getEnv("MICROSOFT_CLIENT_SECRET", ""),
+			RedirectURL:  getEnv("MICROSOFT_REDIRECT_URL", cfg.FrontendURL+"/api/v1/email-accounts/oauth/microsoft/callback"),
+			Enabled:      getEnvBool("MICROSOFT_OAUTH_ENABLED", false),
+		},
 	}
 
 	// Validate critical security settings in production AND staging

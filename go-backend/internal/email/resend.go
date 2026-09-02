@@ -202,3 +202,60 @@ func (c *Client) SendInvite(to, inviteURL, inviterName, orgName string) error {
 func (c *Client) IsConfigured() bool {
 	return c.apiKey != "" && c.fromEmail != ""
 }
+
+// SendESignRequest sends an e-signature request email to the signer.
+func (c *Client) SendESignRequest(to, signerName, clientName, templateType, signingURL string, expiresAt *time.Time) error {
+	// Format the template type for display
+	templateDisplay := templateType
+	switch templateType {
+	case "engagement":
+		templateDisplay = "Engagement Letter"
+	case "service_agreement":
+		templateDisplay = "Service Agreement"
+	case "gdpr_consent":
+		templateDisplay = "GDPR Consent Form"
+	}
+
+	// Format expiry date
+	expiryText := "14 days"
+	if expiresAt != nil {
+		expiryText = expiresAt.Format("January 2, 2006")
+	}
+
+	subject := fmt.Sprintf("Action Required: Please sign your %s", templateDisplay)
+	html := fmt.Sprintf(`
+<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+</head>
+<body style="font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif; line-height: 1.6; color: #333; max-width: 600px; margin: 0 auto; padding: 20px;">
+    <div style="background: linear-gradient(135deg, #667eea 0%%, #764ba2 100%%); padding: 30px; text-align: center; border-radius: 10px 10px 0 0;">
+        <h1 style="color: white; margin: 0; font-size: 24px;">Document Signing Request</h1>
+    </div>
+    <div style="background: #ffffff; padding: 30px; border: 1px solid #e0e0e0; border-top: none; border-radius: 0 0 10px 10px;">
+        <p style="margin-top: 0;">Hi %s,</p>
+        <p>You have been requested to sign a <strong>%s</strong> for <strong>%s</strong>.</p>
+        <p>Please review and sign the document by clicking the button below:</p>
+        <div style="text-align: center; margin: 30px 0;">
+            <a href="%s" style="background: #667eea; color: white; padding: 14px 35px; text-decoration: none; border-radius: 5px; font-weight: bold; display: inline-block; font-size: 16px;">Review & Sign Document</a>
+        </div>
+        <div style="background: #f8f9fa; padding: 15px; border-radius: 5px; margin: 20px 0;">
+            <p style="margin: 0; color: #666; font-size: 14px;">
+                <strong>⏰ Expires:</strong> %s<br>
+                <strong>📧 Sent to:</strong> %s
+            </p>
+        </div>
+        <p style="color: #666; font-size: 14px;">If you have any questions about this document, please contact the sender directly.</p>
+        <hr style="border: none; border-top: 1px solid #e0e0e0; margin: 20px 0;">
+        <p style="color: #999; font-size: 12px; margin-bottom: 0;">If the button doesn't work, copy and paste this link into your browser:</p>
+        <p style="color: #667eea; font-size: 12px; word-break: break-all;">%s</p>
+        <p style="color: #999; font-size: 11px; margin-top: 20px;">This is an automated message from Accountant CRM. Please do not reply to this email.</p>
+    </div>
+</body>
+</html>
+`, signerName, templateDisplay, clientName, signingURL, expiryText, to, signingURL)
+
+	return c.Send(to, subject, html)
+}

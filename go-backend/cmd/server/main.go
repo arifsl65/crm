@@ -72,6 +72,9 @@ type Handlers struct {
 	Settings     *handlers.SettingsHandler
 	ESign        *handlers.ESignHandler
 	Portal       *handlers.PortalHandler
+	Reminder     *handlers.ReminderHandler
+	Subscription *handlers.SubscriptionHandler
+	PushToken    *handlers.PushTokenHandler
 }
 
 func main() {
@@ -232,6 +235,9 @@ func main() {
 			Settings:     handlers.NewSettingsHandler(db, auditLogger),
 			ESign:        handlers.NewESignHandler(db, auditLogger, emailClient, cfg.FrontendURL),
 			Portal:       handlers.NewPortalHandler(db),
+			Reminder:     handlers.NewReminderHandler(db, auditLogger),
+			Subscription: handlers.NewSubscriptionHandler(db),
+			PushToken:    handlers.NewPushTokenHandler(db),
 		},
 	}
 
@@ -328,6 +334,10 @@ func setupRouter(app *Application) *gin.Engine {
 
 	// Security headers (exact values from API_ENDPOINTS.md)
 	router.Use(middleware.SecurityHeaders())
+
+	// SECURITY: Limit request body size to prevent DoS attacks (1MB for JSON)
+	// File upload endpoints handle their own limits via http.MaxBytesReader
+	router.Use(middleware.BodySizeLimit(middleware.MaxJSONBodySize))
 
 	// Rate limiting (applied to all routes except health checks)
 	if cfg.RateLimit.Enabled {
@@ -676,6 +686,37 @@ func setupRouter(app *Application) *gin.Engine {
 			esign.GET("/:id", middleware.ValidateUUID("id"), h.ESign.Get)
 			esign.POST("/:id/send", middleware.ValidateUUID("id"), h.ESign.Send)
 			esign.DELETE("/:id", middleware.ValidateUUID("id"), h.ESign.Delete)
+		}
+
+		// Reminder routes
+		reminders := protected.Group("/reminders")
+		{
+			reminders.GET("", h.Reminder.List)
+			reminders.GET("/upcoming", h.Reminder.GetUpcoming)
+			reminders.POST("", h.Reminder.Create)
+			reminders.GET("/:id", middleware.ValidateUUID("id"), h.Reminder.Get)
+			reminders.POST("/:id/complete", middleware.ValidateUUID("id"), h.Reminder.Complete)
+			reminders.POST("/:id/dismiss", middleware.ValidateUUID("id"), h.Reminder.Dismiss)
+			reminders.DELETE("/:id", middleware.ValidateUUID("id"), h.Reminder.Delete)
+		}
+
+		// Subscription routes (admin only)
+		subscription := protected.Group("/subscription")
+		{
+			subscription.GET("", h.Subscription.Get)
+			subscription.GET("/invoices", h.Subscription.ListInvoices)
+			subscription.GET("/usage", h.Subscription.GetUsage)
+			subscription.POST("/portal", middleware.RequireRole("super_admin", "tenant_admin"), h.Subscription.CreatePortalSession)
+			subscription.POST("/checkout", middleware.RequireRole("super_admin", "tenant_admin"), h.Subscription.CreateCheckoutSession)
+		}
+
+		// Push Token routes
+		pushTokens := protected.Group("/push-tokens")
+		{
+			pushTokens.GET("", h.PushToken.List)
+			pushTokens.POST("", h.PushToken.Register)
+			pushTokens.POST("/unregister", h.PushToken.UnregisterByToken)
+			pushTokens.DELETE("/:id", middleware.ValidateUUID("id"), h.PushToken.Unregister)
 		}
 
 		// Client Portal routes (client role only)

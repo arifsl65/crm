@@ -3,6 +3,7 @@ package handlers
 import (
 	"encoding/json"
 	"fmt"
+	"html"
 	"net/http"
 	"strconv"
 	"strings"
@@ -354,16 +355,19 @@ func (h *ChaseLogHandler) Create(c *gin.Context) {
 			}
 
 			// Default placeholders
+			// SECURITY: Escape client_name for HTML context to prevent XSS
 			subject = strings.ReplaceAll(subject, "{{client_name}}", client.CompanyName)
-			bodyHTML = strings.ReplaceAll(bodyHTML, "{{client_name}}", client.CompanyName)
+			bodyHTML = strings.ReplaceAll(bodyHTML, "{{client_name}}", html.EscapeString(client.CompanyName))
 			bodyText = strings.ReplaceAll(bodyText, "{{client_name}}", client.CompanyName)
 
 			// Custom placeholders
 			for key, value := range req.Placeholders {
 				placeholder := fmt.Sprintf("{{%s}}", key)
+				// Subject and bodyText are plain text - no escaping needed
 				subject = strings.ReplaceAll(subject, placeholder, value)
-				bodyHTML = strings.ReplaceAll(bodyHTML, placeholder, value)
 				bodyText = strings.ReplaceAll(bodyText, placeholder, value)
+				// SECURITY: Escape HTML in bodyHTML to prevent XSS
+				bodyHTML = strings.ReplaceAll(bodyHTML, placeholder, html.EscapeString(value))
 			}
 
 			// Insert email record with status 'queued'

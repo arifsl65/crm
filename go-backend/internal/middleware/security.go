@@ -1,6 +1,9 @@
 package middleware
 
 import (
+	"net/http"
+	"strings"
+
 	"github.com/gin-gonic/gin"
 )
 
@@ -46,4 +49,41 @@ type SecurityHeadersConfig struct {
 // Config fields are kept for API compatibility but ignored; headers always match the spec.
 func SecurityHeadersWithConfig(cfg SecurityHeadersConfig) gin.HandlerFunc {
 	return SecurityHeaders()
+}
+
+// MaxBodySize is the default maximum request body size for JSON endpoints (1MB).
+// File upload endpoints have their own limits set via http.MaxBytesReader.
+const MaxJSONBodySize int64 = 1 * 1024 * 1024 // 1MB
+
+// BodySizeLimit middleware limits the request body size to prevent DoS attacks.
+// It applies to all requests except file upload endpoints which handle their own limits.
+func BodySizeLimit(maxSize int64) gin.HandlerFunc {
+	return func(c *gin.Context) {
+		// Skip for file upload endpoints - they use http.MaxBytesReader internally
+		path := c.Request.URL.Path
+		if strings.Contains(path, "/upload") || strings.Contains(path, "/qr/") {
+			c.Next()
+			return
+		}
+
+		// Skip if no body (GET, HEAD, DELETE without body, etc.)
+		if c.Request.ContentLength == 0 {
+			c.Next()
+			return
+		}
+
+		// Check Content-Length header if present
+		if c.Request.ContentLength > maxSize {
+			c.AbortWithStatusJSON(http.StatusRequestEntityTooLarge, gin.H{
+				"error":   "request_too_large",
+				"message": "Request body exceeds maximum allowed size",
+			})
+			return
+		}
+
+		// Wrap body with size limiter for chunked transfers or missing Content-Length
+		c.Request.Body = http.MaxBytesReader(c.Writer, c.Request.Body, maxSize)
+
+		c.Next()
+	}
 }

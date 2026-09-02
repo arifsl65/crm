@@ -3,6 +3,7 @@ package handlers
 import (
 	"encoding/json"
 	"fmt"
+	"html"
 	"net/http"
 	"strconv"
 	"strings"
@@ -594,9 +595,12 @@ func (h *EmailHandler) SendFromTemplate(c *gin.Context) {
 
 	for key, value := range req.Placeholders {
 		placeholder := fmt.Sprintf("{{%s}}", key)
+		// Subject and bodyText are plain text - no escaping needed
 		subject = strings.ReplaceAll(subject, placeholder, value)
-		bodyHTML = strings.ReplaceAll(bodyHTML, placeholder, value)
 		bodyText = strings.ReplaceAll(bodyText, placeholder, value)
+		// SECURITY: Escape HTML in bodyHTML to prevent XSS
+		// User-provided values could contain <script> tags or other malicious HTML
+		bodyHTML = strings.ReplaceAll(bodyHTML, placeholder, html.EscapeString(value))
 	}
 
 	// Check if email client is configured

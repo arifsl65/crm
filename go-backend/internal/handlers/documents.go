@@ -1575,15 +1575,17 @@ func (h *DocumentHandler) Upload(c *gin.Context) {
 	}
 	defer file.Close()
 
-	// Read file content for validation
-	fileContent, err := io.ReadAll(file)
-	if err != nil {
+	// Read only first 512 bytes for MIME detection (avoids buffering 50MB in memory)
+	magicBytes := make([]byte, 512)
+	n, err := io.ReadFull(file, magicBytes)
+	if err != nil && err != io.ErrUnexpectedEOF && err != io.EOF {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed_to_read_file"})
 		return
 	}
+	magicBytes = magicBytes[:n] // Trim to actual bytes read
 
 	// Detect MIME type from content
-	detectedMime := http.DetectContentType(fileContent)
+	detectedMime := http.DetectContentType(magicBytes)
 
 	// Get claimed MIME type from header
 	claimedMime := header.Header.Get("Content-Type")
@@ -1601,7 +1603,7 @@ func (h *DocumentHandler) Upload(c *gin.Context) {
 	}
 
 	// Validate magic bytes match claimed type
-	if !validateMagicBytes(fileContent, detectedMime) {
+	if !validateMagicBytes(magicBytes, detectedMime) {
 		log.Warn().
 			Str("document_id", documentID.String()).
 			Str("claimed_mime", claimedMime).
@@ -1611,6 +1613,13 @@ func (h *DocumentHandler) Upload(c *gin.Context) {
 			"error":   "invalid_file_content",
 			"message": "File content does not match its declared type",
 		})
+		return
+	}
+
+	// Seek back to beginning for streaming upload
+	if _, err := file.Seek(0, io.SeekStart); err != nil {
+		log.Error().Err(err).Msg("Failed to seek file for upload")
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "internal_error"})
 		return
 	}
 
@@ -1660,16 +1669,16 @@ func (h *DocumentHandler) Upload(c *gin.Context) {
 		ext,
 	)
 
-	fileSize := len(fileContent)
+	fileSize := header.Size
 
-	// Upload to OSS if configured
+	// Upload to OSS if configured (streaming - does not buffer entire file in memory)
 	if h.oss != nil && h.oss.IsConfigured() {
-		if err := h.oss.Upload(ctx, filePath, fileContent, detectedMime); err != nil {
+		if err := h.oss.UploadStream(ctx, filePath, file, fileSize, detectedMime); err != nil {
 			log.Error().Err(err).Str("document_id", documentID.String()).Msg("Failed to upload file to OSS")
 			c.JSON(http.StatusInternalServerError, gin.H{"error": "storage_error", "message": "Failed to upload file to storage"})
 			return
 		}
-		log.Info().Str("document_id", documentID.String()).Str("path", filePath).Int("size", fileSize).Msg("File uploaded to OSS")
+		log.Info().Str("document_id", documentID.String()).Str("path", filePath).Int64("size", fileSize).Msg("File uploaded to OSS")
 	} else {
 		log.Warn().Str("document_id", documentID.String()).Msg("OSS not configured - file metadata stored but content not persisted")
 	}
@@ -1847,14 +1856,16 @@ func (h *DocumentHandler) UploadViaQR(c *gin.Context) {
 	}
 	defer file.Close()
 
-	// Read and validate file content
-	fileContent, err := io.ReadAll(file)
-	if err != nil {
+	// Read only first 512 bytes for MIME detection (avoids buffering large files in memory)
+	magicBytes := make([]byte, 512)
+	n, err := io.ReadFull(file, magicBytes)
+	if err != nil && err != io.ErrUnexpectedEOF && err != io.EOF {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed_to_read_file"})
 		return
 	}
+	magicBytes = magicBytes[:n]
 
-	detectedMime := http.DetectContentType(fileContent)
+	detectedMime := http.DetectContentType(magicBytes)
 
 	if !allowedMimeTypes[detectedMime] {
 		c.JSON(http.StatusBadRequest, gin.H{
@@ -1864,11 +1875,18 @@ func (h *DocumentHandler) UploadViaQR(c *gin.Context) {
 		return
 	}
 
-	if !validateMagicBytes(fileContent, detectedMime) {
+	if !validateMagicBytes(magicBytes, detectedMime) {
 		c.JSON(http.StatusBadRequest, gin.H{
 			"error":   "invalid_file_content",
 			"message": "File content does not match its declared type",
 		})
+		return
+	}
+
+	// Seek back to beginning for streaming upload
+	if _, err := file.Seek(0, io.SeekStart); err != nil {
+		log.Error().Err(err).Msg("Failed to seek file for upload")
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "internal_error"})
 		return
 	}
 
@@ -1891,17 +1909,17 @@ func (h *DocumentHandler) UploadViaQR(c *gin.Context) {
 		ext,
 	)
 
-	fileSize := len(fileContent)
+	fileSize := header.Size
 	originalName := header.Filename
 
-	// Upload to OSS if configured
+	// Upload to OSS if configured (streaming - does not buffer entire file in memory)
 	if h.oss != nil && h.oss.IsConfigured() {
-		if err := h.oss.Upload(ctx, filePath, fileContent, detectedMime); err != nil {
+		if err := h.oss.UploadStream(ctx, filePath, file, fileSize, detectedMime); err != nil {
 			log.Error().Err(err).Str("document_id", documentID.String()).Msg("Failed to upload QR file to OSS")
 			c.JSON(http.StatusInternalServerError, gin.H{"error": "storage_error", "message": "Failed to upload file to storage"})
 			return
 		}
-		log.Info().Str("document_id", documentID.String()).Str("path", filePath).Int("size", fileSize).Msg("QR file uploaded to OSS")
+		log.Info().Str("document_id", documentID.String()).Str("path", filePath).Int64("size", fileSize).Msg("QR file uploaded to OSS")
 	} else {
 		log.Warn().Str("document_id", documentID.String()).Msg("OSS not configured - QR file metadata stored but content not persisted")
 	}

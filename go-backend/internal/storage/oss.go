@@ -60,7 +60,7 @@ func NewOSSClient(cfg config.OSSConfig) (*OSSClient, error) {
 	}, nil
 }
 
-// Upload uploads a file to OSS.
+// Upload uploads a file to OSS from a byte slice.
 // Returns the object key (path) in OSS.
 func (c *OSSClient) Upload(ctx context.Context, key string, data []byte, contentType string) error {
 	if c == nil {
@@ -91,6 +91,40 @@ func (c *OSSClient) Upload(ctx context.Context, key string, data []byte, content
 		Str("content_type", contentType).
 		Dur("duration", time.Since(start)).
 		Msg("Uploaded to OSS")
+
+	return nil
+}
+
+// UploadStream uploads a file to OSS from a reader without buffering in memory.
+// This is preferred for large files to avoid memory exhaustion.
+func (c *OSSClient) UploadStream(ctx context.Context, key string, reader io.Reader, size int64, contentType string) error {
+	if c == nil {
+		return fmt.Errorf("OSS client not initialized")
+	}
+
+	options := []oss.Option{
+		oss.ContentType(contentType),
+		oss.ObjectACL(oss.ACLPrivate),
+		oss.ContentLength(size),
+	}
+
+	start := time.Now()
+	err := c.bucket.PutObject(key, reader, options...)
+	if err != nil {
+		log.Error().
+			Err(err).
+			Str("key", key).
+			Int64("size", size).
+			Msg("Failed to stream upload to OSS")
+		return fmt.Errorf("OSS upload failed: %w", err)
+	}
+
+	log.Info().
+		Str("key", key).
+		Int64("size", size).
+		Str("content_type", contentType).
+		Dur("duration", time.Since(start)).
+		Msg("Streamed upload to OSS")
 
 	return nil
 }

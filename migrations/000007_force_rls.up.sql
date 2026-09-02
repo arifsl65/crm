@@ -101,11 +101,24 @@ ALTER TABLE outbox FORCE ROW LEVEL SECURITY;
 -- which bypasses ALL RLS policies regardless of FORCE settings.
 -- Solution: Create a separate application role without BYPASSRLS for the Go backend.
 
+-- =============================================================================
+-- SECURITY NOTE: Password is set via environment variable, NOT hardcoded here.
+-- After running this migration, you MUST set the password manually:
+--
+--   ALTER ROLE app_user WITH PASSWORD 'your-secure-password-here';
+--
+-- Or use the password rotation migration (000009_rotate_app_user_password.up.sql)
+-- which reads from POSTGRES_APP_USER_PASSWORD environment variable.
+-- =============================================================================
+
 DO $$
 BEGIN
-    -- Create app_user role if it doesn't exist
+    -- Create app_user role if it doesn't exist (password set separately for security)
     IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'app_user') THEN
-        CREATE ROLE app_user WITH LOGIN PASSWORD '***REDACTED***' NOBYPASSRLS;
+        -- Create role with a random temporary password that MUST be changed
+        -- The actual password should be set via ALTER ROLE after migration
+        CREATE ROLE app_user WITH LOGIN PASSWORD 'CHANGE_ME_IMMEDIATELY' NOBYPASSRLS;
+        RAISE NOTICE 'SECURITY: app_user created with temporary password. Run ALTER ROLE app_user WITH PASSWORD ''your-secure-password'' immediately!';
     END IF;
 END $$;
 

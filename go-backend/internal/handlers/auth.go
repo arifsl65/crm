@@ -270,6 +270,20 @@ func (h *AuthHandler) Login(c *gin.Context) {
 }
 
 func (h *AuthHandler) Register(c *gin.Context) {
+	ctx := c.Request.Context()
+
+	// SECURITY: Rate limit registration by IP to prevent mass account creation
+	if h.rateLimiter != nil {
+		allowed, count, ttl, err := h.rateLimiter.CheckRegisterRate(ctx, c.ClientIP())
+		if err != nil {
+			log.Error().Err(err).Msg("Rate limit check failed for registration")
+			// Continue on error to avoid blocking legitimate users
+		} else if !allowed {
+			middleware.RateLimitExceededWithLog(c, "register", c.ClientIP(), count, ttl)
+			return
+		}
+	}
+
 	var req RegisterRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{
@@ -280,7 +294,6 @@ func (h *AuthHandler) Register(c *gin.Context) {
 	}
 
 	tenantID, _ := uuid.Parse(req.TenantID)
-	ctx := c.Request.Context()
 
 	exists, err := h.emailExists(ctx, req.Email)
 	if err != nil {
@@ -1263,20 +1276,15 @@ func (h *AuthHandler) VerifyMagicLink(c *gin.Context) {
 	ctx := c.Request.Context()
 	tokenHash := hashTokenString(token)
 
-	// Validate magic link token
-	userID, tenantID, err := h.validateMagicLinkToken(ctx, tokenHash)
+	// SECURITY: Atomically validate AND consume magic link token in one operation
+	// This prevents TOCTOU race conditions
+	userID, tenantID, err := h.validateAndConsumeMagicLinkToken(ctx, tokenHash)
 	if err != nil {
 		c.JSON(http.StatusUnauthorized, gin.H{
 			"error":   "invalid_token",
 			"message": "Invalid or expired magic link",
 		})
 		return
-	}
-
-	// Mark token as used
-	err = h.markMagicLinkTokenUsed(ctx, tokenHash)
-	if err != nil {
-		log.Error().Err(err).Msg("Failed to mark magic link token as used")
 	}
 
 	// Get user info for response
@@ -1352,33 +1360,38 @@ func (h *AuthHandler) storeMagicLinkToken(ctx context.Context, tenantID, userID 
 	})
 }
 
-func (h *AuthHandler) validateMagicLinkToken(ctx context.Context, tokenHash string) (uuid.UUID, uuid.UUID, error) {
-	query := `
-		SELECT user_id, tenant_id FROM magic_link_tokens
+// validateAndConsumeMagicLinkToken atomically validates a magic link token AND marks it as used.
+// This prevents TOCTOU race conditions where two concurrent requests could both validate
+// the same token before either marks it as used.
+func (h *AuthHandler) validateAndConsumeMagicLinkToken(ctx context.Context, tokenHash string) (uuid.UUID, uuid.UUID, error) {
+	// SECURITY: Atomic UPDATE ... RETURNING to validate AND mark as used in one operation
+	atomicQuery := `
+		UPDATE magic_link_tokens
+		SET used_at = NOW()
 		WHERE token_hash = $1
-		AND expires_at > NOW()
-		AND used_at IS NULL
+		  AND expires_at > NOW()
+		  AND used_at IS NULL
+		RETURNING user_id, tenant_id
 	`
 	var userID, tenantID uuid.UUID
-	var qErr error
+	var atomicErr error
 	if err := h.db.SuperAdminTransaction(ctx, func(tx pgx.Tx) error {
-		qErr = tx.QueryRow(ctx, query, tokenHash).Scan(&userID, &tenantID)
+		atomicErr = tx.QueryRow(ctx, atomicQuery, tokenHash).Scan(&userID, &tenantID)
 		return nil
 	}); err != nil {
 		return uuid.Nil, uuid.Nil, err
 	}
-	if qErr != nil {
+
+	if atomicErr == nil {
+		return userID, tenantID, nil
+	}
+
+	if atomicErr == pgx.ErrNoRows {
+		// Token doesn't exist, is expired, or was already used
 		return uuid.Nil, uuid.Nil, errors.New("invalid or expired token")
 	}
-	return userID, tenantID, nil
-}
 
-func (h *AuthHandler) markMagicLinkTokenUsed(ctx context.Context, tokenHash string) error {
-	query := `UPDATE magic_link_tokens SET used_at = NOW() WHERE token_hash = $1`
-	return h.db.SuperAdminTransaction(ctx, func(tx pgx.Tx) error {
-		_, err := tx.Exec(ctx, query, tokenHash)
-		return err
-	})
+	return uuid.Nil, uuid.Nil, atomicErr
 }
 
 // ============================================================================

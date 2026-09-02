@@ -1,6 +1,7 @@
 package handlers
 
 import (
+	"fmt"
 	"net/http"
 	"strconv"
 	"strings"
@@ -15,6 +16,7 @@ import (
 	"github.com/accountant-crm/go-backend/internal/crypto"
 	"github.com/accountant-crm/go-backend/internal/database"
 	"github.com/accountant-crm/go-backend/internal/middleware"
+	"github.com/accountant-crm/go-backend/internal/oauth"
 )
 
 // EmailAccountHandler handles email account operations.
@@ -22,14 +24,16 @@ type EmailAccountHandler struct {
 	db        *database.Pool
 	audit     *audit.Logger
 	encryptor *crypto.Encryptor
+	oauth     *oauth.Service
 }
 
 // NewEmailAccountHandler creates a new email account handler.
-func NewEmailAccountHandler(db *database.Pool, auditLogger *audit.Logger, encryptor *crypto.Encryptor) *EmailAccountHandler {
+func NewEmailAccountHandler(db *database.Pool, auditLogger *audit.Logger, encryptor *crypto.Encryptor, oauthService *oauth.Service) *EmailAccountHandler {
 	return &EmailAccountHandler{
 		db:        db,
 		audit:     auditLogger,
 		encryptor: encryptor,
+		oauth:     oauthService,
 	}
 }
 
@@ -547,8 +551,45 @@ func (h *EmailAccountHandler) Sync(c *gin.Context) {
 		return
 	}
 
-	// TODO: Implement actual IMAP/OAuth sync logic
-	// For now, update last_sync_at timestamp
+	// Check if OAuth tokens need refresh before sync
+	if account.AuthMethod == "oauth" && h.oauth != nil {
+		// Get OAuth tokens to check expiry
+		var oauthExpiresAt *time.Time
+		var oauthRefreshToken *string
+		err = tenantDB.QueryRowScan(c, []interface{}{&oauthExpiresAt, &oauthRefreshToken},
+			`SELECT oauth_expires_at, oauth_refresh_token FROM email_accounts WHERE id = $1 AND tenant_id = $2`,
+			accountID, tenantID)
+		if err != nil {
+			log.Error().Err(err).Msg("Failed to get OAuth tokens for sync")
+		} else if oauthExpiresAt != nil && time.Now().After(*oauthExpiresAt) && oauthRefreshToken != nil {
+			// Token expired, attempt refresh
+			var provider oauth.Provider
+			switch account.Provider {
+			case "google":
+				provider = oauth.ProviderGoogle
+			case "microsoft":
+				provider = oauth.ProviderMicrosoft
+			}
+
+			if provider != "" {
+				_, refreshToken, decErr := h.oauth.DecryptTokens("", *oauthRefreshToken)
+				if decErr == nil {
+					newTokens, refErr := h.oauth.RefreshToken(ctx, provider, refreshToken)
+					if refErr == nil {
+						accessEnc, refreshEnc, encErr := h.oauth.EncryptTokens(newTokens)
+						if encErr == nil {
+							tenantDB.Exec(c, `UPDATE email_accounts SET oauth_access_token = $1, oauth_refresh_token = $2, oauth_expires_at = $3 WHERE id = $4`,
+								accessEnc, refreshEnc, newTokens.ExpiresAt, accountID)
+							log.Info().Str("email", account.Email).Msg("OAuth token refreshed during sync")
+						}
+					}
+				}
+			}
+		}
+	}
+
+	// Update last_sync_at timestamp
+	// Note: Actual IMAP/OAuth email fetching would be implemented here
 	_, err = tenantDB.Exec(c, `UPDATE email_accounts SET last_sync_at = NOW(), status = 'active' WHERE id = $1 AND tenant_id = $2`,
 		accountID, tenantID)
 
@@ -573,6 +614,7 @@ func (h *EmailAccountHandler) Sync(c *gin.Context) {
 // TestConnection tests the connection for an email account.
 // POST /api/v1/email-accounts/:id/test
 func (h *EmailAccountHandler) TestConnection(c *gin.Context) {
+	ctx := c.Request.Context()
 	tenantID, _ := middleware.GetTenantID(c)
 	id := c.Param("id")
 
@@ -589,18 +631,25 @@ func (h *EmailAccountHandler) TestConnection(c *gin.Context) {
 		return
 	}
 
-	// Get account details
+	// Get account details including OAuth tokens
 	var account struct {
-		Email      string
-		AuthMethod string
-		Provider   string
-		IMAPHost   *string
-		IMAPPort   *int
+		Email             string
+		AuthMethod        string
+		Provider          string
+		IMAPHost          *string
+		IMAPPort          *int
+		OAuthAccessToken  *string
+		OAuthRefreshToken *string
+		OAuthExpiresAt    *time.Time
 	}
 
 	err = tenantDB.QueryRowScan(c, []interface{}{
-		&account.Email, &account.AuthMethod, &account.Provider, &account.IMAPHost, &account.IMAPPort,
-	}, `SELECT email, auth_method, provider, imap_host, imap_port FROM email_accounts WHERE id = $1 AND tenant_id = $2`,
+		&account.Email, &account.AuthMethod, &account.Provider,
+		&account.IMAPHost, &account.IMAPPort,
+		&account.OAuthAccessToken, &account.OAuthRefreshToken, &account.OAuthExpiresAt,
+	}, `SELECT email, auth_method, provider, imap_host, imap_port,
+	           oauth_access_token, oauth_refresh_token, oauth_expires_at
+	    FROM email_accounts WHERE id = $1 AND tenant_id = $2`,
 		accountID, tenantID)
 
 	if err == pgx.ErrNoRows {
@@ -613,48 +662,235 @@ func (h *EmailAccountHandler) TestConnection(c *gin.Context) {
 		return
 	}
 
-	// TODO: Implement actual connection test (IMAP dial, OAuth token refresh)
-	// For now, return a mock success
+	// Test based on auth method
+	if account.AuthMethod == "oauth" {
+		// Test OAuth connection by checking token validity
+		if h.oauth == nil {
+			c.JSON(http.StatusServiceUnavailable, gin.H{
+				"success": false,
+				"error":   "OAuth service not configured",
+			})
+			return
+		}
+
+		if account.OAuthAccessToken == nil || *account.OAuthAccessToken == "" {
+			c.JSON(http.StatusOK, gin.H{
+				"success": false,
+				"error":   "No OAuth tokens stored. Please reconnect the account.",
+				"email":   account.Email,
+			})
+			return
+		}
+
+		// Check if token is expired
+		tokenExpired := account.OAuthExpiresAt != nil && time.Now().After(*account.OAuthExpiresAt)
+
+		if tokenExpired && account.OAuthRefreshToken != nil && *account.OAuthRefreshToken != "" {
+			// Attempt to refresh the token
+			var provider oauth.Provider
+			switch account.Provider {
+			case "google":
+				provider = oauth.ProviderGoogle
+			case "microsoft":
+				provider = oauth.ProviderMicrosoft
+			default:
+				c.JSON(http.StatusOK, gin.H{
+					"success": false,
+					"error":   "Unknown OAuth provider",
+					"email":   account.Email,
+				})
+				return
+			}
+
+			// Decrypt refresh token
+			_, refreshToken, err := h.oauth.DecryptTokens("", *account.OAuthRefreshToken)
+			if err != nil {
+				log.Error().Err(err).Msg("Failed to decrypt refresh token")
+				c.JSON(http.StatusOK, gin.H{
+					"success": false,
+					"error":   "Failed to decrypt credentials. Please reconnect the account.",
+					"email":   account.Email,
+				})
+				return
+			}
+
+			// Refresh the token
+			newTokens, err := h.oauth.RefreshToken(ctx, provider, refreshToken)
+			if err != nil {
+				log.Error().Err(err).Str("provider", account.Provider).Msg("Failed to refresh OAuth token")
+				c.JSON(http.StatusOK, gin.H{
+					"success":      false,
+					"error":        "Token refresh failed. Please reconnect the account.",
+					"email":        account.Email,
+					"needs_reauth": true,
+				})
+				return
+			}
+
+			// Encrypt and store new tokens
+			accessEncrypted, refreshEncrypted, err := h.oauth.EncryptTokens(newTokens)
+			if err != nil {
+				log.Error().Err(err).Msg("Failed to encrypt new tokens")
+				c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to secure credentials"})
+				return
+			}
+
+			// Update tokens in database
+			_, err = tenantDB.Exec(c, `
+				UPDATE email_accounts
+				SET oauth_access_token = $1,
+				    oauth_refresh_token = $2,
+				    oauth_expires_at = $3,
+				    status = 'active',
+				    error_message = NULL,
+				    updated_at = NOW()
+				WHERE id = $4 AND tenant_id = $5`,
+				accessEncrypted, refreshEncrypted, newTokens.ExpiresAt, accountID, tenantID)
+
+			if err != nil {
+				log.Error().Err(err).Msg("Failed to update refreshed tokens")
+			}
+
+			c.JSON(http.StatusOK, gin.H{
+				"success":        true,
+				"message":        "Connection test successful (token refreshed)",
+				"email":          account.Email,
+				"provider":       account.Provider,
+				"token_refreshed": true,
+			})
+			return
+		}
+
+		// Token is valid
+		c.JSON(http.StatusOK, gin.H{
+			"success":    true,
+			"message":    "Connection test successful",
+			"email":      account.Email,
+			"provider":   account.Provider,
+			"expires_at": account.OAuthExpiresAt,
+		})
+		return
+	}
+
+	// IMAP connection test
+	if account.AuthMethod == "imap" {
+		if account.IMAPHost == nil || *account.IMAPHost == "" {
+			c.JSON(http.StatusOK, gin.H{
+				"success": false,
+				"error":   "IMAP host not configured",
+				"email":   account.Email,
+			})
+			return
+		}
+
+		// For IMAP, we would dial the server here
+		// For now, return success if configuration exists
+		c.JSON(http.StatusOK, gin.H{
+			"success":   true,
+			"message":   "IMAP configuration valid (connection test not implemented)",
+			"email":     account.Email,
+			"provider":  account.Provider,
+			"imap_host": account.IMAPHost,
+			"imap_port": account.IMAPPort,
+		})
+		return
+	}
+
 	c.JSON(http.StatusOK, gin.H{
-		"success":  true,
-		"message":  "Connection test successful",
-		"email":    account.Email,
-		"provider": account.Provider,
+		"success": false,
+		"error":   "Unknown auth method",
+		"email":   account.Email,
 	})
 }
 
 // OAuthInitiate returns the OAuth authorization URL for a provider.
 // GET /api/v1/email-accounts/oauth/:provider
 func (h *EmailAccountHandler) OAuthInitiate(c *gin.Context) {
-	provider := c.Param("provider")
+	ctx := c.Request.Context()
+	tenantID, _ := middleware.GetTenantID(c)
+	userID, _ := middleware.GetUserID(c)
+	providerStr := c.Param("provider")
 
 	// Validate provider
-	validProviders := map[string]bool{
-		"google":    true,
-		"microsoft": true,
-		"zoho":      true,
-	}
-
-	if !validProviders[provider] {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid OAuth provider"})
+	var provider oauth.Provider
+	switch providerStr {
+	case "google":
+		provider = oauth.ProviderGoogle
+	case "microsoft":
+		provider = oauth.ProviderMicrosoft
+	default:
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid OAuth provider. Supported: google, microsoft"})
 		return
 	}
 
-	// TODO: Implement actual OAuth flow
-	// Generate state, store in Redis, return authorization URL
+	// Check if OAuth service is available
+	if h.oauth == nil {
+		log.Error().Msg("OAuth service not configured")
+		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "OAuth service not configured"})
+		return
+	}
+
+	// Check if provider is enabled
+	if !h.oauth.IsProviderEnabled(provider) {
+		c.JSON(http.StatusBadRequest, gin.H{
+			"error":   "oauth_provider_not_enabled",
+			"message": fmt.Sprintf("%s OAuth is not enabled. Please configure the OAuth credentials.", providerStr),
+		})
+		return
+	}
+
+	// Generate state token with CSRF protection
+	state, err := h.oauth.GenerateState(ctx, tenantID.String(), userID.String(), provider)
+	if err != nil {
+		log.Error().Err(err).Msg("Failed to generate OAuth state")
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to initiate OAuth flow"})
+		return
+	}
+
+	// Get authorization URL
+	authURL, err := h.oauth.GetAuthURL(provider, state)
+	if err != nil {
+		log.Error().Err(err).Str("provider", providerStr).Msg("Failed to get OAuth auth URL")
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to generate authorization URL"})
+		return
+	}
+
+	log.Info().
+		Str("provider", providerStr).
+		Str("tenant_id", tenantID.String()).
+		Msg("OAuth flow initiated")
+
 	c.JSON(http.StatusOK, gin.H{
-		"provider": provider,
-		"message":  "OAuth integration not yet implemented",
-		"auth_url": "", // Would be the OAuth authorization URL
+		"provider": providerStr,
+		"auth_url": authURL,
+		"message":  "Redirect user to auth_url to authorize",
 	})
 }
 
 // OAuthCallback handles the OAuth callback from a provider.
 // GET /api/v1/email-accounts/oauth/:provider/callback
 func (h *EmailAccountHandler) OAuthCallback(c *gin.Context) {
-	provider := c.Param("provider")
+	ctx := c.Request.Context()
+	providerStr := c.Param("provider")
 	code := c.Query("code")
 	state := c.Query("state")
+	errorParam := c.Query("error")
+
+	// Handle OAuth error response
+	if errorParam != "" {
+		errorDesc := c.Query("error_description")
+		log.Warn().
+			Str("provider", providerStr).
+			Str("error", errorParam).
+			Str("description", errorDesc).
+			Msg("OAuth authorization denied")
+		c.JSON(http.StatusBadRequest, gin.H{
+			"error":       "oauth_denied",
+			"message":     "Authorization was denied",
+			"description": errorDesc,
+		})
+		return
+	}
 
 	if code == "" {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "Missing authorization code"})
@@ -665,15 +901,203 @@ func (h *EmailAccountHandler) OAuthCallback(c *gin.Context) {
 		return
 	}
 
-	// TODO: Implement actual OAuth callback handling
-	// - Validate state against Redis
-	// - Exchange code for tokens
-	// - Get user email from provider
-	// - Store email account with OAuth tokens
+	// Check if OAuth service is available
+	if h.oauth == nil {
+		log.Error().Msg("OAuth service not configured")
+		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "OAuth service not configured"})
+		return
+	}
 
-	c.JSON(http.StatusOK, gin.H{
-		"provider": provider,
-		"message":  "OAuth callback received but integration not yet implemented",
+	// Validate state (CSRF protection)
+	stateData, err := h.oauth.ValidateState(ctx, state)
+	if err != nil {
+		log.Warn().Err(err).Str("state", state[:min(8, len(state))]+"...").Msg("Invalid OAuth state")
+		c.JSON(http.StatusBadRequest, gin.H{
+			"error":   "invalid_state",
+			"message": "Invalid or expired state. Please try again.",
+		})
+		return
+	}
+
+	// Verify provider matches
+	if stateData.Provider != providerStr {
+		log.Warn().
+			Str("expected", stateData.Provider).
+			Str("received", providerStr).
+			Msg("OAuth provider mismatch")
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Provider mismatch"})
+		return
+	}
+
+	// Parse IDs from state
+	tenantID, err := uuid.Parse(stateData.TenantID)
+	if err != nil {
+		log.Error().Err(err).Str("tenant_id", stateData.TenantID).Msg("Invalid tenant ID in state")
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Invalid state data"})
+		return
+	}
+	userID, err := uuid.Parse(stateData.UserID)
+	if err != nil {
+		log.Error().Err(err).Str("user_id", stateData.UserID).Msg("Invalid user ID in state")
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Invalid state data"})
+		return
+	}
+
+	// Determine provider type
+	var provider oauth.Provider
+	switch providerStr {
+	case "google":
+		provider = oauth.ProviderGoogle
+	case "microsoft":
+		provider = oauth.ProviderMicrosoft
+	default:
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid OAuth provider"})
+		return
+	}
+
+	// Exchange code for tokens
+	tokens, err := h.oauth.ExchangeCode(ctx, provider, code)
+	if err != nil {
+		log.Error().Err(err).Str("provider", providerStr).Msg("Failed to exchange OAuth code")
+		c.JSON(http.StatusInternalServerError, gin.H{
+			"error":   "token_exchange_failed",
+			"message": "Failed to complete authorization. Please try again.",
+		})
+		return
+	}
+
+	// Get user info from provider
+	userInfo, err := h.oauth.GetUserInfo(ctx, provider, tokens.AccessToken)
+	if err != nil {
+		log.Error().Err(err).Str("provider", providerStr).Msg("Failed to get user info")
+		c.JSON(http.StatusInternalServerError, gin.H{
+			"error":   "user_info_failed",
+			"message": "Failed to retrieve email information from provider.",
+		})
+		return
+	}
+
+	// Encrypt tokens for storage
+	accessEncrypted, refreshEncrypted, err := h.oauth.EncryptTokens(tokens)
+	if err != nil {
+		log.Error().Err(err).Msg("Failed to encrypt OAuth tokens")
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to secure credentials"})
+		return
+	}
+
+	// Get tenant DB connection
+	tenantDB, ok := middleware.GetTenantDB(c)
+	if !ok {
+		log.Error().Msg("TenantDB not found in context for OAuth callback")
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "internal_error"})
+		return
+	}
+
+	// Check if email account already exists
+	var existingID uuid.UUID
+	err = tenantDB.QueryRowScan(c, []interface{}{&existingID},
+		`SELECT id FROM email_accounts WHERE email = $1 AND tenant_id = $2`,
+		userInfo.Email, tenantID)
+
+	if err == nil {
+		// Account exists - update tokens
+		_, err = tenantDB.Exec(c, `
+			UPDATE email_accounts
+			SET oauth_access_token = $1,
+			    oauth_refresh_token = $2,
+			    oauth_expires_at = $3,
+			    status = 'active',
+			    error_message = NULL,
+			    updated_at = NOW()
+			WHERE id = $4 AND tenant_id = $5`,
+			accessEncrypted, refreshEncrypted, tokens.ExpiresAt, existingID, tenantID)
+
+		if err != nil {
+			log.Error().Err(err).Msg("Failed to update OAuth tokens")
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to update email account"})
+			return
+		}
+
+		// Audit log
+		h.audit.LogEntity(ctx, audit.ActionEmailAccountSync, &userID, &tenantID, "email_account", &existingID, c.ClientIP(), map[string]interface{}{
+			"email":    userInfo.Email,
+			"provider": providerStr,
+			"action":   "oauth_reconnect",
+		})
+
+		log.Info().
+			Str("email", userInfo.Email).
+			Str("provider", providerStr).
+			Msg("OAuth tokens updated for existing email account")
+
+		c.JSON(http.StatusOK, gin.H{
+			"message":    "Email account reconnected successfully",
+			"email":      userInfo.Email,
+			"account_id": existingID,
+			"provider":   providerStr,
+			"is_new":     false,
+		})
+		return
+	}
+
+	if err != pgx.ErrNoRows {
+		log.Error().Err(err).Msg("Failed to check existing email account")
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Database error"})
+		return
+	}
+
+	// Create new email account
+	newID := uuid.New()
+	var account EmailAccount
+
+	err = tenantDB.Transaction(c, func(tx pgx.Tx) error {
+		query := `
+			INSERT INTO email_accounts (
+				id, tenant_id, user_id, email, type, auth_method, provider,
+				oauth_access_token, oauth_refresh_token, oauth_expires_at,
+				status, created_at, updated_at
+			) VALUES ($1, $2, $3, $4, 'personal', 'oauth', $5, $6, $7, $8, 'active', NOW(), NOW())
+			RETURNING id, tenant_id, user_id, email, type, auth_method, provider,
+			          imap_host, imap_port, status, last_sync_at, error_message,
+			          oauth_expires_at, created_at, updated_at
+		`
+		return tx.QueryRow(ctx, query,
+			newID, tenantID, userID, userInfo.Email, providerStr,
+			accessEncrypted, refreshEncrypted, tokens.ExpiresAt,
+		).Scan(
+			&account.ID, &account.TenantID, &account.UserID, &account.Email,
+			&account.Type, &account.AuthMethod, &account.Provider,
+			&account.IMAPHost, &account.IMAPPort, &account.Status,
+			&account.LastSyncAt, &account.ErrorMessage,
+			&account.OAuthExpiresAt, &account.CreatedAt, &account.UpdatedAt,
+		)
+	})
+
+	if err != nil {
+		log.Error().Err(err).Msg("Failed to create OAuth email account")
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to create email account"})
+		return
+	}
+
+	// Audit log
+	h.audit.LogEntity(ctx, audit.ActionEmailAccountCreate, &userID, &tenantID, "email_account", &account.ID, c.ClientIP(), map[string]interface{}{
+		"email":    userInfo.Email,
+		"provider": providerStr,
+		"action":   "oauth_connect",
+	})
+
+	log.Info().
+		Str("email", userInfo.Email).
+		Str("provider", providerStr).
+		Str("account_id", account.ID.String()).
+		Msg("OAuth email account created")
+
+	c.JSON(http.StatusCreated, gin.H{
+		"message":    "Email account connected successfully",
+		"email":      userInfo.Email,
+		"account_id": account.ID,
+		"provider":   providerStr,
+		"is_new":     true,
 	})
 }
 

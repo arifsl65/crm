@@ -152,34 +152,34 @@ func (h *SettingsHandler) Update(c *gin.Context) {
 	argIdx := 1
 
 	if req.FirmName != nil {
-		updates = append(updates, "firm_name = $"+string(rune('0'+argIdx)))
+		updates = append(updates, "firm_name = $"+strconv.Itoa(argIdx))
 		args = append(args, *req.FirmName)
 		argIdx++
 	}
 	if req.Email != nil {
-		updates = append(updates, "email = $"+string(rune('0'+argIdx)))
+		updates = append(updates, "email = $"+strconv.Itoa(argIdx))
 		args = append(args, *req.Email)
 		argIdx++
 	}
 	if req.Phone != nil {
-		updates = append(updates, "phone = $"+string(rune('0'+argIdx)))
+		updates = append(updates, "phone = $"+strconv.Itoa(argIdx))
 		args = append(args, *req.Phone)
 		argIdx++
 	}
 	if req.Address != nil {
-		updates = append(updates, "address = $"+string(rune('0'+argIdx)))
+		updates = append(updates, "address = $"+strconv.Itoa(argIdx))
 		args = append(args, *req.Address)
 		argIdx++
 	}
 	if req.LogoURL != nil {
-		updates = append(updates, "logo_url = $"+string(rune('0'+argIdx)))
+		updates = append(updates, "logo_url = $"+strconv.Itoa(argIdx))
 		args = append(args, *req.LogoURL)
 		argIdx++
 	}
 	if req.ReminderRules != nil {
 		rulesJSON, err := json.Marshal(req.ReminderRules)
 		if err == nil {
-			updates = append(updates, "reminder_rules = $"+string(rune('0'+argIdx)))
+			updates = append(updates, "reminder_rules = $"+strconv.Itoa(argIdx))
 			args = append(args, rulesJSON)
 			argIdx++
 		}
@@ -191,17 +191,17 @@ func (h *SettingsHandler) Update(c *gin.Context) {
 	}
 
 	// Add updated_by and updated_at
-	updates = append(updates, "updated_by = $"+string(rune('0'+argIdx)))
+	updates = append(updates, "updated_by = $"+strconv.Itoa(argIdx))
 	args = append(args, userID)
 	argIdx++
-	updates = append(updates, "updated_at = $"+string(rune('0'+argIdx)))
+	updates = append(updates, "updated_at = $"+strconv.Itoa(argIdx))
 	args = append(args, time.Now())
 	argIdx++
 
 	// Add tenant_id to WHERE clause
 	args = append(args, tenantID)
 
-	query := "UPDATE company_settings SET " + strings.Join(updates, ", ") + " WHERE tenant_id = $" + string(rune('0'+argIdx))
+	query := "UPDATE company_settings SET " + strings.Join(updates, ", ") + " WHERE tenant_id = $" + strconv.Itoa(argIdx)
 
 	result, err := tenantDB.Exec(c, query, args...)
 	if err != nil {

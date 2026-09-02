@@ -140,38 +140,6 @@ func (t *TenantDB) Query(c *gin.Context, sql string, args []interface{}, scanFn 
 	})
 }
 
-// QueryRow executes a query that returns a single row with RLS context set.
-// DEPRECATED: Use QueryRowScan instead for proper RLS handling.
-// Fix #11: WARNING - This method returns a Row AFTER the transaction commits,
-// which means the underlying connection may be returned to the pool and reused.
-// This can cause cross-tenant data leakage in high-concurrency scenarios.
-// This method is kept only for backwards compatibility and will be removed.
-func (t *TenantDB) QueryRow(c *gin.Context, sql string, args ...interface{}) pgx.Row {
-	ctx := c.Request.Context()
-
-	// Log deprecation warning to track usage and enforce migration
-	log.Warn().
-		Str("tenant_id", t.tenantID).
-		Str("method", "TenantDB.QueryRow").
-		Msg("DEPRECATED: QueryRow called - use QueryRowScan instead to prevent potential data leakage")
-
-	// For QueryRow, we need to return a Row interface.
-	// We'll use the pool directly but set RLS context in a transaction wrapper.
-	// This is a limitation - QueryRow doesn't fit well with transaction-based RLS.
-	// For safety, we'll use Transaction internally and return a custom Row.
-
-	var result rlsRow
-	err := t.pool.TenantTransaction(ctx, t.tenantID, t.role, func(tx pgx.Tx) error {
-		row := tx.QueryRow(ctx, sql, args...)
-		result.row = row
-		return nil
-	})
-	if err != nil {
-		result.err = err
-	}
-	return &result
-}
-
 // Exec executes a statement with RLS context set.
 func (t *TenantDB) Exec(c *gin.Context, sql string, args ...interface{}) (pgconn.CommandTag, error) {
 	ctx := c.Request.Context()
@@ -184,19 +152,6 @@ func (t *TenantDB) Exec(c *gin.Context, sql string, args ...interface{}) (pgconn
 	})
 
 	return tag, err
-}
-
-// rlsRow wraps a pgx.Row to handle RLS transaction errors
-type rlsRow struct {
-	row pgx.Row
-	err error
-}
-
-func (r *rlsRow) Scan(dest ...interface{}) error {
-	if r.err != nil {
-		return r.err
-	}
-	return r.row.Scan(dest...)
 }
 
 // GetTenantDB retrieves the TenantDB from the gin context.

@@ -6,7 +6,8 @@ Uses ECS RAM role for automatic credential management.
 """
 
 import os
-from functools import lru_cache
+import threading
+import time
 from typing import Optional
 
 import structlog
@@ -15,6 +16,11 @@ logger = structlog.get_logger(__name__)
 
 # Lazy import to avoid requiring SDK in development
 _kms_client = None
+
+# TTL cache for secrets (5 minutes default)
+_SECRET_CACHE_TTL_SECONDS = int(os.environ.get("KMS_CACHE_TTL_SECONDS", "300"))
+_secret_cache: dict[str, tuple[str, float]] = {}  # {secret_name: (value, expiry_time)}
+_cache_lock = threading.Lock()
 
 
 def is_kms_enabled() -> bool:
@@ -56,12 +62,12 @@ def _get_kms_client():
     return _kms_client
 
 
-@lru_cache(maxsize=32)
 def get_secret(secret_name: str) -> str:
     """
     Retrieve a secret value from KMS Secrets Manager.
 
-    Results are cached to avoid repeated API calls.
+    Results are cached with TTL (default 5 minutes) to avoid repeated API calls
+    while ensuring rotated secrets are picked up in a reasonable time.
 
     Args:
         secret_name: The name of the secret in KMS.
@@ -72,6 +78,17 @@ def get_secret(secret_name: str) -> str:
     Raises:
         Exception: If secret retrieval fails.
     """
+    # Check cache first (with TTL)
+    with _cache_lock:
+        if secret_name in _secret_cache:
+            value, expiry = _secret_cache[secret_name]
+            if time.time() < expiry:
+                logger.debug("Retrieved secret from cache", secret_name=secret_name)
+                return value
+            # Expired - remove from cache
+            del _secret_cache[secret_name]
+
+    # Fetch from KMS
     try:
         from alibabacloud_kms20160120 import models as kms_models
     except ImportError as e:
@@ -88,10 +105,15 @@ def get_secret(secret_name: str) -> str:
     )
 
     response = client.get_secret_value(request)
+    secret_value = response.body.secret_data
 
-    logger.debug("Retrieved secret from KMS", secret_name=secret_name)
+    # Cache with TTL
+    with _cache_lock:
+        _secret_cache[secret_name] = (secret_value, time.time() + _SECRET_CACHE_TTL_SECONDS)
 
-    return response.body.secret_data
+    logger.debug("Retrieved secret from KMS", secret_name=secret_name, ttl_seconds=_SECRET_CACHE_TTL_SECONDS)
+
+    return secret_value
 
 
 def get_secret_or_env(secret_name_env: str, env_var: str, default: str = "") -> str:
@@ -130,7 +152,8 @@ def get_secret_or_env(secret_name_env: str, env_var: str, default: str = "") -> 
 
 def clear_cache():
     """Clear the secret cache (useful for secret rotation)."""
-    get_secret.cache_clear()
+    with _cache_lock:
+        _secret_cache.clear()
     logger.info("Cleared KMS secret cache")
 
 

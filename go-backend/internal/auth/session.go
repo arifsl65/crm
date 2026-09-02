@@ -78,22 +78,16 @@ func (sm *SessionManager) StoreRefreshToken(ctx context.Context, userID uuid.UUI
 }
 
 // StoreRotatedRefreshToken stores a new refresh token as part of token rotation.
+// NOTE: The old token is already marked as used atomically by ValidateRefreshToken,
+// so we only need to insert the new token here.
 func (sm *SessionManager) StoreRotatedRefreshToken(ctx context.Context, userID uuid.UUID, tenantID *uuid.UUID, newToken, oldToken, ipAddress, userAgent string, family uuid.UUID) error {
 	newTokenHash := hashToken(newToken)
 	oldTokenHash := hashToken(oldToken)
 	expiresAt := time.Now().Add(sm.refreshTokenExpire)
 
 	return sm.db.SuperAdminTransaction(ctx, func(tx pgx.Tx) error {
-		// Mark old token as used
+		// Insert new token (old token was already marked as used by ValidateRefreshToken)
 		_, err := tx.Exec(ctx, `
-			UPDATE refresh_tokens SET used_at = NOW() WHERE token_hash = $1
-		`, oldTokenHash)
-		if err != nil {
-			return err
-		}
-
-		// Insert new token
-		_, err = tx.Exec(ctx, `
 			INSERT INTO refresh_tokens (user_id, tenant_id, token_hash, family, parent_token_hash, ip_address, user_agent, expires_at)
 			VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
 		`, userID, tenantID, newTokenHash, family, oldTokenHash, ipAddress, userAgent, expiresAt)
@@ -101,20 +95,28 @@ func (sm *SessionManager) StoreRotatedRefreshToken(ctx context.Context, userID u
 	})
 }
 
-// ValidateRefreshToken checks if a refresh token is valid (exists, not revoked, not expired, not used).
+// ValidateRefreshToken checks if a refresh token is valid and atomically marks it as used.
+// This prevents TOCTOU race conditions where two concurrent requests could both validate
+// the same token before either marks it as used.
 func (sm *SessionManager) ValidateRefreshToken(ctx context.Context, token string) (*RefreshTokenRecord, error) {
 	tokenHash := hashToken(token)
 
-	query := `
-		SELECT id, user_id, tenant_id, family, token_hash, ip_address, user_agent, revoked_at, used_at, created_at, expires_at
-		FROM refresh_tokens
+	// SECURITY: Atomic UPDATE ... RETURNING to validate AND mark as used in one operation
+	// This prevents race conditions between validation and consumption
+	atomicQuery := `
+		UPDATE refresh_tokens
+		SET used_at = NOW()
 		WHERE token_hash = $1
+		  AND revoked_at IS NULL
+		  AND used_at IS NULL
+		  AND expires_at > NOW()
+		RETURNING id, user_id, tenant_id, family, token_hash, ip_address, user_agent, revoked_at, used_at, created_at, expires_at
 	`
 
 	var record RefreshTokenRecord
-	var qErr error
+	var atomicErr error
 	if err := sm.db.SuperAdminTransaction(ctx, func(tx pgx.Tx) error {
-		qErr = tx.QueryRow(ctx, query, tokenHash).Scan(
+		atomicErr = tx.QueryRow(ctx, atomicQuery, tokenHash).Scan(
 			&record.ID, &record.UserID, &record.TenantID, &record.Family,
 			&record.TokenHash, &record.IPAddress, &record.UserAgent,
 			&record.RevokedAt, &record.UsedAt, &record.CreatedAt, &record.ExpiresAt,
@@ -123,36 +125,73 @@ func (sm *SessionManager) ValidateRefreshToken(ctx context.Context, token string
 	}); err != nil {
 		return nil, err
 	}
+
+	// If atomic update succeeded, token is valid and now marked as used
+	if atomicErr == nil {
+		return &record, nil
+	}
+
+	// If no rows affected, determine the specific error by checking the token state
+	if atomicErr == pgx.ErrNoRows {
+		return sm.diagnoseRefreshTokenError(ctx, tokenHash)
+	}
+
+	return nil, atomicErr
+}
+
+// diagnoseRefreshTokenError determines why a refresh token validation failed.
+// Called only when the atomic UPDATE returned no rows.
+func (sm *SessionManager) diagnoseRefreshTokenError(ctx context.Context, tokenHash string) (*RefreshTokenRecord, error) {
+	query := `
+		SELECT id, family, revoked_at, used_at, expires_at
+		FROM refresh_tokens
+		WHERE token_hash = $1
+	`
+
+	var id uuid.UUID
+	var family uuid.UUID
+	var revokedAt, usedAt *time.Time
+	var expiresAt time.Time
+
+	var qErr error
+	if err := sm.db.SuperAdminTransaction(ctx, func(tx pgx.Tx) error {
+		qErr = tx.QueryRow(ctx, query, tokenHash).Scan(&id, &family, &revokedAt, &usedAt, &expiresAt)
+		return nil
+	}); err != nil {
+		return nil, err
+	}
+
+	if qErr == pgx.ErrNoRows {
+		// Token doesn't exist at all
+		return nil, ErrInvalidToken
+	}
 	if qErr != nil {
-		if qErr == pgx.ErrNoRows {
-			return nil, ErrInvalidToken
-		}
 		return nil, qErr
 	}
 
-	// Check if token is revoked
-	if record.RevokedAt != nil {
-		log.Warn().Str("token_id", record.ID.String()).Msg("Attempted to use revoked refresh token")
+	// Check why the token failed validation
+	if revokedAt != nil {
+		log.Warn().Str("token_id", id.String()).Msg("Attempted to use revoked refresh token")
 		return nil, ErrTokenRevoked
 	}
 
-	// Check if token is already used (replay attack detection)
-	if record.UsedAt != nil {
-		// Token reuse detected! Revoke entire family for security
+	if usedAt != nil {
+		// Token reuse detected! Another request already used this token.
+		// Revoke entire family for security (potential token theft)
 		log.Warn().
-			Str("token_id", record.ID.String()).
-			Str("family", record.Family.String()).
+			Str("token_id", id.String()).
+			Str("family", family.String()).
 			Msg("Token reuse detected - revoking entire token family")
-		_ = sm.RevokeTokenFamily(ctx, record.Family)
+		_ = sm.RevokeTokenFamily(ctx, family)
 		return nil, ErrTokenReused
 	}
 
-	// Check if token is expired
-	if time.Now().After(record.ExpiresAt) {
+	if time.Now().After(expiresAt) {
 		return nil, ErrExpiredToken
 	}
 
-	return &record, nil
+	// Shouldn't reach here, but return invalid token as fallback
+	return nil, ErrInvalidToken
 }
 
 // RevokeRefreshToken revokes a specific refresh token.

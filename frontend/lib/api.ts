@@ -1334,3 +1334,252 @@ export async function deleteESignRequest(id: string): Promise<void> {
   });
   if (!res.ok) throw new Error('Failed to delete e-sign request');
 }
+
+// Public E-Sign endpoints (no auth required)
+export interface SigningPageData {
+  request_id: string;
+  template_type: string;
+  template_title: string;
+  signer_email: string;
+  signer_name?: string;
+  client_name: string;
+  tenant_name: string;
+  expires_at?: string;
+}
+
+export async function getSigningPageData(token: string): Promise<SigningPageData> {
+  const res = await fetch(`${API_URL}/api/v1/e-sign/sign/${token}`);
+  if (res.status === 410) {
+    const data = await res.json();
+    throw new Error(data.error || 'expired');
+  }
+  if (!res.ok) throw new Error('Invalid or expired signing link');
+  return res.json();
+}
+
+export async function submitSignature(token: string, signatureData: {
+  signature: string;
+  full_name: string;
+  agreed_to_terms: boolean;
+}): Promise<{ message: string; signed_at: string }> {
+  const res = await fetch(`${API_URL}/api/v1/e-sign/sign/${token}`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ signature_data: signatureData }),
+  });
+  if (!res.ok) {
+    const error = await res.json();
+    throw new Error(error.error || 'Failed to submit signature');
+  }
+  return res.json();
+}
+
+// Reminders API
+export interface Reminder {
+  id: string;
+  tenant_id: string;
+  user_id: string;
+  client_id?: string;
+  email_id?: string;
+  document_id?: string;
+  service_id?: string;
+  remind_at: string;
+  reason?: string;
+  status: 'pending' | 'completed' | 'dismissed';
+  created_at: string;
+  updated_at: string;
+  client_name?: string;
+  document_name?: string;
+  service_name?: string;
+}
+
+export async function getReminders(params?: {
+  limit?: number;
+  offset?: number;
+  status?: string;
+  upcoming?: boolean;
+}): Promise<{ reminders: Reminder[]; count: number }> {
+  const searchParams = new URLSearchParams();
+  if (params?.limit) searchParams.set('limit', String(params.limit));
+  if (params?.offset) searchParams.set('offset', String(params.offset));
+  if (params?.status) searchParams.set('status', params.status);
+  if (params?.upcoming) searchParams.set('upcoming', 'true');
+
+  const res = await authFetch(`/api/v1/reminders?${searchParams}`);
+  if (!res.ok) throw new Error('Failed to fetch reminders');
+  return res.json();
+}
+
+export async function getReminder(id: string): Promise<{ reminder: Reminder }> {
+  const res = await authFetch(`/api/v1/reminders/${id}`);
+  if (!res.ok) throw new Error('Failed to fetch reminder');
+  return res.json();
+}
+
+export async function getUpcomingReminders(limit?: number): Promise<{ reminders: Reminder[]; count: number }> {
+  const searchParams = new URLSearchParams();
+  if (limit) searchParams.set('limit', String(limit));
+
+  const res = await authFetch(`/api/v1/reminders/upcoming?${searchParams}`);
+  if (!res.ok) throw new Error('Failed to fetch upcoming reminders');
+  return res.json();
+}
+
+export async function createReminder(data: {
+  client_id?: string;
+  email_id?: string;
+  document_id?: string;
+  service_id?: string;
+  remind_at: string;
+  reason?: string;
+}): Promise<{ reminder: Reminder }> {
+  const res = await authFetch('/api/v1/reminders', {
+    method: 'POST',
+    body: JSON.stringify(data),
+  });
+  if (!res.ok) {
+    const error = await res.json();
+    throw new Error(error.message || 'Failed to create reminder');
+  }
+  return res.json();
+}
+
+export async function completeReminder(id: string): Promise<void> {
+  const res = await authFetch(`/api/v1/reminders/${id}/complete`, {
+    method: 'POST',
+  });
+  if (!res.ok) throw new Error('Failed to complete reminder');
+}
+
+export async function dismissReminder(id: string): Promise<void> {
+  const res = await authFetch(`/api/v1/reminders/${id}/dismiss`, {
+    method: 'POST',
+  });
+  if (!res.ok) throw new Error('Failed to dismiss reminder');
+}
+
+export async function deleteReminder(id: string): Promise<void> {
+  const res = await authFetch(`/api/v1/reminders/${id}`, {
+    method: 'DELETE',
+  });
+  if (!res.ok) throw new Error('Failed to delete reminder');
+}
+
+// Subscription API
+export interface Subscription {
+  id: string;
+  tenant_id: string;
+  stripe_customer_id: string;
+  stripe_subscription_id?: string;
+  plan: 'starter' | 'professional' | 'enterprise';
+  status: 'trialing' | 'active' | 'past_due' | 'canceled' | 'unpaid';
+  current_period_start?: string;
+  current_period_end?: string;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface Invoice {
+  id: string;
+  tenant_id: string;
+  stripe_invoice_id: string;
+  amount_due: number;
+  amount_paid: number;
+  currency: string;
+  status: 'draft' | 'open' | 'paid' | 'void' | 'uncollectible';
+  invoice_pdf?: string;
+  period_start?: string;
+  period_end?: string;
+  created_at: string;
+}
+
+export interface UsageStats {
+  clients: number;
+  users: number;
+  services: number;
+  documents: number;
+  emails_monthly: number;
+}
+
+export async function getSubscription(): Promise<{ subscription: Subscription }> {
+  const res = await authFetch('/api/v1/subscription');
+  if (!res.ok) throw new Error('Failed to fetch subscription');
+  return res.json();
+}
+
+export async function getInvoices(): Promise<{ invoices: Invoice[]; count: number }> {
+  const res = await authFetch('/api/v1/subscription/invoices');
+  if (!res.ok) throw new Error('Failed to fetch invoices');
+  return res.json();
+}
+
+export async function getUsageStats(): Promise<{ usage: UsageStats }> {
+  const res = await authFetch('/api/v1/subscription/usage');
+  if (!res.ok) throw new Error('Failed to fetch usage stats');
+  return res.json();
+}
+
+export async function createBillingPortalSession(): Promise<{ url?: string; message: string }> {
+  const res = await authFetch('/api/v1/subscription/portal', {
+    method: 'POST',
+  });
+  if (!res.ok) throw new Error('Failed to create billing portal session');
+  return res.json();
+}
+
+export async function createCheckoutSession(plan: string): Promise<{ url?: string; message: string }> {
+  const res = await authFetch('/api/v1/subscription/checkout', {
+    method: 'POST',
+    body: JSON.stringify({ plan }),
+  });
+  if (!res.ok) throw new Error('Failed to create checkout session');
+  return res.json();
+}
+
+// Push Tokens API
+export interface PushToken {
+  id: string;
+  tenant_id: string;
+  user_id: string;
+  token: string;
+  platform: 'ios' | 'android' | 'web';
+  is_active: boolean;
+  last_used_at?: string;
+  created_at: string;
+}
+
+export async function getPushTokens(): Promise<{ push_tokens: PushToken[]; count: number }> {
+  const res = await authFetch('/api/v1/push-tokens');
+  if (!res.ok) throw new Error('Failed to fetch push tokens');
+  return res.json();
+}
+
+export async function registerPushToken(data: {
+  token: string;
+  platform: 'ios' | 'android' | 'web';
+}): Promise<{ push_token: PushToken; message: string }> {
+  const res = await authFetch('/api/v1/push-tokens', {
+    method: 'POST',
+    body: JSON.stringify(data),
+  });
+  if (!res.ok) {
+    const error = await res.json();
+    throw new Error(error.message || 'Failed to register push token');
+  }
+  return res.json();
+}
+
+export async function unregisterPushToken(id: string): Promise<void> {
+  const res = await authFetch(`/api/v1/push-tokens/${id}`, {
+    method: 'DELETE',
+  });
+  if (!res.ok) throw new Error('Failed to unregister push token');
+}
+
+export async function unregisterPushTokenByValue(token: string): Promise<void> {
+  const res = await authFetch('/api/v1/push-tokens/unregister', {
+    method: 'POST',
+    body: JSON.stringify({ token }),
+  });
+  if (!res.ok) throw new Error('Failed to unregister push token');
+}
