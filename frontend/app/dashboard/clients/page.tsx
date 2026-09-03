@@ -2,203 +2,504 @@
 
 import { useEffect, useState, useCallback } from 'react';
 import Link from 'next/link';
-import { useRouter } from 'next/navigation';
+import { useSearchParams } from 'next/navigation';
 import { useAuth } from '@/components/auth-guard';
-import { Client, getClients } from '@/lib/api';
+import { Client, getClients, getServices, Service } from '@/lib/api';
 import { getStatusBadgeClass } from '@/lib/status';
-import { SkeletonTable } from '@/components';
+
+interface ClientWithRisk extends Client {
+  riskLevel?: 'high' | 'medium' | 'low' | 'none';
+  overdueServices?: number;
+  missingDocs?: number;
+}
 
 export default function ClientsPage() {
   const { user } = useAuth();
-  const router = useRouter();
-  const [clients, setClients] = useState<Client[]>([]);
+  const searchParams = useSearchParams();
+  const [clients, setClients] = useState<ClientWithRisk[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [search, setSearch] = useState('');
   const [statusFilter, setStatusFilter] = useState('');
+  const [riskFilter, setRiskFilter] = useState('');
+  const [selectedClient, setSelectedClient] = useState<ClientWithRisk | null>(null);
+  const [showCHLookup, setShowCHLookup] = useState(searchParams.get('panel') === 'ch-lookup');
 
   const fetchClients = useCallback(async () => {
     try {
       setLoading(true);
-      const data = await getClients({
-        search: search || undefined,
-        status: statusFilter || undefined,
-        limit: 50,
+      const [clientsData, servicesData] = await Promise.all([
+        getClients({
+          search: search || undefined,
+          status: statusFilter || undefined,
+          limit: 100,
+        }),
+        getServices({ limit: 200 }),
+      ]);
+
+      const services = servicesData.services || [];
+      const now = new Date();
+
+      // Calculate risk levels for each client
+      const clientsWithRisk: ClientWithRisk[] = (clientsData.clients || []).map((client: Client) => {
+        const clientServices = services.filter((s: Service) => s.client_id === client.id);
+
+        const overdueServices = clientServices.filter((s: Service) => {
+          if (!s.deadline || s.status === 'completed' || s.status === 'cancelled') return false;
+          return new Date(s.deadline) < now;
+        }).length;
+
+        const missingDocs = clientServices.reduce((acc: number, s: Service) => {
+          return acc + Math.max(0, (s.docs_required || 0) - (s.docs_received || 0));
+        }, 0);
+
+        let riskLevel: 'high' | 'medium' | 'low' | 'none' = 'none';
+        if (overdueServices > 1 || missingDocs > 5) riskLevel = 'high';
+        else if (overdueServices > 0 || missingDocs > 2) riskLevel = 'medium';
+        else if (missingDocs > 0) riskLevel = 'low';
+
+        return {
+          ...client,
+          riskLevel,
+          overdueServices,
+          missingDocs,
+        };
       });
-      setClients(data.clients || []);
+
+      // Apply risk filter
+      const filtered = riskFilter
+        ? clientsWithRisk.filter(c => c.riskLevel === riskFilter)
+        : clientsWithRisk;
+
+      setClients(filtered);
       setError(null);
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Failed to load clients');
     } finally {
       setLoading(false);
     }
-  }, [search, statusFilter]);
+  }, [search, statusFilter, riskFilter]);
 
   useEffect(() => {
     fetchClients();
   }, [fetchClients]);
 
+  const getRiskBadge = (riskLevel?: string) => {
+    switch (riskLevel) {
+      case 'high':
+        return <span className="px-2 py-0.5 text-xs font-medium rounded-full bg-red-100 dark:bg-red-900/30 text-red-700 dark:text-red-300">High Risk</span>;
+      case 'medium':
+        return <span className="px-2 py-0.5 text-xs font-medium rounded-full bg-orange-100 dark:bg-orange-900/30 text-orange-700 dark:text-orange-300">Medium</span>;
+      case 'low':
+        return <span className="px-2 py-0.5 text-xs font-medium rounded-full bg-yellow-100 dark:bg-yellow-900/30 text-yellow-700 dark:text-yellow-300">Low</span>;
+      default:
+        return null;
+    }
+  };
 
   return (
-    <div className="min-h-screen bg-gray-50 dark:bg-slate-900">
+    <div className="h-full flex flex-col bg-gray-50 dark:bg-slate-900">
       {/* Header */}
-      <header className="bg-white dark:bg-slate-800 shadow">
-        <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-4 flex justify-between items-center">
-          <div className="flex items-center space-x-4">
-            <Link
-              href="/dashboard"
-              className="text-gray-500 hover:text-gray-700 dark:text-gray-400 dark:hover:text-gray-200"
-            >
-              <svg className="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M10 19l-7-7m0 0l7-7m-7 7h18" />
-              </svg>
-            </Link>
-            <h1 className="text-2xl font-bold text-gray-900 dark:text-white">Clients</h1>
+      <div className="bg-white dark:bg-slate-800 border-b border-gray-200 dark:border-gray-700 px-6 py-4">
+        <div className="flex items-center justify-between">
+          <div>
+            <h1 className="text-xl font-semibold text-gray-900 dark:text-white flex items-center gap-2">
+              <span>👥</span> Clients
+            </h1>
+            <p className="text-sm text-gray-500 dark:text-gray-400 mt-1">
+              {clients.length} clients {riskFilter && `(${riskFilter} risk)`}
+            </p>
           </div>
-          {(user?.role === 'super_admin' || user?.role === 'tenant_admin' || user?.role === 'staff') && (
+          <div className="flex items-center gap-2">
+            <button
+              onClick={() => setShowCHLookup(!showCHLookup)}
+              className={`px-4 py-2 text-sm font-medium rounded-lg ${
+                showCHLookup
+                  ? 'bg-blue-600 text-white'
+                  : 'bg-gray-100 dark:bg-slate-700 text-gray-700 dark:text-gray-300'
+              }`}
+            >
+              🔍 CH Lookup
+            </button>
             <Link
               href="/dashboard/clients/new"
-              className="inline-flex items-center px-4 py-2 bg-blue-600 text-white text-sm font-medium rounded-md hover:bg-blue-700 transition-colors"
+              className="px-4 py-2 bg-blue-600 text-white text-sm font-medium rounded-lg hover:bg-blue-700"
             >
-              <svg className="w-5 h-5 mr-2" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 6v6m0 0v6m0-6h6m-6 0H6" />
-              </svg>
-              Add Client
+              + Add Client
             </Link>
-          )}
-        </div>
-      </header>
-
-      {/* Main Content */}
-      <main className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-8">
-        {/* Filters */}
-        <div className="mb-6 flex flex-col sm:flex-row gap-4">
-          <div className="flex-1">
-            <input
-              type="text"
-              placeholder="Search clients..."
-              value={search}
-              onChange={(e) => setSearch(e.target.value)}
-              className="w-full px-4 py-2 border border-gray-300 dark:border-gray-600 rounded-md bg-white dark:bg-slate-700 text-gray-900 dark:text-white placeholder-gray-500 dark:placeholder-gray-400 focus:ring-2 focus:ring-blue-500 focus:border-transparent"
-            />
           </div>
+        </div>
+
+        {/* Filters */}
+        <div className="mt-4 flex flex-wrap gap-3">
+          <input
+            type="text"
+            placeholder="Search clients..."
+            value={search}
+            onChange={(e) => setSearch(e.target.value)}
+            className="flex-1 min-w-64 px-3 py-2 text-sm border border-gray-300 dark:border-gray-600 rounded-lg bg-white dark:bg-slate-700 text-gray-900 dark:text-white"
+          />
           <select
             value={statusFilter}
             onChange={(e) => setStatusFilter(e.target.value)}
-            className="px-4 py-2 border border-gray-300 dark:border-gray-600 rounded-md bg-white dark:bg-slate-700 text-gray-900 dark:text-white focus:ring-2 focus:ring-blue-500 focus:border-transparent"
+            className="px-3 py-2 text-sm border border-gray-300 dark:border-gray-600 rounded-lg bg-white dark:bg-slate-700 text-gray-900 dark:text-white"
           >
-            <option value="">All statuses</option>
+            <option value="">All Status</option>
             <option value="active">Active</option>
             <option value="inactive">Inactive</option>
             <option value="archived">Archived</option>
           </select>
+          <select
+            value={riskFilter}
+            onChange={(e) => setRiskFilter(e.target.value)}
+            className="px-3 py-2 text-sm border border-gray-300 dark:border-gray-600 rounded-lg bg-white dark:bg-slate-700 text-gray-900 dark:text-white"
+          >
+            <option value="">All Risk Levels</option>
+            <option value="high">High Risk</option>
+            <option value="medium">Medium Risk</option>
+            <option value="low">Low Risk</option>
+            <option value="none">No Risk</option>
+          </select>
+        </div>
+      </div>
+
+      {/* Content */}
+      <div className="flex-1 flex overflow-hidden">
+        {/* Client List */}
+        <div className={`${selectedClient || showCHLookup ? 'w-1/2' : 'flex-1'} overflow-y-auto border-r border-gray-200 dark:border-gray-700`}>
+          {error && (
+            <div className="m-4 p-3 bg-red-50 dark:bg-red-900/30 rounded-lg text-red-700 dark:text-red-300 text-sm">
+              {error}
+            </div>
+          )}
+
+          {loading ? (
+            <div className="flex items-center justify-center h-64">
+              <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-blue-600"></div>
+            </div>
+          ) : clients.length === 0 ? (
+            <div className="text-center py-12">
+              <span className="text-4xl">👥</span>
+              <p className="mt-2 text-gray-600 dark:text-gray-400">No clients found</p>
+              <Link
+                href="/dashboard/clients/new"
+                className="mt-4 inline-flex items-center px-4 py-2 bg-blue-600 text-white text-sm rounded-lg hover:bg-blue-700"
+              >
+                + Add Client
+              </Link>
+            </div>
+          ) : (
+            <div className="divide-y divide-gray-200 dark:divide-gray-700">
+              {clients.map((client) => (
+                <div
+                  key={client.id}
+                  onClick={() => { setSelectedClient(client); setShowCHLookup(false); }}
+                  className={`p-4 cursor-pointer hover:bg-gray-50 dark:hover:bg-slate-800 ${
+                    selectedClient?.id === client.id ? 'bg-blue-50 dark:bg-blue-900/20' : ''
+                  }`}
+                >
+                  <div className="flex items-start justify-between">
+                    <div className="flex-1 min-w-0">
+                      <div className="flex items-center gap-2">
+                        <p className="text-sm font-medium text-gray-900 dark:text-white truncate">
+                          {client.company_name}
+                        </p>
+                        {getRiskBadge(client.riskLevel)}
+                      </div>
+                      <p className="text-xs text-gray-500 dark:text-gray-400 mt-1">
+                        {client.contact_name} • {client.email}
+                      </p>
+                      {client.company_number && (
+                        <p className="text-xs text-gray-400 dark:text-gray-500 mt-0.5">
+                          Co. No: {client.company_number}
+                        </p>
+                      )}
+                    </div>
+                    <div className="flex flex-col items-end gap-1">
+                      <span className={`px-2 py-0.5 text-xs font-medium rounded-full ${getStatusBadgeClass(client.status)}`}>
+                        {client.status}
+                      </span>
+                      {(client.overdueServices ?? 0) > 0 && (
+                        <span className="text-xs text-red-600 dark:text-red-400">
+                          {client.overdueServices} overdue
+                        </span>
+                      )}
+                    </div>
+                  </div>
+                </div>
+              ))}
+            </div>
+          )}
         </div>
 
-        {/* Error */}
-        {error && (
-          <div className="mb-6 p-4 bg-red-50 dark:bg-red-900/30 border border-red-200 dark:border-red-800 rounded-md">
-            <p className="text-red-700 dark:text-red-300">{error}</p>
+        {/* Side Panel */}
+        {(selectedClient || showCHLookup) && (
+          <div className="w-1/2 bg-white dark:bg-slate-800 overflow-y-auto">
+            {showCHLookup ? (
+              <CompaniesHouseLookup onClose={() => setShowCHLookup(false)} />
+            ) : selectedClient ? (
+              <ClientDetailPanel
+                client={selectedClient}
+                onClose={() => setSelectedClient(null)}
+              />
+            ) : null}
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+function ClientDetailPanel({ client, onClose }: { client: ClientWithRisk; onClose: () => void }) {
+  const [activeTab, setActiveTab] = useState<'details' | 'services' | 'documents' | 'activity'>('details');
+
+  return (
+    <div className="h-full flex flex-col">
+      {/* Header */}
+      <div className="p-4 border-b border-gray-200 dark:border-gray-700 flex items-center justify-between">
+        <div>
+          <h2 className="text-lg font-semibold text-gray-900 dark:text-white">{client.company_name}</h2>
+          <p className="text-sm text-gray-500 dark:text-gray-400">{client.contact_name}</p>
+        </div>
+        <div className="flex items-center gap-2">
+          <Link
+            href={`/dashboard/clients/${client.id}`}
+            className="px-3 py-1.5 text-sm font-medium text-blue-600 dark:text-blue-400 hover:bg-blue-100 dark:hover:bg-blue-900/30 rounded"
+          >
+            Full View →
+          </Link>
+          <button
+            onClick={onClose}
+            className="text-gray-400 hover:text-gray-600 dark:hover:text-gray-200"
+          >
+            ✕
+          </button>
+        </div>
+      </div>
+
+      {/* Tabs */}
+      <div className="border-b border-gray-200 dark:border-gray-700 px-4">
+        <div className="flex gap-4">
+          {(['details', 'services', 'documents', 'activity'] as const).map((tab) => (
+            <button
+              key={tab}
+              onClick={() => setActiveTab(tab)}
+              className={`py-3 text-sm font-medium border-b-2 ${
+                activeTab === tab
+                  ? 'border-blue-600 text-blue-600 dark:text-blue-400'
+                  : 'border-transparent text-gray-500 dark:text-gray-400'
+              }`}
+            >
+              {tab.charAt(0).toUpperCase() + tab.slice(1)}
+            </button>
+          ))}
+        </div>
+      </div>
+
+      {/* Tab Content */}
+      <div className="flex-1 overflow-y-auto p-4">
+        {activeTab === 'details' && (
+          <div className="space-y-4">
+            {/* Risk Alert */}
+            {client.riskLevel && client.riskLevel !== 'none' && (
+              <div className={`p-3 rounded-lg ${
+                client.riskLevel === 'high' ? 'bg-red-50 dark:bg-red-900/20 border border-red-200 dark:border-red-800' :
+                client.riskLevel === 'medium' ? 'bg-orange-50 dark:bg-orange-900/20 border border-orange-200 dark:border-orange-800' :
+                'bg-yellow-50 dark:bg-yellow-900/20 border border-yellow-200 dark:border-yellow-800'
+              }`}>
+                <p className="text-sm font-medium">
+                  {client.riskLevel === 'high' ? '🔴' : client.riskLevel === 'medium' ? '🟠' : '🟡'} Risk Alert
+                </p>
+                <ul className="text-xs mt-1 space-y-1">
+                  {(client.overdueServices ?? 0) > 0 && (
+                    <li>{client.overdueServices} overdue services</li>
+                  )}
+                  {(client.missingDocs ?? 0) > 0 && (
+                    <li>{client.missingDocs} missing documents</li>
+                  )}
+                </ul>
+              </div>
+            )}
+
+            {/* Contact Info */}
+            <div className="bg-gray-50 dark:bg-slate-700 rounded-lg p-4">
+              <h3 className="text-sm font-semibold text-gray-700 dark:text-gray-300 mb-3">Contact Information</h3>
+              <div className="space-y-2 text-sm">
+                <p><span className="text-gray-500">Email:</span> {client.email}</p>
+                <p><span className="text-gray-500">Phone:</span> {client.phone || '-'}</p>
+                <p><span className="text-gray-500">Address:</span> {client.address || '-'}</p>
+              </div>
+            </div>
+
+            {/* Company Info */}
+            <div className="bg-gray-50 dark:bg-slate-700 rounded-lg p-4">
+              <h3 className="text-sm font-semibold text-gray-700 dark:text-gray-300 mb-3">Company Details</h3>
+              <div className="space-y-2 text-sm">
+                <p><span className="text-gray-500">Company Number:</span> {client.company_number || '-'}</p>
+                <p><span className="text-gray-500">VAT Number:</span> {client.vat_number || '-'}</p>
+                <p><span className="text-gray-500">Year End:</span> {client.year_end || '-'}</p>
+                <p><span className="text-gray-500">VAT Quarter:</span> {client.vat_quarter || '-'}</p>
+              </div>
+            </div>
+
+            {/* Quick Actions */}
+            <div className="grid grid-cols-2 gap-2">
+              <button className="p-3 text-sm font-medium text-gray-700 dark:text-gray-300 bg-gray-100 dark:bg-slate-700 rounded-lg hover:bg-gray-200 dark:hover:bg-slate-600">
+                📧 Send Email
+              </button>
+              <button className="p-3 text-sm font-medium text-gray-700 dark:text-gray-300 bg-gray-100 dark:bg-slate-700 rounded-lg hover:bg-gray-200 dark:hover:bg-slate-600">
+                📄 Request Docs
+              </button>
+              <button className="p-3 text-sm font-medium text-gray-700 dark:text-gray-300 bg-gray-100 dark:bg-slate-700 rounded-lg hover:bg-gray-200 dark:hover:bg-slate-600">
+                📋 Add Service
+              </button>
+              <button className="p-3 text-sm font-medium text-gray-700 dark:text-gray-300 bg-gray-100 dark:bg-slate-700 rounded-lg hover:bg-gray-200 dark:hover:bg-slate-600">
+                🔍 CH Lookup
+              </button>
+            </div>
           </div>
         )}
 
-        {/* Table */}
-        <div className="bg-white dark:bg-slate-800 rounded-lg shadow overflow-hidden">
-          {loading ? (
-            <div className="p-6">
-              <SkeletonTable rows={5} columns={5} />
-            </div>
-          ) : clients.length === 0 ? (
-            <div className="p-12 text-center">
-              <svg className="mx-auto h-12 w-12 text-gray-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M17 20h5v-2a3 3 0 00-5.356-1.857M17 20H7m10 0v-2c0-.656-.126-1.283-.356-1.857M7 20H2v-2a3 3 0 015.356-1.857M7 20v-2c0-.656.126-1.283.356-1.857m0 0a5.002 5.002 0 019.288 0M15 7a3 3 0 11-6 0 3 3 0 016 0zm6 3a2 2 0 11-4 0 2 2 0 014 0zM7 10a2 2 0 11-4 0 2 2 0 014 0z" />
-              </svg>
-              <h3 className="mt-2 text-sm font-medium text-gray-900 dark:text-white">No clients</h3>
-              <p className="mt-1 text-sm text-gray-500 dark:text-gray-400">
-                Get started by adding your first client.
-              </p>
-              <div className="mt-6">
-                <Link
-                  href="/dashboard/clients/new"
-                  className="inline-flex items-center px-4 py-2 bg-blue-600 text-white text-sm font-medium rounded-md hover:bg-blue-700"
-                >
-                  <svg className="w-5 h-5 mr-2" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 6v6m0 0v6m0-6h6m-6 0H6" />
-                  </svg>
-                  Add Client
-                </Link>
-              </div>
-            </div>
-          ) : (
-            <table className="min-w-full divide-y divide-gray-200 dark:divide-gray-700">
-              <thead className="bg-gray-50 dark:bg-slate-700">
-                <tr>
-                  <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 dark:text-gray-300 uppercase tracking-wider">
-                    Company
-                  </th>
-                  <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 dark:text-gray-300 uppercase tracking-wider">
-                    Contact
-                  </th>
-                  <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 dark:text-gray-300 uppercase tracking-wider">
-                    Email
-                  </th>
-                  <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 dark:text-gray-300 uppercase tracking-wider">
-                    Status
-                  </th>
-                  <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 dark:text-gray-300 uppercase tracking-wider">
-                    Year End
-                  </th>
-                  <th className="relative px-6 py-3">
-                    <span className="sr-only">Actions</span>
-                  </th>
-                </tr>
-              </thead>
-              <tbody className="bg-white dark:bg-slate-800 divide-y divide-gray-200 dark:divide-gray-700">
-                {clients.map((client) => (
-                  <tr
-                    key={client.id}
-                    className="hover:bg-gray-50 dark:hover:bg-slate-700 cursor-pointer"
-                    onClick={() => router.push(`/dashboard/clients/${client.id}`)}
-                  >
-                    <td className="px-6 py-4 whitespace-nowrap">
-                      <div className="text-sm font-medium text-gray-900 dark:text-white">
-                        {client.company_name}
-                      </div>
-                      {client.company_number && (
-                        <div className="text-xs text-gray-500 dark:text-gray-400">
-                          {client.company_number}
-                        </div>
-                      )}
-                    </td>
-                    <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-900 dark:text-white">
-                      {client.contact_name}
-                    </td>
-                    <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-500 dark:text-gray-400">
-                      {client.email}
-                    </td>
-                    <td className="px-6 py-4 whitespace-nowrap">
-                      <span className={`px-2 py-1 text-xs font-medium rounded-full ${getStatusBadgeClass(client.status)}`}>
-                        {client.status}
-                      </span>
-                    </td>
-                    <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-500 dark:text-gray-400">
-                      {client.year_end || '-'}
-                    </td>
-                    <td className="px-6 py-4 whitespace-nowrap text-right text-sm font-medium">
-                      <Link
-                        href={`/dashboard/clients/${client.id}`}
-                        className="text-blue-600 hover:text-blue-900 dark:text-blue-400 dark:hover:text-blue-300"
-                        onClick={(e) => e.stopPropagation()}
-                      >
-                        View
-                      </Link>
-                    </td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          )}
+        {activeTab === 'services' && (
+          <div className="text-center py-8 text-gray-500 dark:text-gray-400">
+            <Link href={`/dashboard/clients/${client.id}`} className="text-blue-600 dark:text-blue-400 hover:underline">
+              View services in full page →
+            </Link>
+          </div>
+        )}
+
+        {activeTab === 'documents' && (
+          <div className="text-center py-8 text-gray-500 dark:text-gray-400">
+            <Link href={`/dashboard/clients/${client.id}`} className="text-blue-600 dark:text-blue-400 hover:underline">
+              View documents in full page →
+            </Link>
+          </div>
+        )}
+
+        {activeTab === 'activity' && (
+          <div className="text-center py-8 text-gray-500 dark:text-gray-400">
+            <Link href={`/dashboard/clients/${client.id}`} className="text-blue-600 dark:text-blue-400 hover:underline">
+              View activity in full page →
+            </Link>
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+function CompaniesHouseLookup({ onClose }: { onClose: () => void }) {
+  const [searchQuery, setSearchQuery] = useState('');
+  const [searching, setSearching] = useState(false);
+  const [results, setResults] = useState<any[]>([]);
+
+  const handleSearch = async () => {
+    if (!searchQuery.trim()) return;
+    setSearching(true);
+    // Simulate search - in production, this would call the Companies House API
+    setTimeout(() => {
+      setResults([
+        {
+          company_number: '12345678',
+          title: 'EXAMPLE COMPANY LTD',
+          company_status: 'active',
+          address_snippet: '123 Business Street, London, SW1A 1AA',
+          date_of_creation: '2020-01-15',
+        },
+        {
+          company_number: '87654321',
+          title: 'EXAMPLE TRADING LTD',
+          company_status: 'active',
+          address_snippet: '456 Commerce Road, Manchester, M1 2AB',
+          date_of_creation: '2019-06-20',
+        },
+      ]);
+      setSearching(false);
+    }, 1000);
+  };
+
+  return (
+    <div className="h-full flex flex-col">
+      {/* Header */}
+      <div className="p-4 border-b border-gray-200 dark:border-gray-700 flex items-center justify-between">
+        <h2 className="text-lg font-semibold text-gray-900 dark:text-white flex items-center gap-2">
+          <span>🔍</span> Companies House Lookup
+        </h2>
+        <button onClick={onClose} className="text-gray-400 hover:text-gray-600 dark:hover:text-gray-200">
+          ✕
+        </button>
+      </div>
+
+      {/* Search */}
+      <div className="p-4 border-b border-gray-200 dark:border-gray-700">
+        <div className="flex gap-2">
+          <input
+            type="text"
+            placeholder="Company name or number..."
+            value={searchQuery}
+            onChange={(e) => setSearchQuery(e.target.value)}
+            onKeyDown={(e) => e.key === 'Enter' && handleSearch()}
+            className="flex-1 px-3 py-2 text-sm border border-gray-300 dark:border-gray-600 rounded-lg bg-white dark:bg-slate-700 text-gray-900 dark:text-white"
+          />
+          <button
+            onClick={handleSearch}
+            disabled={searching}
+            className="px-4 py-2 bg-blue-600 text-white text-sm font-medium rounded-lg hover:bg-blue-700 disabled:opacity-50"
+          >
+            {searching ? 'Searching...' : 'Search'}
+          </button>
         </div>
-      </main>
+      </div>
+
+      {/* Results */}
+      <div className="flex-1 overflow-y-auto p-4">
+        {results.length === 0 ? (
+          <div className="text-center py-8">
+            <span className="text-4xl">🏢</span>
+            <p className="mt-2 text-gray-600 dark:text-gray-400">
+              Search for a company to see results
+            </p>
+          </div>
+        ) : (
+          <div className="space-y-3">
+            {results.map((company) => (
+              <div
+                key={company.company_number}
+                className="p-4 bg-gray-50 dark:bg-slate-700 rounded-lg border border-gray-200 dark:border-gray-600 hover:border-blue-500 cursor-pointer"
+              >
+                <div className="flex items-start justify-between">
+                  <div>
+                    <p className="text-sm font-medium text-gray-900 dark:text-white">
+                      {company.title}
+                    </p>
+                    <p className="text-xs text-gray-500 dark:text-gray-400 mt-1">
+                      {company.company_number} • Est. {company.date_of_creation}
+                    </p>
+                    <p className="text-xs text-gray-400 dark:text-gray-500 mt-1">
+                      {company.address_snippet}
+                    </p>
+                  </div>
+                  <span className={`px-2 py-0.5 text-xs font-medium rounded-full ${
+                    company.company_status === 'active'
+                      ? 'bg-green-100 dark:bg-green-900/30 text-green-700 dark:text-green-300'
+                      : 'bg-gray-100 dark:bg-gray-700 text-gray-700 dark:text-gray-300'
+                  }`}>
+                    {company.company_status}
+                  </span>
+                </div>
+                <div className="mt-3 flex gap-2">
+                  <button className="px-3 py-1 text-xs font-medium text-blue-600 dark:text-blue-400 bg-blue-100 dark:bg-blue-900/30 rounded hover:bg-blue-200 dark:hover:bg-blue-900/50">
+                    Import as Client
+                  </button>
+                  <button className="px-3 py-1 text-xs font-medium text-gray-600 dark:text-gray-400 bg-gray-100 dark:bg-slate-600 rounded hover:bg-gray-200 dark:hover:bg-slate-500">
+                    View Details
+                  </button>
+                </div>
+              </div>
+            ))}
+          </div>
+        )}
+      </div>
     </div>
   );
 }

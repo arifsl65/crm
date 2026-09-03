@@ -40,6 +40,7 @@ export async function login(credentials: LoginCredentials): Promise<AuthResponse
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(credentials),
+    credentials: 'include', // Required to receive httpOnly refresh_token cookie
   });
 
   if (!res.ok) {
@@ -56,6 +57,7 @@ export async function register(data: RegisterData): Promise<AuthResponse> {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(data),
+    credentials: 'include', // Required to receive httpOnly refresh_token cookie
   });
 
   if (!res.ok) {
@@ -76,6 +78,7 @@ export async function acceptInvite(data: InviteAcceptData): Promise<AuthResponse
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(data),
+    credentials: 'include', // Required to receive httpOnly refresh_token cookie
   });
 
   if (!res.ok) {
@@ -91,6 +94,7 @@ export async function refreshToken(refresh_token: string): Promise<AuthResponse>
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ refresh_token }),
+    credentials: 'include', // Required for cross-subdomain cookie handling
   });
 
   if (!res.ok) {
@@ -103,8 +107,8 @@ export async function refreshToken(refresh_token: string): Promise<AuthResponse>
 export function saveAuth(auth: AuthResponse): void {
   if (typeof window !== 'undefined') {
     localStorage.setItem('access_token', auth.access_token);
-    localStorage.setItem('refresh_token', auth.refresh_token);
-    // Only save user if it exists to prevent storing "undefined" string
+    // Note: refresh_token is stored in httpOnly cookie by backend, not localStorage
+    // This prevents XSS attacks from stealing the refresh token
     if (auth.user) {
       localStorage.setItem('user', JSON.stringify(auth.user));
     }
@@ -138,7 +142,7 @@ export function getUser(): User | null {
 export function clearAuth(): void {
   if (typeof window !== 'undefined') {
     localStorage.removeItem('access_token');
-    localStorage.removeItem('refresh_token');
+    // Note: refresh_token cookie is cleared by backend on logout
     localStorage.removeItem('user');
   }
 }
@@ -165,6 +169,7 @@ export async function validateToken(): Promise<User | null> {
         'Authorization': `Bearer ${token}`,
         'Content-Type': 'application/json',
       },
+      credentials: 'include', // Required for cross-subdomain requests
     });
 
     if (!res.ok) {

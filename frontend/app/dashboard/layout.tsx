@@ -1,13 +1,16 @@
-import { AuthGuard } from '@/components/auth-guard';
+'use client';
 
-export const metadata = {
-  title: 'Dashboard',
-};
+import { AuthGuard } from '@/components/auth-guard';
+import { DashboardShell } from './components';
 
 export default function DashboardLayout({
   children,
 }: {
   children: React.ReactNode;
 }) {
-  return <AuthGuard>{children}</AuthGuard>;
+  return (
+    <AuthGuard>
+      <DashboardShell>{children}</DashboardShell>
+    </AuthGuard>
+  );
 }

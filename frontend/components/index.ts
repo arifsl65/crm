@@ -9,3 +9,4 @@ export { AuthGuard } from './auth-guard';
 export { ThemeProvider, useTheme } from './theme-provider';
 export { QRModal } from './qr-modal';
 export { NotificationBell } from './notification-bell';
+export { TodayPanel } from './TodayPanel';

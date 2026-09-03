@@ -5,7 +5,16 @@ import Link from 'next/link';
 import { useAuth } from '@/components/auth-guard';
 import { Service, getServices, updateServiceStatus } from '@/lib/api';
 import { getStatusBadgeClass } from '@/lib/status';
-import { SkeletonTable } from '@/components';
+
+type ViewMode = 'kanban' | 'list';
+
+const STATUS_COLUMNS = [
+  { id: 'not_started', label: 'Not Started', color: 'gray' },
+  { id: 'in_progress', label: 'In Progress', color: 'blue' },
+  { id: 'review', label: 'Review', color: 'purple' },
+  { id: 'waiting', label: 'Waiting', color: 'yellow' },
+  { id: 'completed', label: 'Completed', color: 'green' },
+];
 
 export default function ServicesPage() {
   const { user } = useAuth();
@@ -13,17 +22,18 @@ export default function ServicesPage() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [search, setSearch] = useState('');
-  const [statusFilter, setStatusFilter] = useState('');
   const [priorityFilter, setPriorityFilter] = useState('');
+  const [viewMode, setViewMode] = useState<ViewMode>('kanban');
+  const [selectedService, setSelectedService] = useState<Service | null>(null);
+  const [draggedService, setDraggedService] = useState<Service | null>(null);
 
   const fetchServices = useCallback(async () => {
     try {
       setLoading(true);
       const data = await getServices({
         search: search || undefined,
-        status: statusFilter || undefined,
         priority: priorityFilter || undefined,
-        limit: 50,
+        limit: 100,
       });
       setServices(data.services || []);
       setError(null);
@@ -32,47 +42,52 @@ export default function ServicesPage() {
     } finally {
       setLoading(false);
     }
-  }, [search, statusFilter, priorityFilter]);
+  }, [search, priorityFilter]);
 
   useEffect(() => {
     fetchServices();
   }, [fetchServices]);
 
   const handleStatusChange = async (serviceId: string, newStatus: string) => {
-    // Fix #41: Store previous state for rollback on error
     const previousServices = [...services];
-    const service = services.find(s => s.id === serviceId);
-    const previousStatus = service?.status;
-
-    // Optimistic update
     setServices((prev) =>
       prev.map((s) => (s.id === serviceId ? { ...s, status: newStatus } : s))
     );
 
     try {
       await updateServiceStatus(serviceId, newStatus);
-      // Success - state is already updated
     } catch (err) {
-      // Rollback to previous state on error
       setServices(previousServices);
       setError(err instanceof Error ? err.message : 'Failed to update status');
-      console.error(`Failed to update service ${serviceId} from ${previousStatus} to ${newStatus}:`, err);
     }
   };
 
+  const handleDragStart = (service: Service) => {
+    setDraggedService(service);
+  };
 
-  const getPriorityBadgeClass = (priority: string) => {
+  const handleDragOver = (e: React.DragEvent) => {
+    e.preventDefault();
+  };
+
+  const handleDrop = (status: string) => {
+    if (draggedService && draggedService.status !== status) {
+      handleStatusChange(draggedService.id, status);
+    }
+    setDraggedService(null);
+  };
+
+  const getServicesByStatus = (status: string) => {
+    return services.filter((s) => s.status === status);
+  };
+
+  const getPriorityIcon = (priority: string) => {
     switch (priority) {
-      case 'urgent':
-        return 'bg-red-100 text-red-800 dark:bg-red-900 dark:text-red-200';
-      case 'high':
-        return 'bg-orange-100 text-orange-800 dark:bg-orange-900 dark:text-orange-200';
-      case 'normal':
-        return 'bg-gray-100 text-gray-800 dark:bg-gray-700 dark:text-gray-300';
-      case 'low':
-        return 'bg-blue-100 text-blue-800 dark:bg-blue-900 dark:text-blue-200';
-      default:
-        return 'bg-gray-100 text-gray-800 dark:bg-gray-700 dark:text-gray-300';
+      case 'urgent': return '🔴';
+      case 'high': return '🟠';
+      case 'normal': return '🟡';
+      case 'low': return '🟢';
+      default: return '⚪';
     }
   };
 
@@ -81,161 +96,482 @@ export default function ServicesPage() {
     return new Date(deadline) < new Date();
   };
 
+  const formatDeadline = (deadline: string | undefined) => {
+    if (!deadline) return null;
+    const date = new Date(deadline);
+    const now = new Date();
+    const daysUntil = Math.ceil((date.getTime() - now.getTime()) / (1000 * 60 * 60 * 24));
+
+    if (daysUntil < 0) return `${Math.abs(daysUntil)}d overdue`;
+    if (daysUntil === 0) return 'Today';
+    if (daysUntil === 1) return 'Tomorrow';
+    if (daysUntil <= 7) return `${daysUntil}d`;
+    return date.toLocaleDateString('en-GB', { day: 'numeric', month: 'short' });
+  };
+
   return (
-    <div className="min-h-screen bg-gray-50 dark:bg-slate-900">
+    <div className="h-full flex flex-col bg-gray-50 dark:bg-slate-900">
       {/* Header */}
-      <header className="bg-white dark:bg-slate-800 shadow">
-        <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-4 flex justify-between items-center">
-          <div className="flex items-center space-x-4">
-            <Link
-              href="/dashboard"
-              className="text-gray-500 hover:text-gray-700 dark:text-gray-400 dark:hover:text-gray-200"
-            >
-              <svg className="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M10 19l-7-7m0 0l7-7m-7 7h18" />
-              </svg>
-            </Link>
-            <h1 className="text-2xl font-bold text-gray-900 dark:text-white">Services</h1>
+      <div className="bg-white dark:bg-slate-800 border-b border-gray-200 dark:border-gray-700 px-6 py-4">
+        <div className="flex items-center justify-between">
+          <div>
+            <h1 className="text-xl font-semibold text-gray-900 dark:text-white flex items-center gap-2">
+              <span>📋</span> Services
+            </h1>
+            <p className="text-sm text-gray-500 dark:text-gray-400 mt-1">
+              {services.length} services
+            </p>
           </div>
-          {(user?.role === 'super_admin' || user?.role === 'tenant_admin' || user?.role === 'staff') && (
+          <div className="flex items-center gap-2">
+            {/* View Toggle */}
+            <div className="flex rounded-lg border border-gray-200 dark:border-gray-600 overflow-hidden">
+              <button
+                onClick={() => setViewMode('kanban')}
+                className={`px-3 py-1.5 text-sm font-medium ${
+                  viewMode === 'kanban'
+                    ? 'bg-blue-600 text-white'
+                    : 'bg-white dark:bg-slate-800 text-gray-700 dark:text-gray-300'
+                }`}
+              >
+                Kanban
+              </button>
+              <button
+                onClick={() => setViewMode('list')}
+                className={`px-3 py-1.5 text-sm font-medium ${
+                  viewMode === 'list'
+                    ? 'bg-blue-600 text-white'
+                    : 'bg-white dark:bg-slate-800 text-gray-700 dark:text-gray-300'
+                }`}
+              >
+                List
+              </button>
+            </div>
             <Link
               href="/dashboard/services/new"
-              className="inline-flex items-center px-4 py-2 bg-blue-600 text-white text-sm font-medium rounded-md hover:bg-blue-700 transition-colors"
+              className="px-4 py-2 bg-blue-600 text-white text-sm font-medium rounded-lg hover:bg-blue-700"
             >
-              <svg className="w-5 h-5 mr-2" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 6v6m0 0v6m0-6h6m-6 0H6" />
-              </svg>
-              Add Service
+              + Add Service
             </Link>
-          )}
-        </div>
-      </header>
-
-      {/* Main Content */}
-      <main className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-8">
-        {/* Filters */}
-        <div className="mb-6 flex flex-col sm:flex-row gap-4">
-          <div className="flex-1">
-            <input
-              type="text"
-              placeholder="Search services..."
-              value={search}
-              onChange={(e) => setSearch(e.target.value)}
-              className="w-full px-4 py-2 border border-gray-300 dark:border-gray-600 rounded-md bg-white dark:bg-slate-700 text-gray-900 dark:text-white placeholder-gray-500 dark:placeholder-gray-400 focus:ring-2 focus:ring-blue-500"
-            />
           </div>
-          <select
-            value={statusFilter}
-            onChange={(e) => setStatusFilter(e.target.value)}
-            className="px-4 py-2 border border-gray-300 dark:border-gray-600 rounded-md bg-white dark:bg-slate-700 text-gray-900 dark:text-white"
-          >
-            <option value="">All statuses</option>
-            <option value="not_started">Not Started</option>
-            <option value="in_progress">In Progress</option>
-            <option value="review">Review</option>
-            <option value="waiting">Waiting</option>
-            <option value="completed">Completed</option>
-            <option value="cancelled">Cancelled</option>
-          </select>
+        </div>
+
+        {/* Filters */}
+        <div className="mt-4 flex gap-3">
+          <input
+            type="text"
+            placeholder="Search services..."
+            value={search}
+            onChange={(e) => setSearch(e.target.value)}
+            className="flex-1 px-3 py-2 text-sm border border-gray-300 dark:border-gray-600 rounded-lg bg-white dark:bg-slate-700 text-gray-900 dark:text-white"
+          />
           <select
             value={priorityFilter}
             onChange={(e) => setPriorityFilter(e.target.value)}
-            className="px-4 py-2 border border-gray-300 dark:border-gray-600 rounded-md bg-white dark:bg-slate-700 text-gray-900 dark:text-white"
+            className="px-3 py-2 text-sm border border-gray-300 dark:border-gray-600 rounded-lg bg-white dark:bg-slate-700 text-gray-900 dark:text-white"
           >
-            <option value="">All priorities</option>
+            <option value="">All Priorities</option>
             <option value="urgent">Urgent</option>
             <option value="high">High</option>
             <option value="normal">Normal</option>
             <option value="low">Low</option>
           </select>
         </div>
+      </div>
 
-        {/* Error */}
-        {error && (
-          <div className="mb-6 p-4 bg-red-50 dark:bg-red-900/30 border border-red-200 dark:border-red-800 rounded-md">
-            <p className="text-red-700 dark:text-red-300">{error}</p>
+      {/* Error */}
+      {error && (
+        <div className="mx-6 mt-4 p-3 bg-red-50 dark:bg-red-900/30 rounded-lg text-red-700 dark:text-red-300 text-sm">
+          {error}
+        </div>
+      )}
+
+      {/* Content */}
+      <div className="flex-1 flex overflow-hidden">
+        {/* Main View */}
+        <div className={`${selectedService ? 'w-2/3' : 'flex-1'} overflow-hidden`}>
+          {loading ? (
+            <div className="flex items-center justify-center h-64">
+              <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-blue-600"></div>
+            </div>
+          ) : viewMode === 'kanban' ? (
+            <KanbanView
+              columns={STATUS_COLUMNS}
+              getServicesByStatus={getServicesByStatus}
+              onDragStart={handleDragStart}
+              onDragOver={handleDragOver}
+              onDrop={handleDrop}
+              onServiceClick={setSelectedService}
+              selectedService={selectedService}
+              getPriorityIcon={getPriorityIcon}
+              formatDeadline={formatDeadline}
+              isOverdue={isOverdue}
+            />
+          ) : (
+            <ListView
+              services={services}
+              onServiceClick={setSelectedService}
+              selectedService={selectedService}
+              handleStatusChange={handleStatusChange}
+              getPriorityIcon={getPriorityIcon}
+              formatDeadline={formatDeadline}
+              isOverdue={isOverdue}
+            />
+          )}
+        </div>
+
+        {/* Detail Panel */}
+        {selectedService && (
+          <div className="w-1/3 bg-white dark:bg-slate-800 border-l border-gray-200 dark:border-gray-700 overflow-y-auto">
+            <ServiceDetailPanel
+              service={selectedService}
+              onClose={() => setSelectedService(null)}
+              onStatusChange={handleStatusChange}
+            />
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+function KanbanView({
+  columns,
+  getServicesByStatus,
+  onDragStart,
+  onDragOver,
+  onDrop,
+  onServiceClick,
+  selectedService,
+  getPriorityIcon,
+  formatDeadline,
+  isOverdue,
+}: {
+  columns: { id: string; label: string; color: string }[];
+  getServicesByStatus: (status: string) => Service[];
+  onDragStart: (service: Service) => void;
+  onDragOver: (e: React.DragEvent) => void;
+  onDrop: (status: string) => void;
+  onServiceClick: (service: Service) => void;
+  selectedService: Service | null;
+  getPriorityIcon: (priority: string) => string;
+  formatDeadline: (deadline: string | undefined) => string | null;
+  isOverdue: (deadline: string | undefined) => boolean;
+}) {
+  const getColumnColor = (color: string) => {
+    switch (color) {
+      case 'blue': return 'border-blue-400';
+      case 'purple': return 'border-purple-400';
+      case 'yellow': return 'border-yellow-400';
+      case 'green': return 'border-green-400';
+      default: return 'border-gray-400';
+    }
+  };
+
+  return (
+    <div className="h-full overflow-x-auto p-4">
+      <div className="flex gap-4 h-full min-w-max">
+        {columns.map((column) => {
+          const columnServices = getServicesByStatus(column.id);
+          return (
+            <div
+              key={column.id}
+              className="w-72 flex-shrink-0 flex flex-col"
+              onDragOver={onDragOver}
+              onDrop={() => onDrop(column.id)}
+            >
+              {/* Column Header */}
+              <div className={`p-3 bg-white dark:bg-slate-800 rounded-t-lg border-t-4 ${getColumnColor(column.color)}`}>
+                <div className="flex items-center justify-between">
+                  <span className="text-sm font-semibold text-gray-700 dark:text-gray-300">
+                    {column.label}
+                  </span>
+                  <span className="px-2 py-0.5 text-xs font-medium bg-gray-100 dark:bg-slate-700 text-gray-600 dark:text-gray-400 rounded-full">
+                    {columnServices.length}
+                  </span>
+                </div>
+              </div>
+
+              {/* Column Content */}
+              <div className="flex-1 bg-gray-100 dark:bg-slate-900 rounded-b-lg p-2 space-y-2 overflow-y-auto">
+                {columnServices.map((service) => (
+                  <div
+                    key={service.id}
+                    draggable
+                    onDragStart={() => onDragStart(service)}
+                    onClick={() => onServiceClick(service)}
+                    className={`p-3 bg-white dark:bg-slate-800 rounded-lg shadow-sm cursor-pointer hover:shadow-md transition-shadow ${
+                      selectedService?.id === service.id ? 'ring-2 ring-blue-500' : ''
+                    }`}
+                  >
+                    <div className="flex items-start justify-between gap-2">
+                      <p className="text-sm font-medium text-gray-900 dark:text-white line-clamp-2">
+                        {service.name}
+                      </p>
+                      <span>{getPriorityIcon(service.priority)}</span>
+                    </div>
+                    <p className="text-xs text-gray-500 dark:text-gray-400 mt-1 truncate">
+                      {service.client_name || 'No client'}
+                    </p>
+                    <div className="flex items-center justify-between mt-2">
+                      {service.deadline && (
+                        <span className={`text-xs ${
+                          isOverdue(service.deadline)
+                            ? 'text-red-600 dark:text-red-400 font-medium'
+                            : 'text-gray-500 dark:text-gray-400'
+                        }`}>
+                          {formatDeadline(service.deadline)}
+                        </span>
+                      )}
+                      <div className="flex items-center gap-1 text-xs text-gray-400">
+                        <span>📄</span>
+                        <span>{service.docs_received}/{service.docs_required}</span>
+                      </div>
+                    </div>
+                  </div>
+                ))}
+                {columnServices.length === 0 && (
+                  <div className="p-4 text-center text-xs text-gray-400 dark:text-gray-500">
+                    Drop services here
+                  </div>
+                )}
+              </div>
+            </div>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
+
+function ListView({
+  services,
+  onServiceClick,
+  selectedService,
+  handleStatusChange,
+  getPriorityIcon,
+  formatDeadline,
+  isOverdue,
+}: {
+  services: Service[];
+  onServiceClick: (service: Service) => void;
+  selectedService: Service | null;
+  handleStatusChange: (serviceId: string, newStatus: string) => void;
+  getPriorityIcon: (priority: string) => string;
+  formatDeadline: (deadline: string | undefined) => string | null;
+  isOverdue: (deadline: string | undefined) => boolean;
+}) {
+  if (services.length === 0) {
+    return (
+      <div className="flex items-center justify-center h-64">
+        <div className="text-center">
+          <span className="text-4xl">📋</span>
+          <p className="mt-2 text-gray-600 dark:text-gray-400">No services found</p>
+        </div>
+      </div>
+    );
+  }
+
+  return (
+    <div className="h-full overflow-y-auto">
+      <table className="w-full">
+        <thead className="bg-gray-50 dark:bg-slate-700 sticky top-0">
+          <tr>
+            <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 dark:text-gray-400 uppercase">Service</th>
+            <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 dark:text-gray-400 uppercase">Client</th>
+            <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 dark:text-gray-400 uppercase">Status</th>
+            <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 dark:text-gray-400 uppercase">Priority</th>
+            <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 dark:text-gray-400 uppercase">Deadline</th>
+            <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 dark:text-gray-400 uppercase">Docs</th>
+          </tr>
+        </thead>
+        <tbody className="divide-y divide-gray-200 dark:divide-gray-700">
+          {services.map((service) => (
+            <tr
+              key={service.id}
+              onClick={() => onServiceClick(service)}
+              className={`cursor-pointer hover:bg-gray-50 dark:hover:bg-slate-800 ${
+                selectedService?.id === service.id ? 'bg-blue-50 dark:bg-blue-900/20' : 'bg-white dark:bg-slate-800'
+              }`}
+            >
+              <td className="px-4 py-3">
+                <p className="text-sm font-medium text-gray-900 dark:text-white">{service.name}</p>
+                {service.period && (
+                  <p className="text-xs text-gray-500 dark:text-gray-400">{service.period}</p>
+                )}
+              </td>
+              <td className="px-4 py-3 text-sm text-gray-500 dark:text-gray-400">
+                {service.client_name || '-'}
+              </td>
+              <td className="px-4 py-3">
+                <select
+                  value={service.status}
+                  onChange={(e) => { e.stopPropagation(); handleStatusChange(service.id, e.target.value); }}
+                  onClick={(e) => e.stopPropagation()}
+                  className={`px-2 py-1 text-xs font-medium rounded-full border-0 cursor-pointer ${getStatusBadgeClass(service.status)}`}
+                >
+                  <option value="not_started">Not Started</option>
+                  <option value="in_progress">In Progress</option>
+                  <option value="review">Review</option>
+                  <option value="waiting">Waiting</option>
+                  <option value="completed">Completed</option>
+                  <option value="cancelled">Cancelled</option>
+                </select>
+              </td>
+              <td className="px-4 py-3">
+                <span className="flex items-center gap-1 text-sm">
+                  {getPriorityIcon(service.priority)}
+                  <span className="text-gray-600 dark:text-gray-400 capitalize">{service.priority}</span>
+                </span>
+              </td>
+              <td className="px-4 py-3">
+                {service.deadline ? (
+                  <span className={`text-sm ${
+                    isOverdue(service.deadline) ? 'text-red-600 dark:text-red-400 font-medium' : 'text-gray-500 dark:text-gray-400'
+                  }`}>
+                    {formatDeadline(service.deadline)}
+                  </span>
+                ) : (
+                  <span className="text-gray-400">-</span>
+                )}
+              </td>
+              <td className="px-4 py-3 text-sm text-gray-500 dark:text-gray-400">
+                {service.docs_received}/{service.docs_required}
+              </td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+    </div>
+  );
+}
+
+function ServiceDetailPanel({
+  service,
+  onClose,
+  onStatusChange,
+}: {
+  service: Service;
+  onClose: () => void;
+  onStatusChange: (serviceId: string, newStatus: string) => void;
+}) {
+  const [activeTab, setActiveTab] = useState<'details' | 'documents' | 'activity'>('details');
+
+  const docsProgress = service.docs_required > 0
+    ? Math.round((service.docs_received / service.docs_required) * 100)
+    : 0;
+
+  return (
+    <div className="h-full flex flex-col">
+      {/* Header */}
+      <div className="p-4 border-b border-gray-200 dark:border-gray-700 flex items-start justify-between">
+        <div className="flex-1 min-w-0">
+          <h2 className="text-lg font-semibold text-gray-900 dark:text-white truncate">{service.name}</h2>
+          <p className="text-sm text-gray-500 dark:text-gray-400">{service.client_name || 'No client'}</p>
+        </div>
+        <button onClick={onClose} className="text-gray-400 hover:text-gray-600 dark:hover:text-gray-200 ml-2">
+          ✕
+        </button>
+      </div>
+
+      {/* Tabs */}
+      <div className="border-b border-gray-200 dark:border-gray-700 px-4">
+        <div className="flex gap-4">
+          {(['details', 'documents', 'activity'] as const).map((tab) => (
+            <button
+              key={tab}
+              onClick={() => setActiveTab(tab)}
+              className={`py-3 text-sm font-medium border-b-2 ${
+                activeTab === tab
+                  ? 'border-blue-600 text-blue-600 dark:text-blue-400'
+                  : 'border-transparent text-gray-500 dark:text-gray-400'
+              }`}
+            >
+              {tab.charAt(0).toUpperCase() + tab.slice(1)}
+            </button>
+          ))}
+        </div>
+      </div>
+
+      {/* Content */}
+      <div className="flex-1 overflow-y-auto p-4">
+        {activeTab === 'details' && (
+          <div className="space-y-4">
+            {/* Status */}
+            <div className="bg-gray-50 dark:bg-slate-700 rounded-lg p-4">
+              <h3 className="text-sm font-semibold text-gray-700 dark:text-gray-300 mb-3">Status</h3>
+              <select
+                value={service.status}
+                onChange={(e) => onStatusChange(service.id, e.target.value)}
+                className="w-full px-3 py-2 text-sm border border-gray-300 dark:border-gray-600 rounded-lg bg-white dark:bg-slate-600 text-gray-900 dark:text-white"
+              >
+                <option value="not_started">Not Started</option>
+                <option value="in_progress">In Progress</option>
+                <option value="review">Review</option>
+                <option value="waiting">Waiting</option>
+                <option value="completed">Completed</option>
+                <option value="cancelled">Cancelled</option>
+              </select>
+            </div>
+
+            {/* Details */}
+            <div className="bg-gray-50 dark:bg-slate-700 rounded-lg p-4">
+              <h3 className="text-sm font-semibold text-gray-700 dark:text-gray-300 mb-3">Details</h3>
+              <div className="space-y-2 text-sm">
+                <p><span className="text-gray-500">Period:</span> {service.period || '-'}</p>
+                <p><span className="text-gray-500">Priority:</span> {service.priority}</p>
+                <p><span className="text-gray-500">Deadline:</span> {service.deadline || '-'}</p>
+                <p><span className="text-gray-500">Assigned to:</span> {service.staff_name || '-'}</p>
+              </div>
+            </div>
+
+            {/* Documents Progress */}
+            <div className="bg-gray-50 dark:bg-slate-700 rounded-lg p-4">
+              <h3 className="text-sm font-semibold text-gray-700 dark:text-gray-300 mb-3">Documents</h3>
+              <div className="flex items-center gap-3">
+                <div className="flex-1 h-2 bg-gray-200 dark:bg-slate-600 rounded-full">
+                  <div
+                    className={`h-full rounded-full ${docsProgress === 100 ? 'bg-green-500' : 'bg-blue-500'}`}
+                    style={{ width: `${docsProgress}%` }}
+                  />
+                </div>
+                <span className="text-sm text-gray-600 dark:text-gray-400">
+                  {service.docs_received}/{service.docs_required}
+                </span>
+              </div>
+            </div>
+
+            {/* Quick Actions */}
+            <div className="grid grid-cols-2 gap-2">
+              <button className="p-3 text-sm font-medium text-gray-700 dark:text-gray-300 bg-gray-100 dark:bg-slate-700 rounded-lg hover:bg-gray-200 dark:hover:bg-slate-600">
+                📧 Email Client
+              </button>
+              <button className="p-3 text-sm font-medium text-gray-700 dark:text-gray-300 bg-gray-100 dark:bg-slate-700 rounded-lg hover:bg-gray-200 dark:hover:bg-slate-600">
+                📄 Request Docs
+              </button>
+              <button className="p-3 text-sm font-medium text-gray-700 dark:text-gray-300 bg-gray-100 dark:bg-slate-700 rounded-lg hover:bg-gray-200 dark:hover:bg-slate-600">
+                📝 Add Note
+              </button>
+              <button className="p-3 text-sm font-medium text-gray-700 dark:text-gray-300 bg-gray-100 dark:bg-slate-700 rounded-lg hover:bg-gray-200 dark:hover:bg-slate-600">
+                👤 Reassign
+              </button>
+            </div>
           </div>
         )}
 
-        {/* Table */}
-        <div className="bg-white dark:bg-slate-800 rounded-lg shadow overflow-hidden">
-          {loading ? (
-            <div className="p-6">
-              <SkeletonTable rows={5} columns={6} />
-            </div>
-          ) : services.length === 0 ? (
-            <div className="p-12 text-center">
-              <svg className="mx-auto h-12 w-12 text-gray-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 11H5m14 0a2 2 0 012 2v6a2 2 0 01-2 2H5a2 2 0 01-2-2v-6a2 2 0 012-2m14 0V9a2 2 0 00-2-2M5 11V9a2 2 0 012-2m0 0V5a2 2 0 012-2h6a2 2 0 012 2v2M7 7h10" />
-              </svg>
-              <h3 className="mt-2 text-sm font-medium text-gray-900 dark:text-white">No services</h3>
-              <p className="mt-1 text-sm text-gray-500 dark:text-gray-400">
-                Get started by creating a new service.
-              </p>
-            </div>
-          ) : (
-            <table className="min-w-full divide-y divide-gray-200 dark:divide-gray-700">
-              <thead className="bg-gray-50 dark:bg-slate-700">
-                <tr>
-                  <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 dark:text-gray-300 uppercase">Name</th>
-                  <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 dark:text-gray-300 uppercase">Client</th>
-                  <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 dark:text-gray-300 uppercase">Status</th>
-                  <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 dark:text-gray-300 uppercase">Priority</th>
-                  <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 dark:text-gray-300 uppercase">Deadline</th>
-                  <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 dark:text-gray-300 uppercase">Docs</th>
-                </tr>
-              </thead>
-              <tbody className="divide-y divide-gray-200 dark:divide-gray-700">
-                {services.map((service) => (
-                  <tr key={service.id} className="hover:bg-gray-50 dark:hover:bg-slate-700">
-                    <td className="px-6 py-4">
-                      <div className="text-sm font-medium text-gray-900 dark:text-white">{service.name}</div>
-                      {service.period && (
-                        <div className="text-xs text-gray-500 dark:text-gray-400">{service.period}</div>
-                      )}
-                    </td>
-                    <td className="px-6 py-4 text-sm text-gray-500 dark:text-gray-400">
-                      {service.client_name || '-'}
-                    </td>
-                    <td className="px-6 py-4">
-                      <select
-                        value={service.status}
-                        onChange={(e) => handleStatusChange(service.id, e.target.value)}
-                        className={`px-2 py-1 text-xs font-medium rounded-full border-0 cursor-pointer ${getStatusBadgeClass(service.status)}`}
-                      >
-                        <option value="not_started">Not Started</option>
-                        <option value="in_progress">In Progress</option>
-                        <option value="review">Review</option>
-                        <option value="waiting">Waiting</option>
-                        <option value="completed">Completed</option>
-                        <option value="cancelled">Cancelled</option>
-                      </select>
-                    </td>
-                    <td className="px-6 py-4">
-                      <span className={`px-2 py-1 text-xs font-medium rounded-full ${getPriorityBadgeClass(service.priority)}`}>
-                        {service.priority}
-                      </span>
-                    </td>
-                    <td className="px-6 py-4 text-sm">
-                      {service.deadline ? (
-                        <span className={isOverdue(service.deadline) ? 'text-red-600 dark:text-red-400 font-medium' : 'text-gray-500 dark:text-gray-400'}>
-                          {service.deadline}
-                          {isOverdue(service.deadline) && ' (Overdue)'}
-                        </span>
-                      ) : (
-                        <span className="text-gray-400">-</span>
-                      )}
-                    </td>
-                    <td className="px-6 py-4 text-sm text-gray-500 dark:text-gray-400">
-                      {service.docs_received}/{service.docs_required}
-                    </td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          )}
-        </div>
-      </main>
+        {activeTab === 'documents' && (
+          <div className="text-center py-8 text-gray-500 dark:text-gray-400">
+            <span className="text-4xl">📄</span>
+            <p className="mt-2">Document list coming soon</p>
+          </div>
+        )}
+
+        {activeTab === 'activity' && (
+          <div className="text-center py-8 text-gray-500 dark:text-gray-400">
+            <span className="text-4xl">📜</span>
+            <p className="mt-2">Activity log coming soon</p>
+          </div>
+        )}
+      </div>
     </div>
   );
 }

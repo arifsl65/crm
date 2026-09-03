@@ -50,6 +50,7 @@ services:
       - JWT_SECRET_KEY=${JWT_SECRET_KEY}
       - CORS_ALLOWED_ORIGINS=${CORS_ALLOWED_ORIGINS}
       - FRONTEND_URL=${FRONTEND_URL:-https://crm.irislondonshoes.com}
+      - COOKIE_DOMAIN=${COOKIE_DOMAIN:-.irislondonshoes.com}
       # Python AI service (internal)
       - PYTHON_AI_URL=http://python-ai:8000
       - PYTHON_AI_TIMEOUT=30s

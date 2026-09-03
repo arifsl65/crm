@@ -61,18 +61,19 @@ RUN CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build \
 # -----------------------------------------------------------------------------
 # Production Stage
 # -----------------------------------------------------------------------------
-FROM gcr.io/distroless/static:nonroot AS production
+FROM alpine:3.20 AS production
+
+# Install CA certificates for TLS
+RUN apk add --no-cache ca-certificates && \
+    adduser -D -u 1000 appuser
 
 WORKDIR /app
 
 # Copy binary from builder
 COPY --from=builder /app/server /app/server
 
-# Copy CA certificates for TLS
-COPY --from=builder /etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/
-
 # Use non-root user
-USER nonroot:nonroot
+USER appuser
 
 # Expose port
 EXPOSE 8080

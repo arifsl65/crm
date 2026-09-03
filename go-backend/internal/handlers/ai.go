@@ -9,6 +9,8 @@ import (
 	"io"
 	"net/http"
 	"strings"
+	"sync"
+	"time"
 
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
@@ -18,15 +20,87 @@ import (
 	"github.com/accountant-crm/go-backend/internal/middleware"
 )
 
+// AICircuitBreaker implements a simple circuit breaker pattern for AI service.
+type AICircuitBreaker struct {
+	mu            sync.RWMutex
+	failures      int
+	lastFailure   time.Time
+	threshold     int
+	resetTimeout  time.Duration
+	state         AICircuitState
+}
+
+// AICircuitState represents the state of the circuit breaker.
+type AICircuitState int
+
+const (
+	AICircuitClosed AICircuitState = iota
+	AICircuitOpen
+	AICircuitHalfOpen
+)
+
+func NewAICircuitBreaker(threshold int, resetTimeout time.Duration) *AICircuitBreaker {
+	return &AICircuitBreaker{
+		threshold:    threshold,
+		resetTimeout: resetTimeout,
+		state:        AICircuitClosed,
+	}
+}
+
+func (cb *AICircuitBreaker) Allow() bool {
+	cb.mu.RLock()
+	defer cb.mu.RUnlock()
+
+	switch cb.state {
+	case AICircuitClosed:
+		return true
+	case AICircuitOpen:
+		// Check if reset timeout has passed
+		if time.Since(cb.lastFailure) > cb.resetTimeout {
+			return true // Allow one request to test
+		}
+		return false
+	case AICircuitHalfOpen:
+		return true
+	}
+	return false
+}
+
+func (cb *AICircuitBreaker) RecordSuccess() {
+	cb.mu.Lock()
+	defer cb.mu.Unlock()
+	cb.failures = 0
+	cb.state = AICircuitClosed
+}
+
+func (cb *AICircuitBreaker) RecordFailure() {
+	cb.mu.Lock()
+	defer cb.mu.Unlock()
+	cb.failures++
+	cb.lastFailure = time.Now()
+	if cb.failures >= cb.threshold {
+		cb.state = AICircuitOpen
+	}
+}
+
+func (cb *AICircuitBreaker) State() AICircuitState {
+	cb.mu.RLock()
+	defer cb.mu.RUnlock()
+	return cb.state
+}
+
 // AIHandler handles AI service proxy endpoints.
 type AIHandler struct {
-	client *ai.Client
+	client  *ai.Client
+	circuit *AICircuitBreaker
 }
 
 // NewAIHandler creates a new AI handler.
 func NewAIHandler(client *ai.Client) *AIHandler {
 	return &AIHandler{
 		client: client,
+		// Circuit breaker: 5 failures -> 30 second timeout
+		circuit: NewAICircuitBreaker(5, 30*time.Second),
 	}
 }
 
@@ -47,10 +121,21 @@ func (h *AIHandler) ExtractDocument(c *gin.Context) {
 		return
 	}
 
+	// Check circuit breaker
+	if !h.circuit.Allow() {
+		log.Warn().Msg("AI service circuit breaker is open")
+		c.JSON(http.StatusServiceUnavailable, gin.H{
+			"error":   "service_unavailable",
+			"message": "AI service is temporarily unavailable, please try again later",
+		})
+		return
+	}
+
 	ctx := h.contextWithRequestID(c)
 
 	result, err := h.client.ExtractText(ctx, req.FileKey)
 	if err != nil {
+		h.circuit.RecordFailure()
 		log.Error().Err(err).Str("file_key", req.FileKey).Msg("Failed to extract document text")
 		c.JSON(http.StatusBadGateway, gin.H{
 			"error":   "ai_service_error",
@@ -58,6 +143,8 @@ func (h *AIHandler) ExtractDocument(c *gin.Context) {
 		})
 		return
 	}
+
+	h.circuit.RecordSuccess()
 
 	if result.Error != "" {
 		c.JSON(http.StatusUnprocessableEntity, gin.H{
@@ -87,10 +174,21 @@ func (h *AIHandler) ClassifyDocument(c *gin.Context) {
 		return
 	}
 
+	// Check circuit breaker
+	if !h.circuit.Allow() {
+		log.Warn().Msg("AI service circuit breaker is open")
+		c.JSON(http.StatusServiceUnavailable, gin.H{
+			"error":   "service_unavailable",
+			"message": "AI service is temporarily unavailable, please try again later",
+		})
+		return
+	}
+
 	ctx := h.contextWithRequestID(c)
 
 	result, err := h.client.ClassifyDocument(ctx, req.FileKey)
 	if err != nil {
+		h.circuit.RecordFailure()
 		log.Error().Err(err).Str("file_key", req.FileKey).Msg("Failed to classify document")
 		c.JSON(http.StatusBadGateway, gin.H{
 			"error":   "ai_service_error",
@@ -98,6 +196,8 @@ func (h *AIHandler) ClassifyDocument(c *gin.Context) {
 		})
 		return
 	}
+
+	h.circuit.RecordSuccess()
 
 	if result.Error != "" {
 		c.JSON(http.StatusUnprocessableEntity, gin.H{
@@ -127,10 +227,21 @@ func (h *AIHandler) Chat(c *gin.Context) {
 		return
 	}
 
+	// Check circuit breaker
+	if !h.circuit.Allow() {
+		log.Warn().Msg("AI service circuit breaker is open")
+		c.JSON(http.StatusServiceUnavailable, gin.H{
+			"error":   "service_unavailable",
+			"message": "AI service is temporarily unavailable, please try again later",
+		})
+		return
+	}
+
 	ctx := h.contextWithRequestID(c)
 
 	result, err := h.client.ChatComplete(ctx, req.Message)
 	if err != nil {
+		h.circuit.RecordFailure()
 		log.Error().Err(err).Msg("Failed to complete chat")
 		c.JSON(http.StatusBadGateway, gin.H{
 			"error":   "ai_service_error",
@@ -138,6 +249,8 @@ func (h *AIHandler) Chat(c *gin.Context) {
 		})
 		return
 	}
+
+	h.circuit.RecordSuccess()
 
 	if result.Error != "" {
 		c.JSON(http.StatusUnprocessableEntity, gin.H{
@@ -167,10 +280,21 @@ func (h *AIHandler) ExtractFormData(c *gin.Context) {
 		return
 	}
 
+	// Check circuit breaker
+	if !h.circuit.Allow() {
+		log.Warn().Msg("AI service circuit breaker is open")
+		c.JSON(http.StatusServiceUnavailable, gin.H{
+			"error":   "service_unavailable",
+			"message": "AI service is temporarily unavailable, please try again later",
+		})
+		return
+	}
+
 	ctx := h.contextWithRequestID(c)
 
 	result, err := h.client.ExtractFormData(ctx, req.FileKey)
 	if err != nil {
+		h.circuit.RecordFailure()
 		log.Error().Err(err).Str("file_key", req.FileKey).Msg("Failed to extract form data")
 		c.JSON(http.StatusBadGateway, gin.H{
 			"error":   "ai_service_error",
@@ -178,6 +302,8 @@ func (h *AIHandler) ExtractFormData(c *gin.Context) {
 		})
 		return
 	}
+
+	h.circuit.RecordSuccess()
 
 	if result.Error != "" {
 		c.JSON(http.StatusUnprocessableEntity, gin.H{
@@ -604,6 +730,16 @@ func (h *AIHandler) AnalyzeClientRisk(c *gin.Context) {
 		return
 	}
 
+	// Check circuit breaker
+	if !h.circuit.Allow() {
+		log.Warn().Msg("AI service circuit breaker is open")
+		c.JSON(http.StatusServiceUnavailable, gin.H{
+			"error":   "service_unavailable",
+			"message": "AI service is temporarily unavailable, please try again later",
+		})
+		return
+	}
+
 	ctx := h.contextWithRequestID(c)
 
 	result, err := h.client.AnalyzeClientRisk(ctx, ai.ClientRiskRequest{
@@ -619,6 +755,7 @@ func (h *AIHandler) AnalyzeClientRisk(c *gin.Context) {
 		RelationshipLengthMonths: req.RelationshipLengthMonths,
 	})
 	if err != nil {
+		h.circuit.RecordFailure()
 		log.Error().Err(err).Str("client_id", req.ClientID).Msg("Failed to analyze client risk")
 		c.JSON(http.StatusBadGateway, gin.H{
 			"error":   "ai_service_error",
@@ -626,6 +763,8 @@ func (h *AIHandler) AnalyzeClientRisk(c *gin.Context) {
 		})
 		return
 	}
+
+	h.circuit.RecordSuccess()
 
 	if result.Error != "" {
 		c.JSON(http.StatusUnprocessableEntity, gin.H{
@@ -667,6 +806,16 @@ func (h *AIHandler) AnalyzeServiceRisk(c *gin.Context) {
 		return
 	}
 
+	// Check circuit breaker
+	if !h.circuit.Allow() {
+		log.Warn().Msg("AI service circuit breaker is open")
+		c.JSON(http.StatusServiceUnavailable, gin.H{
+			"error":   "service_unavailable",
+			"message": "AI service is temporarily unavailable, please try again later",
+		})
+		return
+	}
+
 	ctx := h.contextWithRequestID(c)
 
 	result, err := h.client.AnalyzeServiceRisk(ctx, ai.ServiceRiskRequest{
@@ -685,6 +834,7 @@ func (h *AIHandler) AnalyzeServiceRisk(c *gin.Context) {
 		ClientResponsiveness: req.ClientResponsiveness,
 	})
 	if err != nil {
+		h.circuit.RecordFailure()
 		log.Error().Err(err).Str("service_id", req.ServiceID).Msg("Failed to analyze service risk")
 		c.JSON(http.StatusBadGateway, gin.H{
 			"error":   "ai_service_error",
@@ -692,6 +842,8 @@ func (h *AIHandler) AnalyzeServiceRisk(c *gin.Context) {
 		})
 		return
 	}
+
+	h.circuit.RecordSuccess()
 
 	if result.Error != "" {
 		c.JSON(http.StatusUnprocessableEntity, gin.H{
@@ -1096,6 +1248,24 @@ func (h *AIHandler) NotImplementedAI(c *gin.Context) {
 	c.JSON(http.StatusNotImplemented, gin.H{
 		"error":   "not_implemented",
 		"message": "This AI endpoint is not yet implemented. Use Python service directly.",
+	})
+}
+
+// Status returns the current state of the AI service circuit breaker.
+// GET /api/v1/ai/status
+func (h *AIHandler) Status(c *gin.Context) {
+	state := h.circuit.State()
+	stateStr := "closed"
+	switch state {
+	case AICircuitOpen:
+		stateStr = "open"
+	case AICircuitHalfOpen:
+		stateStr = "half-open"
+	}
+
+	c.JSON(http.StatusOK, gin.H{
+		"circuit_breaker": stateStr,
+		"service":         "python-ai",
 	})
 }
 
