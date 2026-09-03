@@ -8,7 +8,6 @@ interface ActivityItem {
   description: string;
   user_name?: string;
   created_at: string;
-  type: 'document' | 'client' | 'service' | 'email' | 'other';
 }
 
 interface ActivityPanelProps {
@@ -27,13 +26,11 @@ export function ActivityPanel({ onClose }: ActivityPanelProps) {
         setLoading(true);
         const data: DashboardStats = await getDashboardStats();
 
-        // Transform recent_activity to our format
         const items: ActivityItem[] = (data.recent_activity || []).map((activity) => ({
           id: activity.id,
           description: activity.description,
           user_name: activity.user_name,
           created_at: activity.created_at,
-          type: getActivityType(activity.description),
         }));
 
         setActivities(items);
@@ -59,12 +56,27 @@ export function ActivityPanel({ onClose }: ActivityPanelProps) {
   // Group activities by date
   const groupedActivities = groupByDate(filteredActivities);
 
+  const handleExport = () => {
+    // Export activity log as CSV
+    const csv = filteredActivities.map(a => {
+      const date = new Date(a.created_at);
+      return `${date.toLocaleDateString()},${date.toLocaleTimeString()},${a.user_name || 'System'},${a.description}`;
+    }).join('\n');
+
+    const blob = new Blob([`Date,Time,User,Action\n${csv}`], { type: 'text/csv' });
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement('a');
+    link.href = url;
+    link.download = 'activity-log.csv';
+    link.click();
+  };
+
   if (loading) {
     return (
       <div className="h-full flex flex-col">
         <div className="p-4 border-b border-gray-200 dark:border-gray-700 flex items-center justify-between">
           <h2 className="text-lg font-semibold text-gray-900 dark:text-white flex items-center gap-2">
-            <span>📜</span> Activity
+            <span>📜</span> ACTIVITY
           </h2>
           {onClose && (
             <button onClick={onClose} className="text-gray-400 hover:text-gray-600 dark:hover:text-gray-200">
@@ -84,7 +96,7 @@ export function ActivityPanel({ onClose }: ActivityPanelProps) {
       {/* Header */}
       <div className="p-4 border-b border-gray-200 dark:border-gray-700 flex items-center justify-between">
         <h2 className="text-lg font-semibold text-gray-900 dark:text-white flex items-center gap-2">
-          <span>📜</span> Activity Log
+          <span>📜</span> ACTIVITY
         </h2>
         {onClose && (
           <button onClick={onClose} className="text-gray-400 hover:text-gray-600 dark:hover:text-gray-200">
@@ -93,25 +105,10 @@ export function ActivityPanel({ onClose }: ActivityPanelProps) {
         )}
       </div>
 
-      {/* Filter */}
-      <div className="px-4 py-3 border-b border-gray-200 dark:border-gray-700 flex items-center gap-2">
-        <label className="text-sm text-gray-600 dark:text-gray-400">Filter by:</label>
-        <select
-          value={filterStaff}
-          onChange={(e) => setFilterStaff(e.target.value)}
-          className="text-sm px-2 py-1 border border-gray-300 dark:border-gray-600 rounded bg-white dark:bg-slate-700 text-gray-900 dark:text-white"
-        >
-          <option value="all">All Staff</option>
-          {staffNames.map((name) => (
-            <option key={name} value={name}>{name}</option>
-          ))}
-        </select>
-      </div>
-
       {/* Content */}
       <div className="flex-1 overflow-y-auto p-4">
         {error && (
-          <div className="p-3 bg-red-50 dark:bg-red-900/30 rounded-lg text-red-700 dark:text-red-300 text-sm">
+          <div className="p-3 bg-red-50 dark:bg-red-900/30 rounded-lg text-red-700 dark:text-red-300 text-sm mb-4">
             {error}
           </div>
         )}
@@ -125,12 +122,22 @@ export function ActivityPanel({ onClose }: ActivityPanelProps) {
 
         {Object.entries(groupedActivities).map(([date, items]) => (
           <div key={date} className="mb-6">
-            <h3 className="text-xs font-semibold text-gray-500 dark:text-gray-400 uppercase mb-3">
+            <h3 className="text-sm font-semibold text-gray-700 dark:text-gray-300 mb-3">
               {date}
             </h3>
-            <div className="space-y-3">
+            <div className="space-y-2">
               {items.map((activity) => (
-                <ActivityRow key={activity.id} activity={activity} />
+                <div key={activity.id} className="flex items-start gap-3 text-sm">
+                  <span className="text-gray-500 dark:text-gray-400 font-mono w-12 flex-shrink-0">
+                    {formatTime(activity.created_at)}
+                  </span>
+                  <span className="text-gray-700 dark:text-gray-300">
+                    {activity.user_name && (
+                      <span className="font-medium">{activity.user_name} </span>
+                    )}
+                    {activity.description}
+                  </span>
+                </div>
               ))}
             </div>
           </div>
@@ -138,78 +145,31 @@ export function ActivityPanel({ onClose }: ActivityPanelProps) {
       </div>
 
       {/* Footer */}
-      <div className="p-4 border-t border-gray-200 dark:border-gray-700 flex gap-2">
-        <button className="flex-1 px-4 py-2 text-sm font-medium text-gray-700 dark:text-gray-300 bg-gray-100 dark:bg-slate-700 rounded-lg hover:bg-gray-200 dark:hover:bg-slate-600">
+      <div className="p-4 border-t border-gray-200 dark:border-gray-700 flex items-center gap-3">
+        <select
+          value={filterStaff}
+          onChange={(e) => setFilterStaff(e.target.value)}
+          className="flex-1 text-sm px-3 py-2 border border-gray-300 dark:border-gray-600 rounded-lg bg-white dark:bg-slate-700 text-gray-900 dark:text-white"
+        >
+          <option value="all">Filter by Staff</option>
+          {staffNames.map((name) => (
+            <option key={name} value={name}>{name}</option>
+          ))}
+        </select>
+        <button
+          onClick={handleExport}
+          className="px-4 py-2 text-sm font-medium text-gray-700 dark:text-gray-300 bg-gray-100 dark:bg-slate-700 rounded-lg hover:bg-gray-200 dark:hover:bg-slate-600"
+        >
           Export
         </button>
-        <button className="flex-1 px-4 py-2 text-sm font-medium text-gray-700 dark:text-gray-300 bg-gray-100 dark:bg-slate-700 rounded-lg hover:bg-gray-200 dark:hover:bg-slate-600">
-          View Full Log
-        </button>
       </div>
     </div>
   );
 }
 
-function ActivityRow({ activity }: { activity: ActivityItem }) {
-  const getIcon = () => {
-    switch (activity.type) {
-      case 'document': return '📄';
-      case 'client': return '👤';
-      case 'service': return '📋';
-      case 'email': return '📧';
-      default: return '📌';
-    }
-  };
-
-  const getIconBg = () => {
-    switch (activity.type) {
-      case 'document': return 'bg-blue-100 dark:bg-blue-900/30';
-      case 'client': return 'bg-green-100 dark:bg-green-900/30';
-      case 'service': return 'bg-purple-100 dark:bg-purple-900/30';
-      case 'email': return 'bg-orange-100 dark:bg-orange-900/30';
-      default: return 'bg-gray-100 dark:bg-gray-700';
-    }
-  };
-
-  const formatTime = (dateString: string) => {
-    const date = new Date(dateString);
-    return date.toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit' });
-  };
-
-  return (
-    <div className="flex items-start gap-3">
-      <div className={`w-8 h-8 rounded-full flex items-center justify-center flex-shrink-0 ${getIconBg()}`}>
-        <span className="text-sm">{getIcon()}</span>
-      </div>
-      <div className="flex-1 min-w-0">
-        <p className="text-sm text-gray-900 dark:text-white">
-          {activity.description}
-        </p>
-        <p className="text-xs text-gray-500 dark:text-gray-400 mt-0.5">
-          {activity.user_name && <span className="font-medium">{activity.user_name}</span>}
-          {activity.user_name && ' · '}
-          {formatTime(activity.created_at)}
-        </p>
-      </div>
-    </div>
-  );
-}
-
-function getActivityType(description: string): ActivityItem['type'] {
-  const lower = description.toLowerCase();
-  if (lower.includes('document') || lower.includes('upload') || lower.includes('approved') || lower.includes('rejected')) {
-    return 'document';
-  }
-  if (lower.includes('client') || lower.includes('added') || lower.includes('created')) {
-    return 'client';
-  }
-  if (lower.includes('service') || lower.includes('completed') || lower.includes('status')) {
-    return 'service';
-  }
-  if (lower.includes('email') || lower.includes('sent') || lower.includes('chase')) {
-    return 'email';
-  }
-  return 'other';
+function formatTime(dateString: string): string {
+  const date = new Date(dateString);
+  return date.toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit' });
 }
 
 function groupByDate(activities: ActivityItem[]): Record<string, ActivityItem[]> {

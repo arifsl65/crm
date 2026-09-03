@@ -2,23 +2,79 @@
 
 import { useEffect, useState } from 'react';
 import Link from 'next/link';
-import { getDashboardStats, DashboardStats } from '@/lib/api';
+import { getDashboardStats, getServices, getUsers, DashboardStats, Service } from '@/lib/api';
 
 interface OverviewPanelProps {
   onClose?: () => void;
+}
+
+interface PriorityTask {
+  id: string;
+  title: string;
+  status: string;
 }
 
 export function OverviewPanel({ onClose }: OverviewPanelProps) {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [stats, setStats] = useState<DashboardStats | null>(null);
+  const [staffCount, setStaffCount] = useState(0);
+  const [priorityTasks, setPriorityTasks] = useState<PriorityTask[]>([]);
 
   useEffect(() => {
-    async function fetchStats() {
+    async function fetchData() {
       try {
         setLoading(true);
-        const data = await getDashboardStats();
-        setStats(data);
+        const [dashboardData, servicesData, usersData] = await Promise.all([
+          getDashboardStats(),
+          getServices({ limit: 50 }),
+          getUsers().catch(() => ({ users: [] })),
+        ]);
+
+        setStats(dashboardData);
+        setStaffCount(usersData.users?.length || 0);
+
+        // Build priority tasks from services
+        const services = servicesData.services || [];
+        const now = new Date();
+        const tasks: PriorityTask[] = [];
+
+        services.forEach((service: Service) => {
+          if (!service.deadline || service.status === 'completed' || service.status === 'cancelled') return;
+
+          const deadline = new Date(service.deadline);
+          const daysUntil = Math.ceil((deadline.getTime() - now.getTime()) / (1000 * 60 * 60 * 24));
+
+          if (daysUntil <= 7) {
+            let status = '';
+            if (daysUntil < 0) {
+              status = `${Math.abs(daysUntil)} days overdue`;
+            } else if (daysUntil === 0) {
+              status = 'due today';
+            } else if (daysUntil === 1) {
+              status = 'due tomorrow';
+            } else {
+              status = `due in ${daysUntil} days`;
+            }
+
+            tasks.push({
+              id: service.id,
+              title: `${service.client_name} ${service.name}`,
+              status,
+            });
+          }
+        });
+
+        // Sort by urgency (overdue first, then by days)
+        tasks.sort((a, b) => {
+          const aOverdue = a.status.includes('overdue');
+          const bOverdue = b.status.includes('overdue');
+          if (aOverdue && !bOverdue) return -1;
+          if (!aOverdue && bOverdue) return 1;
+          return 0;
+        });
+
+        setPriorityTasks(tasks.slice(0, 3));
         setError(null);
       } catch (err) {
         setError('Failed to load overview');
@@ -27,7 +83,7 @@ export function OverviewPanel({ onClose }: OverviewPanelProps) {
         setLoading(false);
       }
     }
-    fetchStats();
+    fetchData();
   }, []);
 
   if (loading) {
@@ -35,7 +91,7 @@ export function OverviewPanel({ onClose }: OverviewPanelProps) {
       <div className="h-full flex flex-col">
         <div className="p-4 border-b border-gray-200 dark:border-gray-700 flex items-center justify-between">
           <h2 className="text-lg font-semibold text-gray-900 dark:text-white flex items-center gap-2">
-            <span>📊</span> Overview
+            <span>📊</span> OVERVIEW
           </h2>
           {onClose && (
             <button onClick={onClose} className="text-gray-400 hover:text-gray-600 dark:hover:text-gray-200">
@@ -55,7 +111,7 @@ export function OverviewPanel({ onClose }: OverviewPanelProps) {
       {/* Header */}
       <div className="p-4 border-b border-gray-200 dark:border-gray-700 flex items-center justify-between">
         <h2 className="text-lg font-semibold text-gray-900 dark:text-white flex items-center gap-2">
-          <span>📊</span> Overview
+          <span>📊</span> OVERVIEW
         </h2>
         {onClose && (
           <button onClick={onClose} className="text-gray-400 hover:text-gray-600 dark:hover:text-gray-200">
@@ -72,212 +128,82 @@ export function OverviewPanel({ onClose }: OverviewPanelProps) {
           </div>
         )}
 
-        {/* Main Stats Grid */}
-        <div className="grid grid-cols-2 gap-4">
-          <StatCard
-            icon="👥"
-            label="Total Clients"
-            value={stats?.total_clients || 0}
-            subtitle={`${stats?.active_clients || 0} active`}
-            href="/dashboard/clients"
-            color="blue"
-          />
-          <StatCard
-            icon="📋"
-            label="In Progress"
-            value={stats?.services_in_progress || 0}
-            subtitle={`${stats?.services_completed || 0} completed`}
-            href="/dashboard/services"
-            color="green"
-          />
-          <StatCard
-            icon="📄"
-            label="Pending Documents"
-            value={stats?.documents_pending || 0}
-            subtitle="awaiting review"
-            href="/dashboard/documents?status=pending"
-            color="orange"
-          />
-          <StatCard
-            icon="⏰"
-            label="Due Soon"
-            value={stats?.services_due_soon || 0}
-            subtitle="deadlines"
-            href="/dashboard/services?due=week"
-            color="purple"
-          />
+        {/* Stats Cards - 3 cards: Clients, Staff, Pending */}
+        <div className="grid grid-cols-3 gap-3">
+          <div className="text-center p-4 bg-gray-50 dark:bg-slate-700 rounded-lg">
+            <p className="text-3xl font-bold text-blue-600 dark:text-blue-400">
+              {stats?.total_clients || 0}
+            </p>
+            <p className="text-sm text-gray-600 dark:text-gray-400">Clients</p>
+          </div>
+          <div className="text-center p-4 bg-gray-50 dark:bg-slate-700 rounded-lg">
+            <p className="text-3xl font-bold text-green-600 dark:text-green-400">
+              {staffCount}
+            </p>
+            <p className="text-sm text-gray-600 dark:text-gray-400">Staff</p>
+          </div>
+          <div className="text-center p-4 bg-gray-50 dark:bg-slate-700 rounded-lg">
+            <p className="text-3xl font-bold text-orange-600 dark:text-orange-400">
+              {stats?.documents_pending || 0}
+            </p>
+            <p className="text-sm text-gray-600 dark:text-gray-400">Pending</p>
+          </div>
         </div>
 
-        {/* Overdue Section */}
-        {(stats?.services_overdue || 0) > 0 && (
-          <div className="bg-red-50 dark:bg-red-900/20 rounded-lg p-4 border border-red-200 dark:border-red-800">
-            <div className="flex items-center justify-between">
-              <div className="flex items-center gap-3">
-                <span className="text-2xl">🔴</span>
-                <div>
-                  <p className="font-semibold text-red-900 dark:text-red-100">
-                    {stats?.services_overdue} Overdue
-                  </p>
-                  <p className="text-sm text-red-700 dark:text-red-300">
-                    Services past their deadline
-                  </p>
-                </div>
-              </div>
-              <Link
-                href="/dashboard/services?status=overdue"
-                className="px-3 py-1.5 text-sm font-medium text-white bg-red-600 hover:bg-red-700 rounded-lg"
-              >
-                View All
-              </Link>
-            </div>
-          </div>
-        )}
-
-        {/* Services Summary */}
-        <div className="bg-gray-50 dark:bg-slate-700 rounded-lg p-4">
+        {/* 📈 This Month Section */}
+        <div>
           <h3 className="text-sm font-semibold text-gray-700 dark:text-gray-300 mb-3 flex items-center gap-2">
-            📋 Services Overview
+            📈 This Month
           </h3>
-          <div className="grid grid-cols-3 gap-3">
-            <div className="text-center p-3 bg-white dark:bg-slate-800 rounded-lg">
-              <p className="text-2xl font-bold text-blue-600">
-                {stats?.total_services || 0}
-              </p>
-              <p className="text-xs text-gray-500 dark:text-gray-400">Total</p>
-            </div>
-            <div className="text-center p-3 bg-white dark:bg-slate-800 rounded-lg">
-              <p className="text-2xl font-bold text-green-600">
-                {stats?.services_in_progress || 0}
-              </p>
-              <p className="text-xs text-gray-500 dark:text-gray-400">In Progress</p>
-            </div>
-            <div className="text-center p-3 bg-white dark:bg-slate-800 rounded-lg">
-              <p className="text-2xl font-bold text-purple-600">
-                {stats?.services_completed || 0}
-              </p>
-              <p className="text-xs text-gray-500 dark:text-gray-400">Completed</p>
-            </div>
-          </div>
+          <ul className="space-y-2">
+            <li className="flex items-center gap-2 text-sm text-gray-700 dark:text-gray-300">
+              <span className="text-gray-400">•</span>
+              {stats?.active_clients || 0} active clients
+            </li>
+            <li className="flex items-center gap-2 text-sm text-gray-700 dark:text-gray-300">
+              <span className="text-gray-400">•</span>
+              {stats?.documents_approved || 0} docs processed
+            </li>
+            <li className="flex items-center gap-2 text-sm text-gray-700 dark:text-gray-300">
+              <span className="text-gray-400">•</span>
+              {calculateOnTimeRate(stats)}% on-time rate
+            </li>
+          </ul>
         </div>
 
-        {/* Document Stats */}
-        <div className="bg-gray-50 dark:bg-slate-700 rounded-lg p-4">
+        {/* 🔝 Priority Tasks Section */}
+        <div>
           <h3 className="text-sm font-semibold text-gray-700 dark:text-gray-300 mb-3 flex items-center gap-2">
-            📄 Documents
+            🔝 Priority Tasks
           </h3>
-          <div className="space-y-2">
-            <ProgressBar
-              label="Approved"
-              value={stats?.documents_approved || 0}
-              total={stats?.total_documents || 1}
-              color="green"
-            />
-            <ProgressBar
-              label="Pending"
-              value={stats?.documents_pending || 0}
-              total={stats?.total_documents || 1}
-              color="yellow"
-            />
-            <ProgressBar
-              label="Requested"
-              value={stats?.documents_requested || 0}
-              total={stats?.total_documents || 1}
-              color="red"
-            />
-          </div>
+          {priorityTasks.length > 0 ? (
+            <ol className="space-y-2">
+              {priorityTasks.map((task, index) => (
+                <li key={task.id} className="flex items-start gap-2 text-sm text-gray-700 dark:text-gray-300">
+                  <span className="font-medium text-gray-500">{index + 1}.</span>
+                  <Link
+                    href={`/dashboard/services/${task.id}`}
+                    className="hover:text-blue-600 dark:hover:text-blue-400"
+                  >
+                    {task.title} ({task.status})
+                  </Link>
+                </li>
+              ))}
+            </ol>
+          ) : (
+            <p className="text-sm text-gray-500 dark:text-gray-400 italic">No priority tasks this week</p>
+          )}
         </div>
-      </div>
-
-      {/* Footer */}
-      <div className="p-4 border-t border-gray-200 dark:border-gray-700">
-        <Link
-          href="/dashboard/reports"
-          className="w-full flex items-center justify-center gap-2 px-4 py-2 text-sm font-medium text-gray-700 dark:text-gray-300 bg-gray-100 dark:bg-slate-700 rounded-lg hover:bg-gray-200 dark:hover:bg-slate-600"
-        >
-          View Full Reports →
-        </Link>
       </div>
     </div>
   );
 }
 
-function StatCard({
-  icon,
-  label,
-  value,
-  subtitle,
-  href,
-  color,
-}: {
-  icon: string;
-  label: string;
-  value: number;
-  subtitle: string;
-  href: string;
-  color: 'blue' | 'green' | 'orange' | 'purple';
-}) {
-  const colorClasses = {
-    blue: 'bg-blue-50 dark:bg-blue-900/20 border-blue-200 dark:border-blue-800',
-    green: 'bg-green-50 dark:bg-green-900/20 border-green-200 dark:border-green-800',
-    orange: 'bg-orange-50 dark:bg-orange-900/20 border-orange-200 dark:border-orange-800',
-    purple: 'bg-purple-50 dark:bg-purple-900/20 border-purple-200 dark:border-purple-800',
-  };
-
-  const valueColors = {
-    blue: 'text-blue-600 dark:text-blue-400',
-    green: 'text-green-600 dark:text-green-400',
-    orange: 'text-orange-600 dark:text-orange-400',
-    purple: 'text-purple-600 dark:text-purple-400',
-  };
-
-  return (
-    <Link
-      href={href}
-      className={`block p-4 rounded-lg border ${colorClasses[color]} hover:shadow-md transition-shadow`}
-    >
-      <div className="flex items-center gap-2 mb-2">
-        <span className="text-xl">{icon}</span>
-        <span className="text-xs font-medium text-gray-600 dark:text-gray-400">{label}</span>
-      </div>
-      <p className={`text-2xl font-bold ${valueColors[color]}`}>{value}</p>
-      <p className="text-xs text-gray-500 dark:text-gray-400 mt-1">{subtitle}</p>
-    </Link>
-  );
-}
-
-function ProgressBar({
-  label,
-  value,
-  total,
-  color,
-}: {
-  label: string;
-  value: number;
-  total: number;
-  color: 'green' | 'yellow' | 'red';
-}) {
-  const percentage = total > 0 ? Math.round((value / total) * 100) : 0;
-
-  const barColors = {
-    green: 'bg-green-500',
-    yellow: 'bg-yellow-500',
-    red: 'bg-red-500',
-  };
-
-  return (
-    <div className="flex items-center gap-3">
-      <span className="text-xs text-gray-600 dark:text-gray-400 w-16">{label}</span>
-      <div className="flex-1 h-2 bg-gray-200 dark:bg-slate-600 rounded-full overflow-hidden">
-        <div
-          className={`h-full ${barColors[color]} rounded-full transition-all`}
-          style={{ width: `${percentage}%` }}
-        />
-      </div>
-      <span className="text-xs font-medium text-gray-700 dark:text-gray-300 w-8 text-right">
-        {value}
-      </span>
-    </div>
-  );
+function calculateOnTimeRate(stats: DashboardStats | null): number {
+  if (!stats) return 0;
+  const total = (stats.services_completed || 0) + (stats.services_overdue || 0);
+  if (total === 0) return 100;
+  return Math.round(((stats.services_completed || 0) / total) * 100);
 }
 
 export default OverviewPanel;

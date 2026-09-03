@@ -75,17 +75,19 @@ const subMenuItems: ModuleSubMenu = {
 interface SubMenuProps {
   activePanel: string;
   onPanelSelect: (panel: string) => void;
+  currentModule?: string;
 }
 
-export function SubMenu({ activePanel, onPanelSelect }: SubMenuProps) {
+export function SubMenu({ activePanel, onPanelSelect, currentModule }: SubMenuProps) {
   const pathname = usePathname();
 
-  // Determine which module we're in based on pathname
+  // Determine which module we're in based on pathname or prop
   const getActiveModule = (): string => {
-    if (pathname === '/dashboard') return 'dashboard';
-    const segments = pathname.split('/');
-    if (segments.length >= 3) {
-      return segments[2]; // e.g., /dashboard/clients -> clients
+    if (currentModule) return currentModule;
+    if (pathname === '/dashboard' || pathname === '/dashboard/') return 'dashboard';
+    const segments = pathname.split('/').filter(s => s); // Remove empty segments
+    if (segments.length >= 2) {
+      return segments[1]; // e.g., /dashboard/clients -> clients
     }
     return 'dashboard';
   };
@@ -93,14 +95,24 @@ export function SubMenu({ activePanel, onPanelSelect }: SubMenuProps) {
   const activeModule = getActiveModule();
   const items = subMenuItems[activeModule] || [];
 
+  // Only show submenu for modules that have sub-items
   if (items.length === 0) return null;
 
+  // Get display title for the module
+  const getModuleTitle = () => {
+    switch (activeModule) {
+      case 'ai': return 'AI Chat';
+      case 'hmrc': return 'HMRC';
+      default: return activeModule.charAt(0).toUpperCase() + activeModule.slice(1);
+    }
+  };
+
   return (
-    <aside className="w-44 bg-gray-50 dark:bg-slate-900 border-r border-gray-200 dark:border-gray-700 flex flex-col h-full">
+    <aside className="w-48 bg-white dark:bg-slate-800/50 border-r border-gray-200 dark:border-gray-700 flex flex-col shrink-0">
       {/* Module Title */}
       <div className="p-4 border-b border-gray-200 dark:border-gray-700">
-        <h2 className="font-semibold text-gray-900 dark:text-white capitalize">
-          {activeModule === 'ai' ? 'AI Chat' : activeModule}
+        <h2 className="font-semibold text-gray-900 dark:text-white">
+          {getModuleTitle()}
         </h2>
       </div>
 
@@ -111,14 +123,14 @@ export function SubMenu({ activePanel, onPanelSelect }: SubMenuProps) {
             key={item.id}
             onClick={() => onPanelSelect(item.panel)}
             className={`
-              w-full flex items-center gap-2 px-4 py-2.5 text-sm font-medium transition-all text-left
+              w-full flex items-center gap-3 px-4 py-2.5 text-sm font-medium transition-all text-left
               ${activePanel === item.panel
-                ? 'bg-white dark:bg-slate-800 text-blue-600 dark:text-blue-400 border-r-2 border-blue-600 shadow-sm'
-                : 'text-gray-600 dark:text-gray-400 hover:bg-white dark:hover:bg-slate-800 hover:text-gray-900 dark:hover:text-white'
+                ? 'bg-blue-50 dark:bg-blue-900/30 text-blue-600 dark:text-blue-400 border-r-2 border-blue-600'
+                : 'text-gray-600 dark:text-gray-400 hover:bg-gray-50 dark:hover:bg-slate-700 hover:text-gray-900 dark:hover:text-white'
               }
             `}
           >
-            <span>{item.icon}</span>
+            <span className="text-base">{item.icon}</span>
             <span>{item.label}</span>
           </button>
         ))}

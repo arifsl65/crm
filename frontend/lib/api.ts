@@ -1184,8 +1184,10 @@ export interface User {
   role: 'super_admin' | 'tenant_admin' | 'staff' | 'client';
   phone?: string;
   avatar_url?: string;
+  status?: 'pending' | 'active' | 'inactive';
   is_active: boolean;
   two_factor_enabled: boolean;
+  specialism?: string;
   last_login_at?: string;
   created_at: string;
   updated_at: string;

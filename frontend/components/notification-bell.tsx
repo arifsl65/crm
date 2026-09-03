@@ -6,9 +6,12 @@ import {
   getNotifications,
   markNotificationRead,
   markAllNotificationsRead,
+  dismissNotification,
 } from '@/lib/api';
 
 const POLL_INTERVAL = 30000; // Poll every 30 seconds
+
+type FilterTab = 'all' | 'unread';
 
 export function NotificationBell() {
   const [notifications, setNotifications] = useState<Notification[]>([]);
@@ -16,6 +19,7 @@ export function NotificationBell() {
   const [unreadCount, setUnreadCount] = useState(0);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const [activeTab, setActiveTab] = useState<FilterTab>('all');
   const dropdownRef = useRef<HTMLDivElement>(null);
 
   // Close dropdown when clicking outside
@@ -30,9 +34,13 @@ export function NotificationBell() {
   }, []);
 
   // Fetch notifications from API
-  const fetchNotifications = useCallback(async () => {
+  const fetchNotifications = useCallback(async (filter?: FilterTab) => {
     try {
-      const data = await getNotifications({ limit: 20 });
+      const currentFilter = filter ?? activeTab;
+      const data = await getNotifications({
+        limit: 20,
+        unread: currentFilter === 'unread' ? true : undefined,
+      });
       setNotifications(data.notifications || []);
       setUnreadCount(data.unread_count || 0);
       setError(null);
@@ -44,7 +52,7 @@ export function NotificationBell() {
     } finally {
       setLoading(false);
     }
-  }, [loading]);
+  }, [loading, activeTab]);
 
   // Initial fetch and polling
   useEffect(() => {
@@ -55,12 +63,17 @@ export function NotificationBell() {
     return () => clearInterval(interval);
   }, [fetchNotifications]);
 
-  // Refetch when dropdown opens
+  // Refetch when dropdown opens or tab changes
   useEffect(() => {
     if (isOpen) {
-      fetchNotifications();
+      fetchNotifications(activeTab);
     }
-  }, [isOpen, fetchNotifications]);
+  }, [isOpen, activeTab, fetchNotifications]);
+
+  // Handle tab change
+  const handleTabChange = (tab: FilterTab) => {
+    setActiveTab(tab);
+  };
 
   const markAsRead = async (id: string) => {
     try {
@@ -81,6 +94,21 @@ export function NotificationBell() {
       setUnreadCount(0);
     } catch (err) {
       console.error('Failed to mark all notifications as read:', err);
+    }
+  };
+
+  const handleDismiss = async (e: React.MouseEvent, id: string) => {
+    e.stopPropagation(); // Prevent triggering notification click
+    try {
+      await dismissNotification(id);
+      setNotifications((prev) => prev.filter((n) => n.id !== id));
+      // Update unread count if dismissed notification was unread
+      const dismissedNotif = notifications.find((n) => n.id === id);
+      if (dismissedNotif && !dismissedNotif.is_read) {
+        setUnreadCount((prev) => Math.max(0, prev - 1));
+      }
+    } catch (err) {
+      console.error('Failed to dismiss notification:', err);
     }
   };
 
@@ -170,18 +198,49 @@ export function NotificationBell() {
       {/* Dropdown Panel */}
       {isOpen && (
         <div className="absolute right-0 mt-2 w-80 bg-white dark:bg-slate-800 rounded-lg shadow-lg ring-1 ring-black ring-opacity-5 z-50">
-          <div className="p-4 border-b border-gray-200 dark:border-gray-700 flex justify-between items-center">
-            <h3 className="text-sm font-semibold text-gray-900 dark:text-white">
-              Notifications
-            </h3>
-            {unreadCount > 0 && (
+          {/* Header */}
+          <div className="p-3 border-b border-gray-200 dark:border-gray-700">
+            <div className="flex justify-between items-center mb-3">
+              <h3 className="text-sm font-semibold text-gray-900 dark:text-white flex items-center gap-2">
+                <span>🔔</span> Notifications
+              </h3>
+              {unreadCount > 0 && (
+                <button
+                  onClick={markAllAsRead}
+                  className="text-xs text-blue-600 hover:text-blue-800 dark:text-blue-400 dark:hover:text-blue-300"
+                >
+                  Mark all read
+                </button>
+              )}
+            </div>
+            {/* Tab Filters */}
+            <div className="flex gap-2">
               <button
-                onClick={markAllAsRead}
-                className="text-xs text-blue-600 hover:text-blue-800 dark:text-blue-400 dark:hover:text-blue-300"
+                onClick={() => handleTabChange('all')}
+                className={`px-3 py-1 text-xs font-medium rounded-full transition-colors ${
+                  activeTab === 'all'
+                    ? 'bg-blue-100 text-blue-700 dark:bg-blue-900 dark:text-blue-300'
+                    : 'bg-gray-100 text-gray-600 hover:bg-gray-200 dark:bg-slate-700 dark:text-gray-400 dark:hover:bg-slate-600'
+                }`}
               >
-                Mark all as read
+                All
               </button>
-            )}
+              <button
+                onClick={() => handleTabChange('unread')}
+                className={`px-3 py-1 text-xs font-medium rounded-full transition-colors flex items-center gap-1 ${
+                  activeTab === 'unread'
+                    ? 'bg-blue-100 text-blue-700 dark:bg-blue-900 dark:text-blue-300'
+                    : 'bg-gray-100 text-gray-600 hover:bg-gray-200 dark:bg-slate-700 dark:text-gray-400 dark:hover:bg-slate-600'
+                }`}
+              >
+                Unread
+                {unreadCount > 0 && (
+                  <span className="inline-flex items-center justify-center w-4 h-4 text-[10px] font-bold bg-red-500 text-white rounded-full">
+                    {unreadCount > 9 ? '9+' : unreadCount}
+                  </span>
+                )}
+              </button>
+            </div>
           </div>
 
           <div className="max-h-96 overflow-y-auto">
@@ -206,14 +265,24 @@ export function NotificationBell() {
                 <div
                   key={notification.id}
                   onClick={() => handleNotificationClick(notification)}
-                  className={`p-4 border-b border-gray-100 dark:border-gray-700 hover:bg-gray-50 dark:hover:bg-slate-700 cursor-pointer ${
+                  className={`p-3 border-b border-gray-100 dark:border-gray-700 hover:bg-gray-50 dark:hover:bg-slate-700 cursor-pointer group ${
                     !notification.is_read ? 'bg-blue-50 dark:bg-blue-900/20' : ''
                   }`}
                 >
                   <div className="flex items-start space-x-3">
-                    <div className="flex-shrink-0 mt-1">
+                    {/* Unread indicator */}
+                    <div className="flex-shrink-0 mt-2">
+                      {!notification.is_read ? (
+                        <span className="w-2 h-2 bg-blue-500 rounded-full inline-block"></span>
+                      ) : (
+                        <span className="w-2 h-2 border border-gray-300 dark:border-gray-600 rounded-full inline-block"></span>
+                      )}
+                    </div>
+                    {/* Icon */}
+                    <div className="flex-shrink-0 mt-0.5">
                       {getNotificationIcon(notification.type)}
                     </div>
+                    {/* Content */}
                     <div className="flex-1 min-w-0">
                       <p className={`text-sm ${!notification.is_read ? 'font-semibold' : 'font-medium'} text-gray-900 dark:text-white`}>
                         {notification.title}
@@ -221,15 +290,26 @@ export function NotificationBell() {
                       <p className="text-sm text-gray-500 dark:text-gray-400 truncate">
                         {notification.message}
                       </p>
-                      <p className="text-xs text-gray-400 dark:text-gray-500 mt-1">
-                        {formatTimeAgo(notification.created_at)}
-                      </p>
-                    </div>
-                    {!notification.is_read && (
-                      <div className="flex-shrink-0">
-                        <span className="w-2 h-2 bg-blue-500 rounded-full inline-block"></span>
+                      <div className="flex items-center justify-between mt-1">
+                        <p className="text-xs text-gray-400 dark:text-gray-500">
+                          {formatTimeAgo(notification.created_at)}
+                        </p>
+                        {/* Action buttons */}
+                        <div className="flex items-center gap-2 opacity-0 group-hover:opacity-100 transition-opacity">
+                          {notification.link && (
+                            <span className="text-xs text-blue-600 dark:text-blue-400 font-medium">
+                              View
+                            </span>
+                          )}
+                          <button
+                            onClick={(e) => handleDismiss(e, notification.id)}
+                            className="text-xs text-gray-400 hover:text-red-500 dark:hover:text-red-400 font-medium"
+                          >
+                            Dismiss
+                          </button>
+                        </div>
                       </div>
-                    )}
+                    </div>
                   </div>
                 </div>
               ))

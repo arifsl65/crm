@@ -2,7 +2,7 @@
 
 import Link from 'next/link';
 import { usePathname } from 'next/navigation';
-import { NotificationBell } from '@/components';
+import { NotificationBell, GlobalSearch } from '@/components';
 
 interface HeaderProps {
   user?: {
@@ -66,16 +66,7 @@ export function Header({ user, onLogout }: HeaderProps) {
 
           {/* Global Search */}
           <div className="hidden sm:flex items-center">
-            <div className="relative">
-              <input
-                type="text"
-                placeholder="Search... ⌘K"
-                className="w-64 px-4 py-1.5 pl-10 text-sm border border-gray-300 dark:border-gray-600 rounded-lg bg-gray-50 dark:bg-slate-700 text-gray-900 dark:text-white placeholder-gray-500 dark:placeholder-gray-400 focus:ring-2 focus:ring-blue-500 focus:border-transparent focus:bg-white dark:focus:bg-slate-600"
-              />
-              <span className="absolute left-3 top-1/2 -translate-y-1/2 text-gray-400">
-                🔍
-              </span>
-            </div>
+            <GlobalSearch />
           </div>
         </div>
 

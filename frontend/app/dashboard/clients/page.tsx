@@ -2,28 +2,26 @@
 
 import { useEffect, useState, useCallback } from 'react';
 import Link from 'next/link';
-import { useSearchParams } from 'next/navigation';
-import { useAuth } from '@/components/auth-guard';
 import { Client, getClients, getServices, Service } from '@/lib/api';
-import { getStatusBadgeClass } from '@/lib/status';
+import { usePanelContext } from '../components/DashboardShell';
+import { AddClientPanel } from './components/AddClientPanel';
+import { ByStaffView } from './components/ByStaffView';
 
 interface ClientWithRisk extends Client {
   riskLevel?: 'high' | 'medium' | 'low' | 'none';
   overdueServices?: number;
   missingDocs?: number;
+  isQuiet?: boolean;
 }
 
 export default function ClientsPage() {
-  const { user } = useAuth();
-  const searchParams = useSearchParams();
+  const { activePanel, setActivePanel } = usePanelContext();
   const [clients, setClients] = useState<ClientWithRisk[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [search, setSearch] = useState('');
-  const [statusFilter, setStatusFilter] = useState('');
-  const [riskFilter, setRiskFilter] = useState('');
+  const [filter, setFilter] = useState('');
   const [selectedClient, setSelectedClient] = useState<ClientWithRisk | null>(null);
-  const [showCHLookup, setShowCHLookup] = useState(searchParams.get('panel') === 'ch-lookup');
 
   const fetchClients = useCallback(async () => {
     try {
@@ -31,7 +29,6 @@ export default function ClientsPage() {
       const [clientsData, servicesData] = await Promise.all([
         getClients({
           search: search || undefined,
-          status: statusFilter || undefined,
           limit: 100,
         }),
         getServices({ limit: 200 }),
@@ -39,6 +36,7 @@ export default function ClientsPage() {
 
       const services = servicesData.services || [];
       const now = new Date();
+      const fourteenDaysAgo = new Date(now.getTime() - 14 * 24 * 60 * 60 * 1000);
 
       // Calculate risk levels for each client
       const clientsWithRisk: ClientWithRisk[] = (clientsData.clients || []).map((client: Client) => {
@@ -53,6 +51,10 @@ export default function ClientsPage() {
           return acc + Math.max(0, (s.docs_required || 0) - (s.docs_received || 0));
         }, 0);
 
+        // Check if client is "quiet" (no contact in 14+ days)
+        const lastContact = client.last_contact_at ? new Date(client.last_contact_at) : null;
+        const isQuiet = !lastContact || lastContact < fourteenDaysAgo;
+
         let riskLevel: 'high' | 'medium' | 'low' | 'none' = 'none';
         if (overdueServices > 1 || missingDocs > 5) riskLevel = 'high';
         else if (overdueServices > 0 || missingDocs > 2) riskLevel = 'medium';
@@ -63,13 +65,21 @@ export default function ClientsPage() {
           riskLevel,
           overdueServices,
           missingDocs,
+          isQuiet,
         };
       });
 
-      // Apply risk filter
-      const filtered = riskFilter
-        ? clientsWithRisk.filter(c => c.riskLevel === riskFilter)
-        : clientsWithRisk;
+      // Apply filters
+      let filtered = clientsWithRisk;
+      if (filter === 'at-risk') {
+        filtered = clientsWithRisk.filter(c => c.riskLevel === 'high' || c.riskLevel === 'medium');
+      } else if (filter === 'quiet') {
+        filtered = clientsWithRisk.filter(c => c.isQuiet);
+      } else if (filter === 'pending') {
+        filtered = clientsWithRisk.filter(c => c.status === 'pending');
+      } else if (filter === 'disabled') {
+        filtered = clientsWithRisk.filter(c => c.status === 'inactive' || c.status === 'archived');
+      }
 
       setClients(filtered);
       setError(null);
@@ -78,173 +88,250 @@ export default function ClientsPage() {
     } finally {
       setLoading(false);
     }
-  }, [search, statusFilter, riskFilter]);
+  }, [search, filter]);
 
   useEffect(() => {
     fetchClients();
   }, [fetchClients]);
 
-  const getRiskBadge = (riskLevel?: string) => {
-    switch (riskLevel) {
-      case 'high':
-        return <span className="px-2 py-0.5 text-xs font-medium rounded-full bg-red-100 dark:bg-red-900/30 text-red-700 dark:text-red-300">High Risk</span>;
-      case 'medium':
-        return <span className="px-2 py-0.5 text-xs font-medium rounded-full bg-orange-100 dark:bg-orange-900/30 text-orange-700 dark:text-orange-300">Medium</span>;
-      case 'low':
-        return <span className="px-2 py-0.5 text-xs font-medium rounded-full bg-yellow-100 dark:bg-yellow-900/30 text-yellow-700 dark:text-yellow-300">Low</span>;
+  // Set default panel to 'list' when component mounts
+  useEffect(() => {
+    if (activePanel === 'today' || activePanel === 'overview') {
+      setActivePanel('list');
+    }
+  }, [activePanel, setActivePanel]);
+
+  const getStatusIcon = (client: ClientWithRisk) => {
+    if (client.riskLevel === 'high') return '🔴';
+    if (client.isQuiet) return '😶';
+    if (client.status === 'pending') return '🟡';
+    return '🟢';
+  };
+
+  const handleClientSelect = (client: ClientWithRisk) => {
+    setSelectedClient(client);
+  };
+
+  const handleClosePanel = () => {
+    setSelectedClient(null);
+  };
+
+  const handleClientCreated = () => {
+    fetchClients();
+    setActivePanel('list');
+  };
+
+  // Render based on active panel
+  const renderMainContent = () => {
+    switch (activePanel) {
+      case 'add':
+        return (
+          <div className="w-full max-w-2xl mx-auto bg-white dark:bg-slate-800 h-full">
+            <AddClientPanel
+              onClose={() => setActivePanel('list')}
+              onClientCreated={handleClientCreated}
+            />
+          </div>
+        );
+
+      case 'ch-lookup':
+        return (
+          <div className="w-full bg-white dark:bg-slate-800 h-full">
+            <CompaniesHouseLookup
+              onImport={(company) => {
+                // Pre-fill add client form with CH data
+                setActivePanel('add');
+              }}
+            />
+          </div>
+        );
+
+      case 'by-staff':
+        return (
+          <div className="flex-1 flex overflow-hidden">
+            {/* By Staff View */}
+            <div className={`${selectedClient ? 'w-1/2' : 'flex-1'} overflow-y-auto bg-white dark:bg-slate-800`}>
+              <ByStaffView
+                onClientSelect={handleClientSelect}
+                selectedClientId={selectedClient?.id}
+              />
+            </div>
+
+            {/* Side Panel */}
+            {selectedClient && (
+              <div className="w-1/2 border-l border-gray-200 dark:border-gray-700 bg-white dark:bg-slate-800 overflow-y-auto">
+                <ClientDetailPanel
+                  client={selectedClient}
+                  onClose={handleClosePanel}
+                />
+              </div>
+            )}
+          </div>
+        );
+
+      case 'list':
       default:
-        return null;
+        return (
+          <div className="flex-1 flex overflow-hidden">
+            {/* Client List */}
+            <div className={`${selectedClient ? 'w-1/2' : 'flex-1'} overflow-y-auto border-r border-gray-200 dark:border-gray-700`}>
+              {error && (
+                <div className="m-4 p-3 bg-red-50 dark:bg-red-900/30 rounded-lg text-red-700 dark:text-red-300 text-sm">
+                  {error}
+                </div>
+              )}
+
+              {loading ? (
+                <div className="flex items-center justify-center h-64">
+                  <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-blue-600"></div>
+                </div>
+              ) : clients.length === 0 ? (
+                <div className="text-center py-12">
+                  <span className="text-4xl">👥</span>
+                  <p className="mt-2 text-gray-600 dark:text-gray-400">No clients found</p>
+                  <button
+                    onClick={() => setActivePanel('add')}
+                    className="mt-4 inline-flex items-center px-4 py-2 bg-blue-600 text-white text-sm rounded-lg hover:bg-blue-700"
+                  >
+                    + Add Client
+                  </button>
+                </div>
+              ) : (
+                <div className="divide-y divide-gray-200 dark:divide-gray-700">
+                  {clients.map((client) => (
+                    <div
+                      key={client.id}
+                      onClick={() => handleClientSelect(client)}
+                      className={`p-4 cursor-pointer hover:bg-gray-50 dark:hover:bg-slate-700 ${
+                        selectedClient?.id === client.id ? 'bg-blue-50 dark:bg-blue-900/20' : ''
+                      }`}
+                    >
+                      <div className="flex items-start justify-between">
+                        <div className="flex items-start gap-3 flex-1 min-w-0">
+                          <span className="text-lg mt-0.5">{getStatusIcon(client)}</span>
+                          <div className="flex-1 min-w-0">
+                            <p className="text-sm font-medium text-gray-900 dark:text-white truncate">
+                              {client.company_name}
+                            </p>
+                            <p className="text-xs text-gray-500 dark:text-gray-400 mt-1">
+                              {client.contact_name} • {client.email}
+                            </p>
+                            {client.company_number && (
+                              <p className="text-xs text-gray-400 dark:text-gray-500 mt-0.5">
+                                Co. No: {client.company_number}
+                              </p>
+                            )}
+                          </div>
+                        </div>
+
+                        {/* Quick Actions */}
+                        <div className="flex items-center gap-1 ml-2">
+                          <button
+                            onClick={(e) => { e.stopPropagation(); /* TODO: Email action */ }}
+                            className="p-1.5 text-gray-400 hover:text-gray-600 dark:hover:text-gray-200 hover:bg-gray-100 dark:hover:bg-slate-600 rounded"
+                            title="Send Email"
+                          >
+                            📧
+                          </button>
+                          <button
+                            onClick={(e) => { e.stopPropagation(); /* TODO: Request docs */ }}
+                            className="p-1.5 text-gray-400 hover:text-gray-600 dark:hover:text-gray-200 hover:bg-gray-100 dark:hover:bg-slate-600 rounded"
+                            title="Request Documents"
+                          >
+                            📄
+                          </button>
+                          {(client.riskLevel === 'high' || client.riskLevel === 'medium' || client.isQuiet) && (
+                            <button
+                              onClick={(e) => { e.stopPropagation(); /* TODO: Chase */ }}
+                              className="p-1.5 text-gray-400 hover:text-gray-600 dark:hover:text-gray-200 hover:bg-gray-100 dark:hover:bg-slate-600 rounded"
+                              title="Chase"
+                            >
+                              🔔
+                            </button>
+                          )}
+                        </div>
+                      </div>
+
+                      {/* Risk/Status Indicators */}
+                      {((client.overdueServices ?? 0) > 0 || (client.missingDocs ?? 0) > 0) && (
+                        <div className="mt-2 ml-8 flex gap-2">
+                          {(client.overdueServices ?? 0) > 0 && (
+                            <span className="text-xs text-red-600 dark:text-red-400">
+                              {client.overdueServices} overdue
+                            </span>
+                          )}
+                          {(client.missingDocs ?? 0) > 0 && (
+                            <span className="text-xs text-orange-600 dark:text-orange-400">
+                              {client.missingDocs} docs missing
+                            </span>
+                          )}
+                        </div>
+                      )}
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
+
+            {/* Side Panel */}
+            {selectedClient && (
+              <div className="w-1/2 bg-white dark:bg-slate-800 overflow-y-auto">
+                <ClientDetailPanel
+                  client={selectedClient}
+                  onClose={handleClosePanel}
+                />
+              </div>
+            )}
+          </div>
+        );
     }
   };
 
   return (
     <div className="h-full flex flex-col bg-gray-50 dark:bg-slate-900">
-      {/* Header */}
-      <div className="bg-white dark:bg-slate-800 border-b border-gray-200 dark:border-gray-700 px-6 py-4">
-        <div className="flex items-center justify-between">
-          <div>
-            <h1 className="text-xl font-semibold text-gray-900 dark:text-white flex items-center gap-2">
-              <span>👥</span> Clients
-            </h1>
-            <p className="text-sm text-gray-500 dark:text-gray-400 mt-1">
-              {clients.length} clients {riskFilter && `(${riskFilter} risk)`}
-            </p>
+      {/* Header - only show for list and by-staff views */}
+      {(activePanel === 'list' || activePanel === 'by-staff') && (
+        <div className="bg-white dark:bg-slate-800 border-b border-gray-200 dark:border-gray-700 px-6 py-4">
+          <div className="flex items-center justify-between">
+            <div>
+              <h1 className="text-xl font-semibold text-gray-900 dark:text-white flex items-center gap-2">
+                <span>👥</span> {activePanel === 'by-staff' ? 'Clients by Staff' : 'All Clients'}
+              </h1>
+              <p className="text-sm text-gray-500 dark:text-gray-400 mt-1">
+                {clients.length} clients {filter && `(${filter.replace('-', ' ')})`}
+              </p>
+            </div>
           </div>
-          <div className="flex items-center gap-2">
-            <button
-              onClick={() => setShowCHLookup(!showCHLookup)}
-              className={`px-4 py-2 text-sm font-medium rounded-lg ${
-                showCHLookup
-                  ? 'bg-blue-600 text-white'
-                  : 'bg-gray-100 dark:bg-slate-700 text-gray-700 dark:text-gray-300'
-              }`}
-            >
-              🔍 CH Lookup
-            </button>
-            <Link
-              href="/dashboard/clients/new"
-              className="px-4 py-2 bg-blue-600 text-white text-sm font-medium rounded-lg hover:bg-blue-700"
-            >
-              + Add Client
-            </Link>
-          </div>
-        </div>
 
-        {/* Filters */}
-        <div className="mt-4 flex flex-wrap gap-3">
-          <input
-            type="text"
-            placeholder="Search clients..."
-            value={search}
-            onChange={(e) => setSearch(e.target.value)}
-            className="flex-1 min-w-64 px-3 py-2 text-sm border border-gray-300 dark:border-gray-600 rounded-lg bg-white dark:bg-slate-700 text-gray-900 dark:text-white"
-          />
-          <select
-            value={statusFilter}
-            onChange={(e) => setStatusFilter(e.target.value)}
-            className="px-3 py-2 text-sm border border-gray-300 dark:border-gray-600 rounded-lg bg-white dark:bg-slate-700 text-gray-900 dark:text-white"
-          >
-            <option value="">All Status</option>
-            <option value="active">Active</option>
-            <option value="inactive">Inactive</option>
-            <option value="archived">Archived</option>
-          </select>
-          <select
-            value={riskFilter}
-            onChange={(e) => setRiskFilter(e.target.value)}
-            className="px-3 py-2 text-sm border border-gray-300 dark:border-gray-600 rounded-lg bg-white dark:bg-slate-700 text-gray-900 dark:text-white"
-          >
-            <option value="">All Risk Levels</option>
-            <option value="high">High Risk</option>
-            <option value="medium">Medium Risk</option>
-            <option value="low">Low Risk</option>
-            <option value="none">No Risk</option>
-          </select>
+          {/* Filters - only for list view */}
+          {activePanel === 'list' && (
+            <div className="mt-4 flex flex-wrap gap-3">
+              <input
+                type="text"
+                placeholder="Search clients..."
+                value={search}
+                onChange={(e) => setSearch(e.target.value)}
+                className="flex-1 min-w-64 px-3 py-2 text-sm border border-gray-300 dark:border-gray-600 rounded-lg bg-white dark:bg-slate-700 text-gray-900 dark:text-white"
+              />
+              <select
+                value={filter}
+                onChange={(e) => setFilter(e.target.value)}
+                className="px-3 py-2 text-sm border border-gray-300 dark:border-gray-600 rounded-lg bg-white dark:bg-slate-700 text-gray-900 dark:text-white"
+              >
+                <option value="">All Clients</option>
+                <option value="at-risk">At Risk</option>
+                <option value="quiet">Quiet (14+ days)</option>
+                <option value="pending">Pending Onboarding</option>
+                <option value="disabled">Disabled</option>
+              </select>
+            </div>
+          )}
         </div>
-      </div>
+      )}
 
       {/* Content */}
-      <div className="flex-1 flex overflow-hidden">
-        {/* Client List */}
-        <div className={`${selectedClient || showCHLookup ? 'w-1/2' : 'flex-1'} overflow-y-auto border-r border-gray-200 dark:border-gray-700`}>
-          {error && (
-            <div className="m-4 p-3 bg-red-50 dark:bg-red-900/30 rounded-lg text-red-700 dark:text-red-300 text-sm">
-              {error}
-            </div>
-          )}
-
-          {loading ? (
-            <div className="flex items-center justify-center h-64">
-              <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-blue-600"></div>
-            </div>
-          ) : clients.length === 0 ? (
-            <div className="text-center py-12">
-              <span className="text-4xl">👥</span>
-              <p className="mt-2 text-gray-600 dark:text-gray-400">No clients found</p>
-              <Link
-                href="/dashboard/clients/new"
-                className="mt-4 inline-flex items-center px-4 py-2 bg-blue-600 text-white text-sm rounded-lg hover:bg-blue-700"
-              >
-                + Add Client
-              </Link>
-            </div>
-          ) : (
-            <div className="divide-y divide-gray-200 dark:divide-gray-700">
-              {clients.map((client) => (
-                <div
-                  key={client.id}
-                  onClick={() => { setSelectedClient(client); setShowCHLookup(false); }}
-                  className={`p-4 cursor-pointer hover:bg-gray-50 dark:hover:bg-slate-800 ${
-                    selectedClient?.id === client.id ? 'bg-blue-50 dark:bg-blue-900/20' : ''
-                  }`}
-                >
-                  <div className="flex items-start justify-between">
-                    <div className="flex-1 min-w-0">
-                      <div className="flex items-center gap-2">
-                        <p className="text-sm font-medium text-gray-900 dark:text-white truncate">
-                          {client.company_name}
-                        </p>
-                        {getRiskBadge(client.riskLevel)}
-                      </div>
-                      <p className="text-xs text-gray-500 dark:text-gray-400 mt-1">
-                        {client.contact_name} • {client.email}
-                      </p>
-                      {client.company_number && (
-                        <p className="text-xs text-gray-400 dark:text-gray-500 mt-0.5">
-                          Co. No: {client.company_number}
-                        </p>
-                      )}
-                    </div>
-                    <div className="flex flex-col items-end gap-1">
-                      <span className={`px-2 py-0.5 text-xs font-medium rounded-full ${getStatusBadgeClass(client.status)}`}>
-                        {client.status}
-                      </span>
-                      {(client.overdueServices ?? 0) > 0 && (
-                        <span className="text-xs text-red-600 dark:text-red-400">
-                          {client.overdueServices} overdue
-                        </span>
-                      )}
-                    </div>
-                  </div>
-                </div>
-              ))}
-            </div>
-          )}
-        </div>
-
-        {/* Side Panel */}
-        {(selectedClient || showCHLookup) && (
-          <div className="w-1/2 bg-white dark:bg-slate-800 overflow-y-auto">
-            {showCHLookup ? (
-              <CompaniesHouseLookup onClose={() => setShowCHLookup(false)} />
-            ) : selectedClient ? (
-              <ClientDetailPanel
-                client={selectedClient}
-                onClose={() => setSelectedClient(null)}
-              />
-            ) : null}
-          </div>
-        )}
+      <div className="flex-1 overflow-hidden">
+        {renderMainContent()}
       </div>
     </div>
   );
@@ -253,13 +340,23 @@ export default function ClientsPage() {
 function ClientDetailPanel({ client, onClose }: { client: ClientWithRisk; onClose: () => void }) {
   const [activeTab, setActiveTab] = useState<'details' | 'services' | 'documents' | 'activity'>('details');
 
+  const getStatusIcon = (client: ClientWithRisk) => {
+    if (client.riskLevel === 'high') return '🔴';
+    if (client.isQuiet) return '😶';
+    if (client.status === 'pending') return '🟡';
+    return '🟢';
+  };
+
   return (
     <div className="h-full flex flex-col">
       {/* Header */}
       <div className="p-4 border-b border-gray-200 dark:border-gray-700 flex items-center justify-between">
-        <div>
-          <h2 className="text-lg font-semibold text-gray-900 dark:text-white">{client.company_name}</h2>
-          <p className="text-sm text-gray-500 dark:text-gray-400">{client.contact_name}</p>
+        <div className="flex items-center gap-3">
+          <span className="text-xl">{getStatusIcon(client)}</span>
+          <div>
+            <h2 className="text-lg font-semibold text-gray-900 dark:text-white">{client.company_name}</h2>
+            <p className="text-sm text-gray-500 dark:text-gray-400">{client.contact_name}</p>
+          </div>
         </div>
         <div className="flex items-center gap-2">
           <Link
@@ -321,6 +418,16 @@ function ClientDetailPanel({ client, onClose }: { client: ClientWithRisk; onClos
               </div>
             )}
 
+            {/* Quiet Alert */}
+            {client.isQuiet && (
+              <div className="p-3 rounded-lg bg-gray-50 dark:bg-gray-700/50 border border-gray-200 dark:border-gray-600">
+                <p className="text-sm font-medium">😶 Quiet Client</p>
+                <p className="text-xs mt-1 text-gray-600 dark:text-gray-400">
+                  No contact in 14+ days. Consider reaching out.
+                </p>
+              </div>
+            )}
+
             {/* Contact Info */}
             <div className="bg-gray-50 dark:bg-slate-700 rounded-lg p-4">
               <h3 className="text-sm font-semibold text-gray-700 dark:text-gray-300 mb-3">Contact Information</h3>
@@ -354,7 +461,7 @@ function ClientDetailPanel({ client, onClose }: { client: ClientWithRisk; onClos
                 📋 Add Service
               </button>
               <button className="p-3 text-sm font-medium text-gray-700 dark:text-gray-300 bg-gray-100 dark:bg-slate-700 rounded-lg hover:bg-gray-200 dark:hover:bg-slate-600">
-                🔍 CH Lookup
+                🔔 Set Reminder
               </button>
             </div>
           </div>
@@ -388,7 +495,7 @@ function ClientDetailPanel({ client, onClose }: { client: ClientWithRisk; onClos
   );
 }
 
-function CompaniesHouseLookup({ onClose }: { onClose: () => void }) {
+function CompaniesHouseLookup({ onImport }: { onImport: (company: any) => void }) {
   const [searchQuery, setSearchQuery] = useState('');
   const [searching, setSearching] = useState(false);
   const [results, setResults] = useState<any[]>([]);
@@ -421,13 +528,13 @@ function CompaniesHouseLookup({ onClose }: { onClose: () => void }) {
   return (
     <div className="h-full flex flex-col">
       {/* Header */}
-      <div className="p-4 border-b border-gray-200 dark:border-gray-700 flex items-center justify-between">
+      <div className="p-4 border-b border-gray-200 dark:border-gray-700">
         <h2 className="text-lg font-semibold text-gray-900 dark:text-white flex items-center gap-2">
           <span>🔍</span> Companies House Lookup
         </h2>
-        <button onClick={onClose} className="text-gray-400 hover:text-gray-600 dark:hover:text-gray-200">
-          ✕
-        </button>
+        <p className="text-sm text-gray-500 dark:text-gray-400 mt-1">
+          Search for a company to import client details
+        </p>
       </div>
 
       {/* Search */}
@@ -465,7 +572,7 @@ function CompaniesHouseLookup({ onClose }: { onClose: () => void }) {
             {results.map((company) => (
               <div
                 key={company.company_number}
-                className="p-4 bg-gray-50 dark:bg-slate-700 rounded-lg border border-gray-200 dark:border-gray-600 hover:border-blue-500 cursor-pointer"
+                className="p-4 bg-gray-50 dark:bg-slate-700 rounded-lg border border-gray-200 dark:border-gray-600"
               >
                 <div className="flex items-start justify-between">
                   <div>
@@ -488,7 +595,10 @@ function CompaniesHouseLookup({ onClose }: { onClose: () => void }) {
                   </span>
                 </div>
                 <div className="mt-3 flex gap-2">
-                  <button className="px-3 py-1 text-xs font-medium text-blue-600 dark:text-blue-400 bg-blue-100 dark:bg-blue-900/30 rounded hover:bg-blue-200 dark:hover:bg-blue-900/50">
+                  <button
+                    onClick={() => onImport(company)}
+                    className="px-3 py-1 text-xs font-medium text-blue-600 dark:text-blue-400 bg-blue-100 dark:bg-blue-900/30 rounded hover:bg-blue-200 dark:hover:bg-blue-900/50"
+                  >
                     Import as Client
                   </button>
                   <button className="px-3 py-1 text-xs font-medium text-gray-600 dark:text-gray-400 bg-gray-100 dark:bg-slate-600 rounded hover:bg-gray-200 dark:hover:bg-slate-500">

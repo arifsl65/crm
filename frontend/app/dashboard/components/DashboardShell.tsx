@@ -1,6 +1,6 @@
 'use client';
 
-import { useState, useEffect } from 'react';
+import { useState, useEffect, createContext, useContext } from 'react';
 import { usePathname } from 'next/navigation';
 import { useAuth } from '@/components/auth-guard';
 import { Sidebar } from './Sidebar';
@@ -15,6 +15,22 @@ import {
   ActionsPanel,
   ActivityPanel,
 } from './panels';
+
+// Panel context for sharing state with module pages
+interface PanelContextType {
+  activePanel: string;
+  setActivePanel: (panel: string) => void;
+}
+
+const PanelContext = createContext<PanelContextType | null>(null);
+
+export function usePanelContext() {
+  const context = useContext(PanelContext);
+  if (!context) {
+    throw new Error('usePanelContext must be used within DashboardShell');
+  }
+  return context;
+}
 
 interface DashboardShellProps {
   children: React.ReactNode;
@@ -32,8 +48,8 @@ export function DashboardShell({ children }: DashboardShellProps) {
   }, []);
 
   // Determine if we're on the main dashboard or a module page
-  const isMainDashboard = pathname === '/dashboard';
-  const isAIPage = pathname === '/dashboard/ai';
+  const isMainDashboard = pathname === '/dashboard' || pathname === '/dashboard/';
+  const isAIPage = pathname === '/dashboard/ai' || pathname === '/dashboard/ai/';
 
   // Get current module from pathname
   const getCurrentModule = (): string => {
@@ -91,58 +107,63 @@ export function DashboardShell({ children }: DashboardShellProps) {
   }
 
   return (
-    <div className="min-h-screen bg-gray-100 dark:bg-slate-900 flex flex-col">
-      {/* Header */}
-      <Header user={user || undefined} onLogout={logout} />
+    <PanelContext.Provider value={{ activePanel, setActivePanel }}>
+      <div className="min-h-screen bg-gray-100 dark:bg-slate-900 flex flex-col">
+        {/* Header */}
+        <Header user={user || undefined} onLogout={logout} />
 
-      {/* Main Content Area */}
-      <div className="flex-1 flex overflow-hidden">
-        {/* Sidebar - Always visible */}
-        <Sidebar userRole={user?.role} />
+        {/* Main Content Area */}
+        <div className="flex-1 flex overflow-hidden">
+          {/* Sidebar - Always visible */}
+          <Sidebar userRole={user?.role} />
 
-        {/* SubMenu - Shows for current module */}
-        <SubMenu activePanel={activePanel} onPanelSelect={handlePanelSelect} />
+          {/* SubMenu - Shows for all modules (not just main dashboard) */}
+          <SubMenu
+            activePanel={activePanel}
+            onPanelSelect={handlePanelSelect}
+            currentModule={currentModule}
+          />
 
-        {/* Content Area */}
-        <main className="flex-1 flex overflow-hidden">
-          {/* Main Content */}
-          <div className={`flex-1 overflow-y-auto ${shouldCollapseChat ? '' : 'lg:flex-[2]'}`}>
-            {/* If on dashboard root and showing a panel, show panel content */}
-            {isMainDashboard ? (
-              <div className="h-full p-4">
-                <div className="bg-white dark:bg-slate-800 rounded-lg shadow-sm h-full">
-                  {renderDashboardPanel()}
+          {/* Content Area */}
+          <main className="flex-1 flex overflow-hidden">
+            {/* Main Content - Panel or Module Content */}
+            <div className="flex-1 overflow-y-auto">
+              {isMainDashboard ? (
+                <div className="h-full p-4">
+                  <div className="bg-white dark:bg-slate-800 rounded-lg shadow-sm h-full overflow-hidden">
+                    {renderDashboardPanel()}
+                  </div>
+                </div>
+              ) : (
+                <div className="h-full">
+                  {children}
+                </div>
+              )}
+            </div>
+
+            {/* AI Chat - Right side */}
+            {!isAIPage && (
+              <div
+                className={`
+                  hidden lg:block border-l border-gray-200 dark:border-gray-700 overflow-hidden transition-all
+                  ${isMainDashboard ? 'w-96' : shouldCollapseChat ? 'w-80' : 'w-96'}
+                `}
+              >
+                <div className="h-full p-4">
+                  <AIChat
+                    userName={user?.name || user?.email?.split('@')[0]}
+                    minimized={!isMainDashboard && shouldCollapseChat}
+                    onAction={handleAIAction}
+                  />
                 </div>
               </div>
-            ) : (
-              /* Module pages render their own content */
-              <div className="h-full">
-                {children}
-              </div>
             )}
-          </div>
-
-          {/* AI Chat - Right side (collapsible on module pages) */}
-          {!isAIPage && (
-            <div
-              className={`
-                hidden lg:block border-l border-gray-200 dark:border-gray-700 overflow-hidden transition-all
-                ${shouldCollapseChat ? 'w-80' : 'flex-1 max-w-md'}
-              `}
-            >
-              <div className="h-full p-4">
-                <AIChat
-                  userName={user?.name || user?.email?.split('@')[0]}
-                  minimized={shouldCollapseChat}
-                  onAction={handleAIAction}
-                />
-              </div>
-            </div>
-          )}
-        </main>
+          </main>
+        </div>
       </div>
-    </div>
+    </PanelContext.Provider>
   );
 }
 
 export default DashboardShell;
+export { PanelContext };

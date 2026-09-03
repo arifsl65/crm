@@ -6,12 +6,9 @@ import { getClients, getServices, Client, Service } from '@/lib/api';
 
 interface AlertItem {
   id: string;
-  type: 'at_risk' | 'quiet' | 'anomaly';
-  title: string;
-  subtitle: string;
-  severity: 'high' | 'medium' | 'low';
+  text: string;
   actionLabel: string;
-  actionHref?: string;
+  actionHref: string;
 }
 
 interface AlertsPanelProps {
@@ -39,9 +36,9 @@ export function AlertsPanel({ onClose }: AlertsPanelProps) {
         const services = servicesData.services || [];
         const now = new Date();
 
-        // At Risk: Clients with overdue services or missing documents
         const atRiskItems: AlertItem[] = [];
         const quietItems: AlertItem[] = [];
+        const anomalyItems: AlertItem[] = [];
 
         // Group services by client
         const servicesByClient: Record<string, Service[]> = {};
@@ -63,64 +60,61 @@ export function AlertsPanel({ onClose }: AlertsPanelProps) {
             return new Date(s.deadline) < now;
           });
 
+          // Get oldest overdue days
+          let oldestOverdueDays = 0;
+          overdueServices.forEach((s: Service) => {
+            if (!s.deadline) return;
+            const days = Math.floor((now.getTime() - new Date(s.deadline).getTime()) / (1000 * 60 * 60 * 24));
+            if (days > oldestOverdueDays) oldestOverdueDays = days;
+          });
+
           // Check for missing documents
           const missingDocs = clientServices.reduce((acc: number, s: Service) => {
-            return acc + ((s.docs_required || 0) - (s.docs_received || 0));
+            return acc + Math.max(0, (s.docs_required || 0) - (s.docs_received || 0));
           }, 0);
 
           if (overdueServices.length > 0 || missingDocs > 0) {
-            const details = [];
-            if (overdueServices.length > 0) {
-              details.push(`${overdueServices.length} overdue`);
-            }
-            if (missingDocs > 0) {
-              details.push(`${missingDocs} docs missing`);
-            }
+            const parts = [];
+            if (oldestOverdueDays > 0) parts.push(`${oldestOverdueDays} days`);
+            if (missingDocs > 0) parts.push(`${missingDocs} doc${missingDocs > 1 ? 's' : ''}`);
 
             atRiskItems.push({
               id: client.id,
-              type: 'at_risk',
-              title: client.company_name,
-              subtitle: details.join(', '),
-              severity: overdueServices.length > 1 ? 'high' : 'medium',
-              actionLabel: 'View',
+              text: `${client.company_name} - ${parts.join(', ')}`,
+              actionLabel: '[View]',
               actionHref: `/dashboard/clients/${client.id}`,
             });
           }
 
           // Check for quiet clients (no contact in 14+ days)
-          if (client.last_contact_at) {
+          if (client.last_contact_at && client.status === 'active') {
             const lastContact = new Date(client.last_contact_at);
             const daysSinceContact = Math.floor((now.getTime() - lastContact.getTime()) / (1000 * 60 * 60 * 24));
 
-            if (daysSinceContact >= 14 && client.status === 'active') {
+            if (daysSinceContact >= 14) {
               quietItems.push({
                 id: client.id,
-                type: 'quiet',
-                title: client.company_name,
-                subtitle: `${daysSinceContact} days since last contact`,
-                severity: daysSinceContact >= 30 ? 'high' : daysSinceContact >= 21 ? 'medium' : 'low',
-                actionLabel: 'Chase',
+                text: `${client.company_name} - ${daysSinceContact} days`,
+                actionLabel: '[Chase]',
                 actionHref: `/dashboard/clients/${client.id}`,
               });
             }
           }
         });
 
-        // Anomalies: Could be staff workload imbalance, unusual patterns, etc.
-        // For now, we'll create placeholder anomalies
-        const anomalyItems: AlertItem[] = [];
+        // Anomalies: Placeholder - would check for staff workload imbalance
+        // Currently no assigned_staff_id in client data, so we skip this check
 
-        // Example: Check if any staff has too many clients (placeholder logic)
-        // In production, this would come from the backend
+        // Sort quiet clients by days (most days first)
+        quietItems.sort((a, b) => {
+          const daysA = parseInt(a.text.match(/(\d+) days/)?.[1] || '0');
+          const daysB = parseInt(b.text.match(/(\d+) days/)?.[1] || '0');
+          return daysB - daysA;
+        });
 
         setAtRisk(atRiskItems.slice(0, 10));
-        setQuiet(quietItems.sort((a, b) => {
-          const daysA = parseInt(a.subtitle.match(/\d+/)?.[0] || '0');
-          const daysB = parseInt(b.subtitle.match(/\d+/)?.[0] || '0');
-          return daysB - daysA;
-        }).slice(0, 10));
-        setAnomalies(anomalyItems);
+        setQuiet(quietItems.slice(0, 10));
+        setAnomalies(anomalyItems.slice(0, 5));
         setError(null);
       } catch (err) {
         setError('Failed to load alerts');
@@ -132,17 +126,12 @@ export function AlertsPanel({ onClose }: AlertsPanelProps) {
     fetchAlerts();
   }, []);
 
-  const handleChase = (clientId: string) => {
-    console.log('Chase client:', clientId);
-    // TODO: Implement chase functionality
-  };
-
   if (loading) {
     return (
       <div className="h-full flex flex-col">
         <div className="p-4 border-b border-gray-200 dark:border-gray-700 flex items-center justify-between">
           <h2 className="text-lg font-semibold text-gray-900 dark:text-white flex items-center gap-2">
-            <span>🔔</span> Alerts
+            <span>🔔</span> ALERTS
           </h2>
           {onClose && (
             <button onClick={onClose} className="text-gray-400 hover:text-gray-600 dark:hover:text-gray-200">
@@ -157,19 +146,12 @@ export function AlertsPanel({ onClose }: AlertsPanelProps) {
     );
   }
 
-  const totalAlerts = atRisk.length + quiet.length + anomalies.length;
-
   return (
     <div className="h-full flex flex-col bg-white dark:bg-slate-800 rounded-lg">
       {/* Header */}
       <div className="p-4 border-b border-gray-200 dark:border-gray-700 flex items-center justify-between">
         <h2 className="text-lg font-semibold text-gray-900 dark:text-white flex items-center gap-2">
-          <span>🔔</span> Alerts
-          {totalAlerts > 0 && (
-            <span className="px-2 py-0.5 text-xs font-medium rounded-full bg-red-100 text-red-800 dark:bg-red-900 dark:text-red-200">
-              {totalAlerts}
-            </span>
-          )}
+          <span>🔔</span> ALERTS
         </h2>
         {onClose && (
           <button onClick={onClose} className="text-gray-400 hover:text-gray-600 dark:hover:text-gray-200">
@@ -186,123 +168,83 @@ export function AlertsPanel({ onClose }: AlertsPanelProps) {
           </div>
         )}
 
-        {totalAlerts === 0 && !error && (
-          <div className="text-center py-8">
-            <span className="text-4xl">✨</span>
-            <p className="mt-2 text-gray-600 dark:text-gray-400">All clear! No alerts.</p>
-          </div>
-        )}
-
-        {/* At Risk Section */}
-        {atRisk.length > 0 && (
-          <div>
-            <h3 className="text-sm font-semibold text-orange-600 dark:text-orange-400 mb-3 flex items-center gap-2">
-              ⚠️ AT RISK ({atRisk.length})
-            </h3>
-            <div className="space-y-2">
+        {/* ⚠️ AT RISK Section */}
+        <div>
+          <h3 className="text-sm font-semibold text-orange-600 dark:text-orange-400 mb-3">
+            ⚠️ AT RISK ({atRisk.length})
+          </h3>
+          {atRisk.length > 0 ? (
+            <div className="space-y-1">
               {atRisk.map((item) => (
-                <AlertRow key={item.id} item={item} onAction={handleChase} />
+                <div key={item.id} className="flex items-center justify-between py-1.5">
+                  <span className="text-sm text-gray-700 dark:text-gray-300">
+                    {item.text}
+                  </span>
+                  <Link
+                    href={item.actionHref}
+                    className="text-sm text-blue-600 dark:text-blue-400 hover:underline"
+                  >
+                    {item.actionLabel}
+                  </Link>
+                </div>
               ))}
             </div>
-          </div>
-        )}
-
-        {/* Quiet Clients Section */}
-        {quiet.length > 0 && (
-          <div>
-            <h3 className="text-sm font-semibold text-gray-600 dark:text-gray-400 mb-3 flex items-center gap-2">
-              😶 QUIET CLIENTS ({quiet.length})
-            </h3>
-            <div className="space-y-2">
-              {quiet.map((item) => (
-                <AlertRow key={item.id} item={item} onAction={handleChase} />
-              ))}
-            </div>
-          </div>
-        )}
-
-        {/* Anomalies Section */}
-        {anomalies.length > 0 && (
-          <div>
-            <h3 className="text-sm font-semibold text-purple-600 dark:text-purple-400 mb-3 flex items-center gap-2">
-              🔍 ANOMALIES ({anomalies.length})
-            </h3>
-            <div className="space-y-2">
-              {anomalies.map((item) => (
-                <AlertRow key={item.id} item={item} onAction={handleChase} />
-              ))}
-            </div>
-          </div>
-        )}
-      </div>
-
-      {/* Footer */}
-      <div className="p-4 border-t border-gray-200 dark:border-gray-700">
-        <Link
-          href="/dashboard/clients"
-          className="w-full flex items-center justify-center gap-2 px-4 py-2 text-sm font-medium text-gray-700 dark:text-gray-300 bg-gray-100 dark:bg-slate-700 rounded-lg hover:bg-gray-200 dark:hover:bg-slate-600"
-        >
-          View All Clients →
-        </Link>
-      </div>
-    </div>
-  );
-}
-
-function AlertRow({
-  item,
-  onAction,
-}: {
-  item: AlertItem;
-  onAction: (id: string) => void;
-}) {
-  const getBgColor = () => {
-    if (item.type === 'at_risk') {
-      return item.severity === 'high'
-        ? 'bg-red-50 dark:bg-red-900/20 border-red-200 dark:border-red-800'
-        : 'bg-orange-50 dark:bg-orange-900/20 border-orange-200 dark:border-orange-800';
-    }
-    if (item.type === 'quiet') {
-      return 'bg-gray-50 dark:bg-slate-700 border-gray-200 dark:border-gray-600';
-    }
-    return 'bg-purple-50 dark:bg-purple-900/20 border-purple-200 dark:border-purple-800';
-  };
-
-  const getIcon = () => {
-    if (item.type === 'at_risk') return item.severity === 'high' ? '🔴' : '🟠';
-    if (item.type === 'quiet') return '😶';
-    return '🔍';
-  };
-
-  return (
-    <div className={`flex items-center justify-between p-3 rounded-lg border ${getBgColor()}`}>
-      <div className="min-w-0 flex-1">
-        <div className="flex items-center gap-2">
-          <span>{getIcon()}</span>
-          <p className="text-sm font-medium text-gray-900 dark:text-white truncate">
-            {item.title}
-          </p>
+          ) : (
+            <p className="text-sm text-gray-500 dark:text-gray-400 italic">None</p>
+          )}
         </div>
-        <p className="text-xs text-gray-500 dark:text-gray-400 mt-1 ml-6">
-          {item.subtitle}
-        </p>
-      </div>
-      <div className="ml-3">
-        {item.actionHref ? (
-          <Link
-            href={item.actionHref}
-            className="px-3 py-1 text-xs font-medium text-blue-600 dark:text-blue-400 hover:bg-blue-100 dark:hover:bg-blue-900/30 rounded"
-          >
-            {item.actionLabel}
-          </Link>
-        ) : (
-          <button
-            onClick={() => onAction(item.id)}
-            className="px-3 py-1 text-xs font-medium text-blue-600 dark:text-blue-400 hover:bg-blue-100 dark:hover:bg-blue-900/30 rounded"
-          >
-            {item.actionLabel}
-          </button>
-        )}
+
+        {/* 😶 QUIET CLIENTS Section */}
+        <div>
+          <h3 className="text-sm font-semibold text-gray-600 dark:text-gray-400 mb-3">
+            😶 QUIET CLIENTS ({quiet.length})
+          </h3>
+          {quiet.length > 0 ? (
+            <div className="space-y-1">
+              {quiet.map((item) => (
+                <div key={item.id} className="flex items-center justify-between py-1.5">
+                  <span className="text-sm text-gray-700 dark:text-gray-300">
+                    {item.text}
+                  </span>
+                  <Link
+                    href={item.actionHref}
+                    className="text-sm text-blue-600 dark:text-blue-400 hover:underline"
+                  >
+                    {item.actionLabel}
+                  </Link>
+                </div>
+              ))}
+            </div>
+          ) : (
+            <p className="text-sm text-gray-500 dark:text-gray-400 italic">None</p>
+          )}
+        </div>
+
+        {/* 🔍 ANOMALIES Section */}
+        <div>
+          <h3 className="text-sm font-semibold text-purple-600 dark:text-purple-400 mb-3">
+            🔍 ANOMALIES ({anomalies.length})
+          </h3>
+          {anomalies.length > 0 ? (
+            <div className="space-y-1">
+              {anomalies.map((item) => (
+                <div key={item.id} className="flex items-center justify-between py-1.5">
+                  <span className="text-sm text-gray-700 dark:text-gray-300">
+                    {item.text}
+                  </span>
+                  <Link
+                    href={item.actionHref}
+                    className="text-sm text-blue-600 dark:text-blue-400 hover:underline"
+                  >
+                    {item.actionLabel}
+                  </Link>
+                </div>
+              ))}
+            </div>
+          ) : (
+            <p className="text-sm text-gray-500 dark:text-gray-400 italic">None</p>
+          )}
+        </div>
       </div>
     </div>
   );

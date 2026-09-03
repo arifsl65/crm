@@ -167,15 +167,16 @@ func (h *ClientHandler) List(c *gin.Context) {
 	// Search filter
 	// Fix #3: Escape LIKE pattern special characters to prevent pattern injection
 	if search != "" {
+		searchPattern := "%" + escapeLikePattern(search) + "%"
 		query.WriteString(` AND (c.company_name ILIKE $`)
 		query.WriteString(strconv.Itoa(argNum))
-		query.WriteString(` OR c.contact_name ILIKE $`)
-		query.WriteString(strconv.Itoa(argNum))
-		query.WriteString(` OR c.email ILIKE $`)
-		query.WriteString(strconv.Itoa(argNum))
-		query.WriteString(`) ESCAPE '\'`)
-		args = append(args, "%"+escapeLikePattern(search)+"%")
-		argNum++
+		query.WriteString(` ESCAPE '\' OR c.contact_name ILIKE $`)
+		query.WriteString(strconv.Itoa(argNum + 1))
+		query.WriteString(` ESCAPE '\' OR c.email ILIKE $`)
+		query.WriteString(strconv.Itoa(argNum + 2))
+		query.WriteString(` ESCAPE '\')`)
+		args = append(args, searchPattern, searchPattern, searchPattern)
+		argNum += 3
 	}
 
 	query.WriteString(` ORDER BY c.company_name ASC LIMIT $`)

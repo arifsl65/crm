@@ -2,13 +2,22 @@
 
 import React, { useState, useEffect, useRef, useCallback } from 'react';
 import { useRouter } from 'next/navigation';
+import { getClients, getDocuments, getServices, getUsers } from '@/lib/api';
 
 interface SearchResult {
   id: string;
-  type: 'client' | 'invoice' | 'document' | 'service' | 'user';
+  type: 'client' | 'document' | 'service' | 'staff';
   title: string;
   subtitle?: string;
   url: string;
+}
+
+interface RecentItem {
+  id: string;
+  type: 'client' | 'document' | 'service' | 'staff';
+  title: string;
+  url: string;
+  accessedAt: Date;
 }
 
 interface GlobalSearchProps {
@@ -21,20 +30,62 @@ interface GlobalSearchProps {
  * GlobalSearch - Command palette style search component
  * Triggered by Ctrl/Cmd + K
  */
+const RECENT_ITEMS_KEY = 'global-search-recent';
+const MAX_RECENT_ITEMS = 5;
+
 export function GlobalSearch({
-  placeholder = 'Search clients, invoices, documents...',
+  placeholder = 'Search everything...',
   onSearch,
   className = '',
 }: GlobalSearchProps) {
-  // Fix #31: Use Next.js router for SPA navigation instead of window.location.href
   const router = useRouter();
   const [isOpen, setIsOpen] = useState(false);
   const [query, setQuery] = useState('');
   const [results, setResults] = useState<SearchResult[]>([]);
+  const [recentItems, setRecentItems] = useState<RecentItem[]>([]);
   const [selectedIndex, setSelectedIndex] = useState(0);
   const [isLoading, setIsLoading] = useState(false);
   const inputRef = useRef<HTMLInputElement>(null);
   const containerRef = useRef<HTMLDivElement>(null);
+
+  // Load recent items from localStorage
+  useEffect(() => {
+    try {
+      const stored = localStorage.getItem(RECENT_ITEMS_KEY);
+      if (stored) {
+        const items = JSON.parse(stored);
+        setRecentItems(items.slice(0, MAX_RECENT_ITEMS));
+      }
+    } catch (e) {
+      console.error('Failed to load recent items:', e);
+    }
+  }, []);
+
+  // Save item to recent when clicked
+  const addToRecent = (item: SearchResult) => {
+    const newRecent: RecentItem = {
+      id: item.id,
+      type: item.type,
+      title: item.title,
+      url: item.url,
+      accessedAt: new Date(),
+    };
+
+    setRecentItems((prev) => {
+      // Remove if already exists, add to front
+      const filtered = prev.filter((r) => r.id !== item.id || r.type !== item.type);
+      const updated = [newRecent, ...filtered].slice(0, MAX_RECENT_ITEMS);
+
+      // Save to localStorage
+      try {
+        localStorage.setItem(RECENT_ITEMS_KEY, JSON.stringify(updated));
+      } catch (e) {
+        console.error('Failed to save recent items:', e);
+      }
+
+      return updated;
+    });
+  };
 
   // Keyboard shortcut to open search
   useEffect(() => {
@@ -59,7 +110,7 @@ export function GlobalSearch({
     }
   }, [isOpen]);
 
-  // Search handler
+  // Search handler - calls real API endpoints
   const handleSearch = useCallback(
     async (searchQuery: string) => {
       if (!searchQuery.trim()) {
@@ -73,17 +124,69 @@ export function GlobalSearch({
           const searchResults = await onSearch(searchQuery);
           setResults(searchResults);
         } else {
-          // Demo results if no search handler provided
-          const demoResults: SearchResult[] = [
-            { id: '1', type: 'client', title: 'Acme Corp', subtitle: 'Client', url: '/clients/1' },
-            { id: '2', type: 'invoice', title: 'INV-2024-001', subtitle: 'Invoice - $5,000', url: '/invoices/1' },
-            { id: '3', type: 'document', title: 'Contract.pdf', subtitle: 'Document', url: '/documents/1' },
-          ];
-          setResults(demoResults.filter(
-            (r) =>
-              r.title.toLowerCase().includes(searchQuery.toLowerCase()) ||
-              r.subtitle?.toLowerCase().includes(searchQuery.toLowerCase())
-          ));
+          // Search all endpoints in parallel
+          const [clientsRes, documentsRes, servicesRes, usersRes] = await Promise.allSettled([
+            getClients({ search: searchQuery, limit: 5 }),
+            getDocuments({ search: searchQuery, limit: 5 }),
+            getServices({ search: searchQuery, limit: 5 }),
+            getUsers({ search: searchQuery, limit: 5 }),
+          ]);
+
+          const allResults: SearchResult[] = [];
+
+          // Process clients
+          if (clientsRes.status === 'fulfilled' && clientsRes.value?.clients) {
+            clientsRes.value.clients.forEach((client: { id: string; company_name: string; contact_name?: string }) => {
+              allResults.push({
+                id: client.id,
+                type: 'client',
+                title: client.company_name,
+                subtitle: client.contact_name || undefined,
+                url: `/dashboard/clients/${client.id}`,
+              });
+            });
+          }
+
+          // Process documents
+          if (documentsRes.status === 'fulfilled' && documentsRes.value?.documents) {
+            documentsRes.value.documents.forEach((doc: { id: string; name: string; client_name?: string }) => {
+              allResults.push({
+                id: doc.id,
+                type: 'document',
+                title: doc.name,
+                subtitle: doc.client_name || undefined,
+                url: `/dashboard/documents/${doc.id}`,
+              });
+            });
+          }
+
+          // Process services
+          if (servicesRes.status === 'fulfilled' && servicesRes.value?.services) {
+            servicesRes.value.services.forEach((service: { id: string; name: string; client_name?: string }) => {
+              allResults.push({
+                id: service.id,
+                type: 'service',
+                title: service.name,
+                subtitle: service.client_name || undefined,
+                url: `/dashboard/services/${service.id}`,
+              });
+            });
+          }
+
+          // Process users (staff)
+          if (usersRes.status === 'fulfilled' && usersRes.value?.users) {
+            usersRes.value.users.forEach((user: { id: string; name?: string; email: string; role?: string }) => {
+              allResults.push({
+                id: user.id,
+                type: 'staff',
+                title: user.name || user.email,
+                subtitle: user.role || undefined,
+                url: `/dashboard/staff/${user.id}`,
+              });
+            });
+          }
+
+          setResults(allResults);
         }
       } catch (error) {
         console.error('Search error:', error);
@@ -117,8 +220,12 @@ export function GlobalSearch({
         break;
       case 'Enter':
         e.preventDefault();
-        if (results[selectedIndex]) {
+        if (query && results[selectedIndex]) {
+          addToRecent(results[selectedIndex]);
           router.push(results[selectedIndex].url);
+          setIsOpen(false);
+        } else if (!query && recentItems[selectedIndex]) {
+          router.push(recentItems[selectedIndex].url);
           setIsOpen(false);
         }
         break;
@@ -139,32 +246,18 @@ export function GlobalSearch({
     return () => document.removeEventListener('mousedown', handleClickOutside);
   }, [isOpen]);
 
-  const typeIcons = {
-    client: (
-      <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M16 7a4 4 0 11-8 0 4 4 0 018 0zM12 14a7 7 0 00-7 7h14a7 7 0 00-7-7z" />
-      </svg>
-    ),
-    invoice: (
-      <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" />
-      </svg>
-    ),
-    document: (
-      <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M7 21h10a2 2 0 002-2V9.414a1 1 0 00-.293-.707l-5.414-5.414A1 1 0 0012.586 3H7a2 2 0 00-2 2v14a2 2 0 002 2z" />
-      </svg>
-    ),
-    service: (
-      <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M21 13.255A23.931 23.931 0 0112 15c-3.183 0-6.22-.62-9-1.745M16 6V4a2 2 0 00-2-2h-4a2 2 0 00-2 2v2m4 6h.01M5 20h14a2 2 0 002-2V8a2 2 0 00-2-2H5a2 2 0 00-2 2v10a2 2 0 002 2z" />
-      </svg>
-    ),
-    user: (
-      <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5.121 17.804A13.937 13.937 0 0112 16c2.5 0 4.847.655 6.879 1.804M15 10a3 3 0 11-6 0 3 3 0 016 0zm6 2a9 9 0 11-18 0 9 9 0 0118 0z" />
-      </svg>
-    ),
+  const typeIcons: Record<string, React.ReactNode> = {
+    client: <span className="text-sm">👥</span>,
+    document: <span className="text-sm">📄</span>,
+    service: <span className="text-sm">📋</span>,
+    staff: <span className="text-sm">👤</span>,
+  };
+
+  const typeLabels: Record<string, string> = {
+    client: 'Client',
+    document: 'Document',
+    service: 'Service',
+    staff: 'Staff',
   };
 
   if (!isOpen) {
@@ -222,46 +315,135 @@ export function GlobalSearch({
 
           {/* Results */}
           <div className="max-h-80 overflow-y-auto">
-            {results.length > 0 ? (
-              <ul className="py-2">
-                {results.map((result, index) => (
-                  <li key={result.id}>
-                    <button
-                      type="button"
-                      className={`w-full flex items-center gap-3 px-4 py-3 text-left ${
-                        index === selectedIndex
-                          ? 'bg-blue-50 dark:bg-blue-900/30'
-                          : 'hover:bg-gray-50 dark:hover:bg-gray-700'
-                      }`}
-                      onMouseEnter={() => setSelectedIndex(index)}
-                      onClick={() => {
-                        // Fix #31: Use router.push for SPA navigation
-                        router.push(result.url);
-                        setIsOpen(false);
-                      }}
-                    >
-                      <div className="flex-shrink-0 w-8 h-8 flex items-center justify-center rounded-lg bg-gray-100 dark:bg-gray-700 text-gray-500 dark:text-gray-400">
-                        {typeIcons[result.type]}
-                      </div>
-                      <div className="flex-1 min-w-0">
-                        <p className="text-sm font-medium text-gray-900 dark:text-white truncate">
-                          {result.title}
-                        </p>
-                        {result.subtitle && (
-                          <p className="text-xs text-gray-500 dark:text-gray-400 truncate">
-                            {result.subtitle}
+            {/* Show recent items when no query */}
+            {!query && recentItems.length > 0 && (
+              <div className="py-2">
+                <div className="px-4 py-2 text-xs font-semibold text-gray-500 dark:text-gray-400 uppercase tracking-wider">
+                  Recent
+                </div>
+                <ul>
+                  {recentItems.map((item, index) => (
+                    <li key={`${item.type}-${item.id}`}>
+                      <button
+                        type="button"
+                        className={`w-full flex items-center gap-3 px-4 py-3 text-left ${
+                          index === selectedIndex
+                            ? 'bg-blue-50 dark:bg-blue-900/30'
+                            : 'hover:bg-gray-50 dark:hover:bg-gray-700'
+                        }`}
+                        onMouseEnter={() => setSelectedIndex(index)}
+                        onClick={() => {
+                          router.push(item.url);
+                          setIsOpen(false);
+                        }}
+                      >
+                        <div className="flex-shrink-0 w-8 h-8 flex items-center justify-center rounded-lg bg-gray-100 dark:bg-gray-700">
+                          <span className="text-gray-400">🕐</span>
+                        </div>
+                        <div className="flex-1 min-w-0">
+                          <p className="text-sm font-medium text-gray-900 dark:text-white truncate">
+                            {item.title}
                           </p>
-                        )}
+                        </div>
+                        <span className="text-xs text-gray-400 dark:text-gray-500">
+                          {typeLabels[item.type]}
+                        </span>
+                      </button>
+                    </li>
+                  ))}
+                </ul>
+                <div className="px-4 py-3 text-xs text-gray-400 dark:text-gray-500 border-t border-gray-100 dark:border-gray-700">
+                  Type to search clients, documents, services, staff...
+                </div>
+              </div>
+            )}
+
+            {/* Show placeholder when no query and no recent */}
+            {!query && recentItems.length === 0 && (
+              <div className="px-4 py-8 text-center text-gray-500 dark:text-gray-400">
+                Type to search clients, documents, services, staff...
+              </div>
+            )}
+
+            {/* Show search results grouped by type when query exists */}
+            {query && results.length > 0 && (() => {
+              // Group results by type
+              const grouped = results.reduce((acc, result) => {
+                if (!acc[result.type]) acc[result.type] = [];
+                if (acc[result.type].length < 5) { // Max 5 per group
+                  acc[result.type].push(result);
+                }
+                return acc;
+              }, {} as Record<string, SearchResult[]>);
+
+              // Flatten for keyboard navigation index
+              const flatResults = Object.values(grouped).flat();
+              let currentIndex = 0;
+
+              return (
+                <div className="py-2">
+                  {(['client', 'document', 'service', 'staff'] as const).map((type) => {
+                    const items = grouped[type];
+                    if (!items || items.length === 0) return null;
+
+                    return (
+                      <div key={type}>
+                        <div className="px-4 py-2 text-xs font-semibold text-gray-500 dark:text-gray-400 uppercase tracking-wider border-t border-gray-100 dark:border-gray-700 first:border-t-0">
+                          {typeLabels[type]}s
+                        </div>
+                        <ul>
+                          {items.map((result) => {
+                            const itemIndex = currentIndex++;
+                            return (
+                              <li key={`${result.type}-${result.id}`}>
+                                <button
+                                  type="button"
+                                  className={`w-full flex items-center gap-3 px-4 py-3 text-left ${
+                                    itemIndex === selectedIndex
+                                      ? 'bg-blue-50 dark:bg-blue-900/30'
+                                      : 'hover:bg-gray-50 dark:hover:bg-gray-700'
+                                  }`}
+                                  onMouseEnter={() => setSelectedIndex(itemIndex)}
+                                  onClick={() => {
+                                    addToRecent(result);
+                                    router.push(result.url);
+                                    setIsOpen(false);
+                                  }}
+                                >
+                                  <div className="flex-shrink-0 w-8 h-8 flex items-center justify-center rounded-lg bg-gray-100 dark:bg-gray-700">
+                                    {typeIcons[result.type]}
+                                  </div>
+                                  <div className="flex-1 min-w-0">
+                                    <p className="text-sm font-medium text-gray-900 dark:text-white truncate">
+                                      {result.title}
+                                    </p>
+                                    {result.subtitle && (
+                                      <p className="text-xs text-gray-500 dark:text-gray-400 truncate">
+                                        {result.subtitle}
+                                      </p>
+                                    )}
+                                  </div>
+                                  <span className="text-xs text-blue-600 dark:text-blue-400">
+                                    → Open
+                                  </span>
+                                </button>
+                              </li>
+                            );
+                          })}
+                        </ul>
                       </div>
-                    </button>
-                  </li>
-                ))}
-              </ul>
-            ) : query && !isLoading ? (
+                    );
+                  })}
+                </div>
+              );
+            })()}
+
+            {/* Show no results message */}
+            {query && results.length === 0 && !isLoading && (
               <div className="px-4 py-8 text-center text-gray-500 dark:text-gray-400">
                 No results found for &quot;{query}&quot;
               </div>
-            ) : null}
+            )}
           </div>
 
           {/* Footer */}
