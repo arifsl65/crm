@@ -30,6 +30,7 @@ type Config struct {
 	OSS            OSSConfig
 	OAuth          OAuthConfig
 	FrontendURL    string
+	CookieDomain   string // Domain for auth cookies (e.g., ".irislondonshoes.com" for cross-subdomain)
 }
 
 // OAuthConfig holds OAuth provider settings.
@@ -300,6 +301,10 @@ func Load() (*Config, error) {
 
 	// Frontend URL for email links
 	cfg.FrontendURL = getEnv("FRONTEND_URL", "http://localhost:3000")
+
+	// Cookie domain for cross-subdomain auth (e.g., ".irislondonshoes.com")
+	// Empty string means cookies are set on the exact domain that created them
+	cfg.CookieDomain = getEnv("COOKIE_DOMAIN", "")
 
 	// mTLS config
 	// When SECRETS_FROM_KMS=true, fetch certs from KMS and write to temp files

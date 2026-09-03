@@ -214,7 +214,7 @@ func main() {
 		WSHub:       wsHub,
 		RateLimiter: authRateLimiter,
 		Handlers: &Handlers{
-			Auth:           handlers.NewAuthHandler(db, jwtManager, sessionManager, emailClient, cfg.FrontendURL, authRateLimiter, auditLogger, redis),
+			Auth:           handlers.NewAuthHandler(db, jwtManager, sessionManager, emailClient, cfg.FrontendURL, cfg.CookieDomain, authRateLimiter, auditLogger, redis),
 			Tenant:         handlers.NewTenantHandler(db),
 			User:           handlers.NewUserHandler(db, sessionManager),
 			Client:         handlers.NewClientHandler(db, auditLogger),

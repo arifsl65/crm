@@ -32,18 +32,20 @@ type AuthHandler struct {
 	session        *auth.SessionManager
 	email          *email.Client
 	frontendURL    string
+	cookieDomain   string // Domain for auth cookies (e.g., ".irislondonshoes.com" for cross-subdomain)
 	rateLimiter    *middleware.AuthRateLimiter
 	audit          *audit.Logger
 	tokenBlocklist middleware.TokenBlocklist
 }
 
-func NewAuthHandler(db *database.Pool, jwt *auth.JWTManager, session *auth.SessionManager, emailClient *email.Client, frontendURL string, rateLimiter *middleware.AuthRateLimiter, auditLogger *audit.Logger, tokenBlocklist middleware.TokenBlocklist) *AuthHandler {
+func NewAuthHandler(db *database.Pool, jwt *auth.JWTManager, session *auth.SessionManager, emailClient *email.Client, frontendURL string, cookieDomain string, rateLimiter *middleware.AuthRateLimiter, auditLogger *audit.Logger, tokenBlocklist middleware.TokenBlocklist) *AuthHandler {
 	return &AuthHandler{
 		db:             db,
 		jwt:            jwt,
 		session:        session,
 		email:          emailClient,
 		frontendURL:    frontendURL,
+		cookieDomain:   cookieDomain,
 		rateLimiter:    rateLimiter,
 		audit:          auditLogger,
 		tokenBlocklist: tokenBlocklist,
@@ -56,27 +58,30 @@ func (h *AuthHandler) setAuthCookies(c *gin.Context, accessToken, refreshToken s
 	// Determine if we're in production (HTTPS)
 	secure := c.Request.TLS != nil || c.GetHeader("X-Forwarded-Proto") == "https"
 
+	// Use Lax mode for cross-subdomain support (api.domain.com -> crm.domain.com)
+	// Strict mode blocks cookies on cross-subdomain requests
+	c.SetSameSite(http.SameSiteLaxMode)
+
 	// Access token cookie - short lived (15 minutes)
 	c.SetCookie(
-		"access_token",   // name
-		accessToken,      // value
-		15*60,            // maxAge in seconds (15 minutes)
-		"/",              // path
-		"",               // domain (empty = current domain)
-		secure,           // secure (HTTPS only in production)
-		true,             // httpOnly (not accessible via JavaScript)
+		"access_token",    // name
+		accessToken,       // value
+		15*60,             // maxAge in seconds (15 minutes)
+		"/",               // path
+		h.cookieDomain,    // domain (e.g., ".irislondonshoes.com" for cross-subdomain)
+		secure,            // secure (HTTPS only in production)
+		true,              // httpOnly (not accessible via JavaScript)
 	)
-	c.SetSameSite(http.SameSiteStrictMode)
 
 	// Refresh token cookie - longer lived (7 days)
 	c.SetCookie(
-		"refresh_token",  // name
-		refreshToken,     // value
-		7*24*60*60,       // maxAge in seconds (7 days)
-		"/",              // path
-		"",               // domain
-		secure,           // secure
-		true,             // httpOnly
+		"refresh_token",   // name
+		refreshToken,      // value
+		7*24*60*60,        // maxAge in seconds (7 days)
+		"/",               // path
+		h.cookieDomain,    // domain
+		secure,            // secure
+		true,              // httpOnly
 	)
 }
 
@@ -84,8 +89,9 @@ func (h *AuthHandler) setAuthCookies(c *gin.Context, accessToken, refreshToken s
 func (h *AuthHandler) clearAuthCookies(c *gin.Context) {
 	secure := c.Request.TLS != nil || c.GetHeader("X-Forwarded-Proto") == "https"
 
-	c.SetCookie("access_token", "", -1, "/", "", secure, true)
-	c.SetCookie("refresh_token", "", -1, "/", "", secure, true)
+	c.SetSameSite(http.SameSiteLaxMode)
+	c.SetCookie("access_token", "", -1, "/", h.cookieDomain, secure, true)
+	c.SetCookie("refresh_token", "", -1, "/", h.cookieDomain, secure, true)
 }
 
 type LoginRequest struct {
