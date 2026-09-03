@@ -555,6 +555,7 @@ func setupRouter(app *Application) *gin.Engine {
 			aiRoutes.POST("/chat", h.AI.Chat)
 			aiRoutes.POST("/chat/stream", h.AI.ChatStream)
 			aiRoutes.GET("/chat/history", h.AI.GetChatHistory)
+			aiRoutes.POST("/chat/history", h.AI.SaveChatHistory)
 			aiRoutes.DELETE("/chat/:id", h.AI.DeleteChat)
 
 			// Document AI

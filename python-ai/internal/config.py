@@ -176,9 +176,14 @@ class Settings(BaseSettings):
     # Groq AI (primary AI provider)
     groq_api_key: str = ""
     groq_model: str = "openai/gpt-oss-120b"  # General-purpose large model for document analysis
-    groq_vision_model: str = "llama-3.2-90b-vision-preview"  # Vision model for OCR/image analysis
+    groq_vision_model: str = "meta-llama/llama-4-scout-17b-16e-instruct"  # Vision model for OCR/image analysis
     groq_max_tokens: int = 4096
     groq_temperature: float = 0.1  # Low for consistent document analysis
+
+    # Anthropic Claude (fallback AI provider)
+    anthropic_api_key: str = ""
+    anthropic_model: str = "claude-3-haiku-20240307"  # Fast, cost-effective fallback
+    anthropic_max_tokens: int = 4096
 
     def get_cors_origins(self) -> list[str]:
         """Parse CORS origins from comma-separated string."""

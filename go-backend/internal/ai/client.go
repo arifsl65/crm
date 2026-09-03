@@ -447,6 +447,862 @@ func (c *Client) post(ctx context.Context, path string, body interface{}) (*http
 	return nil, fmt.Errorf("request failed after %d retries: %w", c.retryConfig.MaxRetries, lastErr)
 }
 
+// =============================================================================
+// Email AI Methods
+// =============================================================================
+
+// EmailSummarizeRequest is the request body for email summarization.
+type EmailSummarizeRequest struct {
+	Subject   string `json:"subject"`
+	Body      string `json:"body"`
+	Sender    string `json:"sender,omitempty"`
+	Recipient string `json:"recipient,omitempty"`
+	EmailID   string `json:"email_id,omitempty"`
+}
+
+// EmailSummarizeResponse is the response from email summarization.
+type EmailSummarizeResponse struct {
+	Summary        string   `json:"summary"`
+	KeyPoints      []string `json:"key_points"`
+	ActionRequired bool     `json:"action_required"`
+	ActionItems    []string `json:"action_items"`
+	Deadline       *string  `json:"deadline"`
+	Urgency        string   `json:"urgency"`
+	Category       string   `json:"category"`
+	EmailID        string   `json:"email_id,omitempty"`
+	Error          string   `json:"error,omitempty"`
+}
+
+// SummarizeEmail calls the Python AI service to summarize an email.
+func (c *Client) SummarizeEmail(ctx context.Context, req EmailSummarizeRequest) (*EmailSummarizeResponse, error) {
+	path := fmt.Sprintf("/api/v1/ai/emails/summarize?subject=%s&body=%s&sender=%s&recipient=%s&email_id=%s",
+		url.QueryEscape(req.Subject),
+		url.QueryEscape(req.Body),
+		url.QueryEscape(req.Sender),
+		url.QueryEscape(req.Recipient),
+		url.QueryEscape(req.EmailID),
+	)
+
+	resp, err := c.post(ctx, path, nil)
+	if err != nil {
+		return nil, err
+	}
+	defer drainAndClose(resp.Body)
+
+	var result EmailSummarizeResponse
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		return nil, fmt.Errorf("failed to decode response: %w", err)
+	}
+
+	return &result, nil
+}
+
+// EmailSentimentRequest is the request body for email sentiment analysis.
+type EmailSentimentRequest struct {
+	Subject string `json:"subject"`
+	Body    string `json:"body"`
+	Sender  string `json:"sender,omitempty"`
+	EmailID string `json:"email_id,omitempty"`
+}
+
+// EmailSentimentResponse is the response from email sentiment analysis.
+type EmailSentimentResponse struct {
+	Sentiment         string   `json:"sentiment"`
+	SentimentScore    float64  `json:"sentiment_score"`
+	Tone              string   `json:"tone"`
+	Emotions          []string `json:"emotions"`
+	SatisfactionLevel string   `json:"satisfaction_level"`
+	RiskIndicators    []string `json:"risk_indicators"`
+	RequiresAttention bool     `json:"requires_attention"`
+	Confidence        float64  `json:"confidence"`
+	EmailID           string   `json:"email_id,omitempty"`
+	Error             string   `json:"error,omitempty"`
+}
+
+// AnalyzeEmailSentiment calls the Python AI service to analyze email sentiment.
+func (c *Client) AnalyzeEmailSentiment(ctx context.Context, req EmailSentimentRequest) (*EmailSentimentResponse, error) {
+	path := fmt.Sprintf("/api/v1/ai/emails/sentiment?subject=%s&body=%s&sender=%s&email_id=%s",
+		url.QueryEscape(req.Subject),
+		url.QueryEscape(req.Body),
+		url.QueryEscape(req.Sender),
+		url.QueryEscape(req.EmailID),
+	)
+
+	resp, err := c.post(ctx, path, nil)
+	if err != nil {
+		return nil, err
+	}
+	defer drainAndClose(resp.Body)
+
+	var result EmailSentimentResponse
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		return nil, fmt.Errorf("failed to decode response: %w", err)
+	}
+
+	return &result, nil
+}
+
+// EmailPromisesRequest is the request body for email promise extraction.
+type EmailPromisesRequest struct {
+	Subject   string `json:"subject"`
+	Body      string `json:"body"`
+	Sender    string `json:"sender,omitempty"`
+	Recipient string `json:"recipient,omitempty"`
+	EmailID   string `json:"email_id,omitempty"`
+}
+
+// PromisedDocument represents a document promised in an email.
+type PromisedDocument struct {
+	DocumentType string  `json:"document_type"`
+	Description  string  `json:"description"`
+	PromisedBy   string  `json:"promised_by"`
+	Deadline     *string `json:"deadline"`
+	DeadlineText string  `json:"deadline_text"`
+}
+
+// PromisedAction represents an action promised in an email.
+type PromisedAction struct {
+	Action           string  `json:"action"`
+	ResponsibleParty string  `json:"responsible_party"`
+	Deadline         *string `json:"deadline"`
+	DeadlineText     string  `json:"deadline_text"`
+}
+
+// RequestedDocument represents a document requested in an email.
+type RequestedDocument struct {
+	DocumentType  string `json:"document_type"`
+	Description   string `json:"description"`
+	RequestedFrom string `json:"requested_from"`
+}
+
+// EmailPromisesResponse is the response from email promise extraction.
+type EmailPromisesResponse struct {
+	PromisedDocuments  []PromisedDocument  `json:"promised_documents"`
+	PromisedActions    []PromisedAction    `json:"promised_actions"`
+	RequestedDocuments []RequestedDocument `json:"requested_documents"`
+	HasCommitments     bool                `json:"has_commitments"`
+	Urgency            string              `json:"urgency"`
+	FollowUpDate       *string             `json:"follow_up_date"`
+	EmailID            string              `json:"email_id,omitempty"`
+	Error              string              `json:"error,omitempty"`
+}
+
+// ExtractEmailPromises calls the Python AI service to extract promises from an email.
+func (c *Client) ExtractEmailPromises(ctx context.Context, req EmailPromisesRequest) (*EmailPromisesResponse, error) {
+	path := fmt.Sprintf("/api/v1/ai/emails/promises?subject=%s&body=%s&sender=%s&recipient=%s&email_id=%s",
+		url.QueryEscape(req.Subject),
+		url.QueryEscape(req.Body),
+		url.QueryEscape(req.Sender),
+		url.QueryEscape(req.Recipient),
+		url.QueryEscape(req.EmailID),
+	)
+
+	resp, err := c.post(ctx, path, nil)
+	if err != nil {
+		return nil, err
+	}
+	defer drainAndClose(resp.Body)
+
+	var result EmailPromisesResponse
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		return nil, fmt.Errorf("failed to decode response: %w", err)
+	}
+
+	return &result, nil
+}
+
+// =============================================================================
+// Risk Analysis AI Methods
+// =============================================================================
+
+// ClientRiskRequest is the request body for client risk analysis.
+type ClientRiskRequest struct {
+	ClientID                 string   `json:"client_id"`
+	ClientName               string   `json:"client_name,omitempty"`
+	Services                 []string `json:"services,omitempty"`
+	LastContactDays          int      `json:"last_contact_days,omitempty"`
+	OutstandingInvoices      int      `json:"outstanding_invoices,omitempty"`
+	OutstandingAmount        float64  `json:"outstanding_amount,omitempty"`
+	EmailSentimentHistory    []string `json:"email_sentiment_history,omitempty"`
+	MissedDeadlines          int      `json:"missed_deadlines,omitempty"`
+	PaymentDelaysAvg         int      `json:"payment_delays_avg,omitempty"`
+	RelationshipLengthMonths int      `json:"relationship_length_months,omitempty"`
+}
+
+// RiskFactor represents a factor contributing to risk.
+type RiskFactor struct {
+	Factor      string  `json:"factor"`
+	Severity    string  `json:"severity"`
+	Description string  `json:"description"`
+	Weight      float64 `json:"weight,omitempty"`
+	ImpactDays  int     `json:"impact_days,omitempty"`
+}
+
+// RecommendedAction represents a recommended action to mitigate risk.
+type RecommendedAction struct {
+	Action     string `json:"action"`
+	Priority   string `json:"priority"`
+	Reason     string `json:"reason,omitempty"`
+	AssignedTo string `json:"assigned_to,omitempty"`
+}
+
+// ClientRiskResponse is the response from client risk analysis.
+type ClientRiskResponse struct {
+	RiskLevel          string              `json:"risk_level"`
+	RiskScore          float64             `json:"risk_score"`
+	ChurnProbability   float64             `json:"churn_probability"`
+	RiskFactors        []RiskFactor        `json:"risk_factors"`
+	PositiveIndicators []string            `json:"positive_indicators"`
+	RecommendedActions []RecommendedAction `json:"recommended_actions"`
+	NextContactUrgency string              `json:"next_contact_urgency"`
+	Confidence         float64             `json:"confidence"`
+	ClientID           string              `json:"client_id,omitempty"`
+	Error              string              `json:"error,omitempty"`
+}
+
+// AnalyzeClientRisk calls the Python AI service to analyze client churn risk.
+func (c *Client) AnalyzeClientRisk(ctx context.Context, req ClientRiskRequest) (*ClientRiskResponse, error) {
+	// Build query string
+	services := ""
+	if len(req.Services) > 0 {
+		for i, s := range req.Services {
+			if i > 0 {
+				services += ","
+			}
+			services += s
+		}
+	}
+
+	sentiments := ""
+	if len(req.EmailSentimentHistory) > 0 {
+		for i, s := range req.EmailSentimentHistory {
+			if i > 0 {
+				sentiments += ","
+			}
+			sentiments += s
+		}
+	}
+
+	path := fmt.Sprintf("/api/v1/ai/risk/client?client_id=%s&client_name=%s&services=%s&last_contact_days=%d&outstanding_invoices=%d&outstanding_amount=%f&email_sentiment_history=%s&missed_deadlines=%d&payment_delays_avg=%d&relationship_length_months=%d",
+		url.QueryEscape(req.ClientID),
+		url.QueryEscape(req.ClientName),
+		url.QueryEscape(services),
+		req.LastContactDays,
+		req.OutstandingInvoices,
+		req.OutstandingAmount,
+		url.QueryEscape(sentiments),
+		req.MissedDeadlines,
+		req.PaymentDelaysAvg,
+		req.RelationshipLengthMonths,
+	)
+
+	resp, err := c.post(ctx, path, nil)
+	if err != nil {
+		return nil, err
+	}
+	defer drainAndClose(resp.Body)
+
+	var result ClientRiskResponse
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		return nil, fmt.Errorf("failed to decode response: %w", err)
+	}
+
+	return &result, nil
+}
+
+// ServiceRiskRequest is the request body for service risk analysis.
+type ServiceRiskRequest struct {
+	ServiceID            string `json:"service_id"`
+	ServiceType          string `json:"service_type,omitempty"`
+	ClientName           string `json:"client_name,omitempty"`
+	Deadline             string `json:"deadline,omitempty"`
+	DaysUntilDeadline    int    `json:"days_until_deadline,omitempty"`
+	Status               string `json:"status,omitempty"`
+	DocumentsReceived    int    `json:"documents_received,omitempty"`
+	DocumentsRequired    int    `json:"documents_required,omitempty"`
+	OutstandingQueries   int    `json:"outstanding_queries,omitempty"`
+	AssignedStaff        string `json:"assigned_staff,omitempty"`
+	Complexity           string `json:"complexity,omitempty"`
+	PreviousDelays       bool   `json:"previous_delays,omitempty"`
+	ClientResponsiveness string `json:"client_responsiveness,omitempty"`
+}
+
+// Blocker represents something blocking service progress.
+type Blocker struct {
+	Blocker     string `json:"blocker"`
+	Owner       string `json:"owner"`
+	DaysBlocked int    `json:"days_blocked"`
+}
+
+// ServiceRiskResponse is the response from service risk analysis.
+type ServiceRiskResponse struct {
+	RiskLevel            string              `json:"risk_level"`
+	RiskScore            float64             `json:"risk_score"`
+	OnTimeProbability    float64             `json:"on_time_probability"`
+	DaysBuffer           int                 `json:"days_buffer"`
+	RiskFactors          []RiskFactor        `json:"risk_factors"`
+	Blockers             []Blocker           `json:"blockers"`
+	RecommendedActions   []RecommendedAction `json:"recommended_actions"`
+	EscalationNeeded     bool                `json:"escalation_needed"`
+	SuggestedNewDeadline *string             `json:"suggested_new_deadline"`
+	Confidence           float64             `json:"confidence"`
+	ServiceID            string              `json:"service_id,omitempty"`
+	Error                string              `json:"error,omitempty"`
+}
+
+// AnalyzeServiceRisk calls the Python AI service to analyze service deadline risk.
+func (c *Client) AnalyzeServiceRisk(ctx context.Context, req ServiceRiskRequest) (*ServiceRiskResponse, error) {
+	path := fmt.Sprintf("/api/v1/ai/risk/service?service_id=%s&service_type=%s&client_name=%s&deadline=%s&days_until_deadline=%d&service_status=%s&documents_received=%d&documents_required=%d&outstanding_queries=%d&assigned_staff=%s&complexity=%s&previous_delays=%t&client_responsiveness=%s",
+		url.QueryEscape(req.ServiceID),
+		url.QueryEscape(req.ServiceType),
+		url.QueryEscape(req.ClientName),
+		url.QueryEscape(req.Deadline),
+		req.DaysUntilDeadline,
+		url.QueryEscape(req.Status),
+		req.DocumentsReceived,
+		req.DocumentsRequired,
+		req.OutstandingQueries,
+		url.QueryEscape(req.AssignedStaff),
+		url.QueryEscape(req.Complexity),
+		req.PreviousDelays,
+		url.QueryEscape(req.ClientResponsiveness),
+	)
+
+	resp, err := c.post(ctx, path, nil)
+	if err != nil {
+		return nil, err
+	}
+	defer drainAndClose(resp.Body)
+
+	var result ServiceRiskResponse
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		return nil, fmt.Errorf("failed to decode response: %w", err)
+	}
+
+	return &result, nil
+}
+
+// =============================================================================
+// Form Auto-Fill AI Methods
+// =============================================================================
+
+// VATAutoFillRequest is the request body for VAT auto-fill.
+type VATAutoFillRequest struct {
+	ClientID       string  `json:"client_id"`
+	Period         string  `json:"period"`
+	ClientName     string  `json:"client_name,omitempty"`
+	VATNumber      string  `json:"vat_number,omitempty"`
+	TotalSales     float64 `json:"total_sales,omitempty"`
+	TotalPurchases float64 `json:"total_purchases,omitempty"`
+	VATOnSales     float64 `json:"vat_on_sales,omitempty"`
+	VATOnPurchases float64 `json:"vat_on_purchases,omitempty"`
+	EUAcquisitions float64 `json:"eu_acquisitions,omitempty"`
+	EUSupplies     float64 `json:"eu_supplies,omitempty"`
+}
+
+// VATReturn represents the VAT return boxes.
+type VATReturn struct {
+	Box1 float64 `json:"box_1"`
+	Box2 float64 `json:"box_2"`
+	Box3 float64 `json:"box_3"`
+	Box4 float64 `json:"box_4"`
+	Box5 float64 `json:"box_5"`
+	Box6 float64 `json:"box_6"`
+	Box7 float64 `json:"box_7"`
+	Box8 float64 `json:"box_8"`
+	Box9 float64 `json:"box_9"`
+}
+
+// VATSummary represents the VAT return summary.
+type VATSummary struct {
+	TotalSales     float64 `json:"total_sales"`
+	TotalPurchases float64 `json:"total_purchases"`
+	VATCollected   float64 `json:"vat_collected"`
+	VATReclaimed   float64 `json:"vat_reclaimed"`
+	NetVAT         float64 `json:"net_vat"`
+	PaymentDue     bool    `json:"payment_due"`
+}
+
+// VATAutoFillResponse is the response from VAT auto-fill.
+type VATAutoFillResponse struct {
+	VATReturn   VATReturn  `json:"vat_return"`
+	Summary     VATSummary `json:"summary"`
+	Warnings    []string   `json:"warnings"`
+	MissingData []string   `json:"missing_data"`
+	Confidence  float64    `json:"confidence"`
+	ClientID    string     `json:"client_id,omitempty"`
+	Period      string     `json:"period,omitempty"`
+	Error       string     `json:"error,omitempty"`
+}
+
+// AutoFillVAT calls the Python AI service to auto-fill VAT return.
+func (c *Client) AutoFillVAT(ctx context.Context, req VATAutoFillRequest) (*VATAutoFillResponse, error) {
+	path := fmt.Sprintf("/api/v1/ai/forms/vat?client_id=%s&period=%s&client_name=%s&vat_number=%s&total_sales=%f&total_purchases=%f&vat_on_sales=%f&vat_on_purchases=%f&eu_acquisitions=%f&eu_supplies=%f",
+		url.QueryEscape(req.ClientID),
+		url.QueryEscape(req.Period),
+		url.QueryEscape(req.ClientName),
+		url.QueryEscape(req.VATNumber),
+		req.TotalSales,
+		req.TotalPurchases,
+		req.VATOnSales,
+		req.VATOnPurchases,
+		req.EUAcquisitions,
+		req.EUSupplies,
+	)
+
+	resp, err := c.post(ctx, path, nil)
+	if err != nil {
+		return nil, err
+	}
+	defer drainAndClose(resp.Body)
+
+	var result VATAutoFillResponse
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		return nil, fmt.Errorf("failed to decode response: %w", err)
+	}
+
+	return &result, nil
+}
+
+// CT600AutoFillRequest is the request body for CT600 auto-fill.
+type CT600AutoFillRequest struct {
+	ClientID         string  `json:"client_id"`
+	Year             int     `json:"year"`
+	CompanyName      string  `json:"company_name,omitempty"`
+	CompanyNumber    string  `json:"company_number,omitempty"`
+	UTR              string  `json:"utr,omitempty"`
+	Turnover         float64 `json:"turnover,omitempty"`
+	CostOfSales      float64 `json:"cost_of_sales,omitempty"`
+	GrossProfit      float64 `json:"gross_profit,omitempty"`
+	AdminExpenses    float64 `json:"admin_expenses,omitempty"`
+	Depreciation     float64 `json:"depreciation,omitempty"`
+	InterestReceived float64 `json:"interest_received,omitempty"`
+	InterestPaid     float64 `json:"interest_paid,omitempty"`
+	OtherIncome      float64 `json:"other_income,omitempty"`
+}
+
+// CT600Data represents the CT600 return data.
+type CT600Data struct {
+	Turnover          float64                `json:"turnover"`
+	TradingProfit     float64                `json:"trading_profit"`
+	OtherIncome       float64                `json:"other_income"`
+	TotalProfits      float64                `json:"total_profits"`
+	TaxAdjustments    map[string]float64     `json:"tax_adjustments"`
+	CapitalAllowances float64                `json:"capital_allowances"`
+	AdjustedProfit    float64                `json:"adjusted_profit"`
+	LossesBroughtFwd  float64                `json:"losses_brought_forward"`
+	TaxableProfit     float64                `json:"taxable_profit"`
+	CorporationTax    float64                `json:"corporation_tax"`
+	EffectiveRate     float64                `json:"effective_rate"`
+}
+
+// CT600Summary represents the CT600 summary.
+type CT600Summary struct {
+	ProfitBeforeTax float64 `json:"profit_before_tax"`
+	TaxableProfit   float64 `json:"taxable_profit"`
+	TaxDue          float64 `json:"tax_due"`
+	PaymentDeadline string  `json:"payment_deadline"`
+}
+
+// CT600AutoFillResponse is the response from CT600 auto-fill.
+type CT600AutoFillResponse struct {
+	CT600       CT600Data    `json:"ct600"`
+	Summary     CT600Summary `json:"summary"`
+	Warnings    []string     `json:"warnings"`
+	MissingData []string     `json:"missing_data"`
+	Confidence  float64      `json:"confidence"`
+	ClientID    string       `json:"client_id,omitempty"`
+	Year        int          `json:"year,omitempty"`
+	Error       string       `json:"error,omitempty"`
+}
+
+// AutoFillCT600 calls the Python AI service to auto-fill CT600 return.
+func (c *Client) AutoFillCT600(ctx context.Context, req CT600AutoFillRequest) (*CT600AutoFillResponse, error) {
+	path := fmt.Sprintf("/api/v1/ai/forms/ct600?client_id=%s&year=%d&company_name=%s&company_number=%s&utr=%s&turnover=%f&cost_of_sales=%f&gross_profit=%f&admin_expenses=%f&depreciation=%f&interest_received=%f&interest_paid=%f&other_income=%f",
+		url.QueryEscape(req.ClientID),
+		req.Year,
+		url.QueryEscape(req.CompanyName),
+		url.QueryEscape(req.CompanyNumber),
+		url.QueryEscape(req.UTR),
+		req.Turnover,
+		req.CostOfSales,
+		req.GrossProfit,
+		req.AdminExpenses,
+		req.Depreciation,
+		req.InterestReceived,
+		req.InterestPaid,
+		req.OtherIncome,
+	)
+
+	resp, err := c.post(ctx, path, nil)
+	if err != nil {
+		return nil, err
+	}
+	defer drainAndClose(resp.Body)
+
+	var result CT600AutoFillResponse
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		return nil, fmt.Errorf("failed to decode response: %w", err)
+	}
+
+	return &result, nil
+}
+
+// SAAutoFillRequest is the request body for Self Assessment auto-fill.
+type SAAutoFillRequest struct {
+	ClientID               string  `json:"client_id"`
+	TaxYear                string  `json:"tax_year"`
+	TaxpayerName           string  `json:"taxpayer_name,omitempty"`
+	UTR                    string  `json:"utr,omitempty"`
+	NINumber               string  `json:"ni_number,omitempty"`
+	EmploymentIncome       float64 `json:"employment_income,omitempty"`
+	SelfEmploymentIncome   float64 `json:"self_employment_income,omitempty"`
+	SelfEmploymentExpenses float64 `json:"self_employment_expenses,omitempty"`
+	PropertyIncome         float64 `json:"property_income,omitempty"`
+	PropertyExpenses       float64 `json:"property_expenses,omitempty"`
+	DividendIncome         float64 `json:"dividend_income,omitempty"`
+	InterestIncome         float64 `json:"interest_income,omitempty"`
+	PensionContributions   float64 `json:"pension_contributions,omitempty"`
+	GiftAid                float64 `json:"gift_aid,omitempty"`
+}
+
+// SelfAssessmentData represents the Self Assessment return data.
+type SelfAssessmentData struct {
+	EmploymentIncome    float64 `json:"employment_income"`
+	SelfEmploymentProfit float64 `json:"self_employment_profit"`
+	PropertyIncome      float64 `json:"property_income"`
+	DividendIncome      float64 `json:"dividend_income"`
+	InterestIncome      float64 `json:"interest_income"`
+	TotalIncome         float64 `json:"total_income"`
+	PersonalAllowance   float64 `json:"personal_allowance"`
+	TaxableIncome       float64 `json:"taxable_income"`
+	PensionRelief       float64 `json:"pension_relief"`
+	GiftAidRelief       float64 `json:"gift_aid_relief"`
+}
+
+// TaxCalculation represents the tax calculation.
+type TaxCalculation struct {
+	IncomeTax         float64            `json:"income_tax"`
+	DividendTax       float64            `json:"dividend_tax"`
+	NationalInsurance map[string]float64 `json:"national_insurance"`
+	TotalTaxDue       float64            `json:"total_tax_due"`
+	TaxAlreadyPaid    float64            `json:"tax_already_paid"`
+	BalanceDue        float64            `json:"balance_due"`
+}
+
+// SAAutoFillResponse is the response from Self Assessment auto-fill.
+type SAAutoFillResponse struct {
+	SelfAssessment           SelfAssessmentData `json:"self_assessment"`
+	TaxCalculation           TaxCalculation     `json:"tax_calculation"`
+	SupplementaryPagesNeeded []string           `json:"supplementary_pages_needed"`
+	Warnings                 []string           `json:"warnings"`
+	MissingData              []string           `json:"missing_data"`
+	Confidence               float64            `json:"confidence"`
+	ClientID                 string             `json:"client_id,omitempty"`
+	TaxYear                  string             `json:"tax_year,omitempty"`
+	Error                    string             `json:"error,omitempty"`
+}
+
+// AutoFillSA calls the Python AI service to auto-fill Self Assessment return.
+func (c *Client) AutoFillSA(ctx context.Context, req SAAutoFillRequest) (*SAAutoFillResponse, error) {
+	path := fmt.Sprintf("/api/v1/ai/forms/sa?client_id=%s&tax_year=%s&taxpayer_name=%s&utr=%s&ni_number=%s&employment_income=%f&self_employment_income=%f&self_employment_expenses=%f&property_income=%f&property_expenses=%f&dividend_income=%f&interest_income=%f&pension_contributions=%f&gift_aid=%f",
+		url.QueryEscape(req.ClientID),
+		url.QueryEscape(req.TaxYear),
+		url.QueryEscape(req.TaxpayerName),
+		url.QueryEscape(req.UTR),
+		url.QueryEscape(req.NINumber),
+		req.EmploymentIncome,
+		req.SelfEmploymentIncome,
+		req.SelfEmploymentExpenses,
+		req.PropertyIncome,
+		req.PropertyExpenses,
+		req.DividendIncome,
+		req.InterestIncome,
+		req.PensionContributions,
+		req.GiftAid,
+	)
+
+	resp, err := c.post(ctx, path, nil)
+	if err != nil {
+		return nil, err
+	}
+	defer drainAndClose(resp.Body)
+
+	var result SAAutoFillResponse
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		return nil, fmt.Errorf("failed to decode response: %w", err)
+	}
+
+	return &result, nil
+}
+
+// =============================================================================
+// Document Rename AI Methods
+// =============================================================================
+
+// DocumentRenameRequest is the request body for document rename suggestion.
+type DocumentRenameRequest struct {
+	Text             string `json:"text"`
+	OriginalFilename string `json:"original_filename,omitempty"`
+	DocumentType     string `json:"document_type,omitempty"`
+	ClientName       string `json:"client_name,omitempty"`
+	FileKey          string `json:"file_key,omitempty"`
+}
+
+// KeyIdentifiers represents key identifiers extracted from the document.
+type KeyIdentifiers struct {
+	InvoiceNumber string `json:"invoice_number,omitempty"`
+	Vendor        string `json:"vendor,omitempty"`
+	Amount        string `json:"amount,omitempty"`
+	Period        string `json:"period,omitempty"`
+	Reference     string `json:"reference,omitempty"`
+}
+
+// DocumentRenameResponse is the response from document rename suggestion.
+type DocumentRenameResponse struct {
+	SuggestedName    string         `json:"suggested_name"`
+	Extension        string         `json:"extension"`
+	FullFilename     string         `json:"full_filename"`
+	DocumentType     string         `json:"document_type"`
+	KeyDate          string         `json:"key_date"`
+	KeyIdentifiers   KeyIdentifiers `json:"key_identifiers"`
+	AlternativeNames []string       `json:"alternative_names"`
+	Confidence       float64        `json:"confidence"`
+	FileKey          string         `json:"file_key,omitempty"`
+	Error            string         `json:"error,omitempty"`
+}
+
+// SuggestDocumentName calls the Python AI service to suggest a document name.
+func (c *Client) SuggestDocumentName(ctx context.Context, req DocumentRenameRequest) (*DocumentRenameResponse, error) {
+	path := fmt.Sprintf("/api/v1/ai/documents/rename?text=%s&original_filename=%s&document_type=%s&client_name=%s&file_key=%s",
+		url.QueryEscape(req.Text),
+		url.QueryEscape(req.OriginalFilename),
+		url.QueryEscape(req.DocumentType),
+		url.QueryEscape(req.ClientName),
+		url.QueryEscape(req.FileKey),
+	)
+
+	resp, err := c.post(ctx, path, nil)
+	if err != nil {
+		return nil, err
+	}
+	defer drainAndClose(resp.Body)
+
+	var result DocumentRenameResponse
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		return nil, fmt.Errorf("failed to decode response: %w", err)
+	}
+
+	return &result, nil
+}
+
+// =============================================================================
+// Chat History Methods (MongoDB)
+// =============================================================================
+
+// ChatHistoryRequest is the request for getting chat history.
+type ChatHistoryRequest struct {
+	UserID   string `json:"user_id"`
+	TenantID string `json:"tenant_id,omitempty"`
+	Limit    int    `json:"limit,omitempty"`
+	Offset   int    `json:"offset,omitempty"`
+}
+
+// ChatMessage represents a single chat message.
+type ChatMessage struct {
+	Role      string                 `json:"role"`
+	Content   string                 `json:"content"`
+	Timestamp string                 `json:"timestamp"`
+	Metadata  map[string]interface{} `json:"metadata,omitempty"`
+}
+
+// Conversation represents a chat conversation.
+type Conversation struct {
+	ID             string        `json:"_id,omitempty"`
+	ConversationID string        `json:"conversation_id"`
+	UserID         string        `json:"user_id"`
+	TenantID       string        `json:"tenant_id,omitempty"`
+	Messages       []ChatMessage `json:"messages"`
+	CreatedAt      string        `json:"created_at"`
+	UpdatedAt      string        `json:"updated_at"`
+}
+
+// ChatHistoryResponse is the response from getting chat history.
+type ChatHistoryResponse struct {
+	Conversations []Conversation `json:"conversations"`
+	Total         int            `json:"total"`
+	Limit         int            `json:"limit"`
+	Offset        int            `json:"offset"`
+	HasMore       bool           `json:"has_more"`
+	Error         string         `json:"error,omitempty"`
+}
+
+// GetChatHistory calls the Python AI service to get chat history.
+func (c *Client) GetChatHistory(ctx context.Context, req ChatHistoryRequest) (*ChatHistoryResponse, error) {
+	limit := req.Limit
+	if limit == 0 {
+		limit = 50
+	}
+
+	path := fmt.Sprintf("/api/v1/ai/chat/history?user_id=%s&tenant_id=%s&limit=%d&offset=%d",
+		url.QueryEscape(req.UserID),
+		url.QueryEscape(req.TenantID),
+		limit,
+		req.Offset,
+	)
+
+	resp, err := c.get(ctx, path)
+	if err != nil {
+		return nil, err
+	}
+	defer drainAndClose(resp.Body)
+
+	var result ChatHistoryResponse
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		return nil, fmt.Errorf("failed to decode response: %w", err)
+	}
+
+	return &result, nil
+}
+
+// SaveChatMessageRequest is the request for saving a chat message.
+type SaveChatMessageRequest struct {
+	UserID         string `json:"user_id"`
+	ConversationID string `json:"conversation_id,omitempty"`
+	Role           string `json:"role"`
+	Content        string `json:"content"`
+	TenantID       string `json:"tenant_id,omitempty"`
+	Metadata       string `json:"metadata,omitempty"`
+}
+
+// SaveChatMessageResponse is the response from saving a chat message.
+type SaveChatMessageResponse struct {
+	ConversationID string `json:"conversation_id"`
+	MessageAdded   bool   `json:"message_added,omitempty"`
+	Created        bool   `json:"created,omitempty"`
+	CreatedAt      string `json:"created_at,omitempty"`
+	UpdatedAt      string `json:"updated_at,omitempty"`
+	Error          string `json:"error,omitempty"`
+}
+
+// SaveChatMessage calls the Python AI service to save a chat message.
+func (c *Client) SaveChatMessage(ctx context.Context, req SaveChatMessageRequest) (*SaveChatMessageResponse, error) {
+	path := fmt.Sprintf("/api/v1/ai/chat/history?user_id=%s&conversation_id=%s&role=%s&content=%s&tenant_id=%s&metadata=%s",
+		url.QueryEscape(req.UserID),
+		url.QueryEscape(req.ConversationID),
+		url.QueryEscape(req.Role),
+		url.QueryEscape(req.Content),
+		url.QueryEscape(req.TenantID),
+		url.QueryEscape(req.Metadata),
+	)
+
+	resp, err := c.post(ctx, path, nil)
+	if err != nil {
+		return nil, err
+	}
+	defer drainAndClose(resp.Body)
+
+	var result SaveChatMessageResponse
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		return nil, fmt.Errorf("failed to decode response: %w", err)
+	}
+
+	return &result, nil
+}
+
+// DeleteChatRequest is the request for deleting a chat conversation.
+type DeleteChatRequest struct {
+	ConversationID string `json:"conversation_id"`
+	UserID         string `json:"user_id"`
+}
+
+// DeleteChatResponse is the response from deleting a chat conversation.
+type DeleteChatResponse struct {
+	ConversationID string `json:"conversation_id"`
+	Deleted        bool   `json:"deleted"`
+	Error          string `json:"error,omitempty"`
+}
+
+// DeleteChat calls the Python AI service to delete a chat conversation.
+func (c *Client) DeleteChat(ctx context.Context, req DeleteChatRequest) (*DeleteChatResponse, error) {
+	path := fmt.Sprintf("/api/v1/ai/chat/%s?user_id=%s",
+		url.QueryEscape(req.ConversationID),
+		url.QueryEscape(req.UserID),
+	)
+
+	resp, err := c.delete(ctx, path)
+	if err != nil {
+		return nil, err
+	}
+	defer drainAndClose(resp.Body)
+
+	var result DeleteChatResponse
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		return nil, fmt.Errorf("failed to decode response: %w", err)
+	}
+
+	return &result, nil
+}
+
+// delete performs a DELETE request to the Python AI service with retry logic.
+func (c *Client) delete(ctx context.Context, path string) (*http.Response, error) {
+	reqURL := c.baseURL + path
+
+	requestID, _ := ctx.Value(RequestIDKey).(string)
+
+	var lastErr error
+	for attempt := 0; attempt <= c.retryConfig.MaxRetries; attempt++ {
+		if attempt > 0 {
+			delay := c.calculateBackoff(attempt - 1)
+			log.Debug().
+				Int("attempt", attempt).
+				Dur("delay", delay).
+				Str("url", reqURL).
+				Str("request_id", requestID).
+				Msg("Retrying AI service request")
+
+			select {
+			case <-ctx.Done():
+				return nil, ctx.Err()
+			case <-time.After(delay):
+			}
+		}
+
+		req, err := http.NewRequestWithContext(ctx, http.MethodDelete, reqURL, nil)
+		if err != nil {
+			return nil, fmt.Errorf("failed to create request: %w", err)
+		}
+
+		req.Header.Set("Content-Type", "application/json")
+		if requestID != "" {
+			req.Header.Set(requestIDHeader, requestID)
+		}
+
+		resp, err := c.httpClient.Do(req)
+		if err != nil {
+			lastErr = err
+			if c.shouldRetry(err, nil) && attempt < c.retryConfig.MaxRetries {
+				log.Warn().Err(err).Str("url", reqURL).Int("attempt", attempt+1).Msg("AI service request failed, will retry")
+				continue
+			}
+			log.Error().Err(err).Str("url", reqURL).Msg("AI service request failed")
+			return nil, fmt.Errorf("request failed: %w", err)
+		}
+
+		if c.shouldRetry(nil, resp) && attempt < c.retryConfig.MaxRetries {
+			_, _ = io.Copy(io.Discard, resp.Body)
+			resp.Body.Close()
+			lastErr = fmt.Errorf("server returned %d", resp.StatusCode)
+			log.Warn().Int("status", resp.StatusCode).Str("url", reqURL).Int("attempt", attempt+1).Msg("AI service returned error, will retry")
+			continue
+		}
+
+		return resp, nil
+	}
+
+	return nil, fmt.Errorf("request failed after %d retries: %w", c.retryConfig.MaxRetries, lastErr)
+}
+
 // Close closes the client and releases resources.
 func (c *Client) Close() {
 	c.httpClient.CloseIdleConnections()

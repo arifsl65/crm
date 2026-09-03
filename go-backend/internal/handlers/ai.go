@@ -382,92 +382,326 @@ func (h *AIHandler) proxyAIRequest(ctx context.Context, method, path string, bod
 
 // RenameDocumentRequest is the request for AI document renaming.
 type RenameDocumentRequest struct {
-	FileKey string `json:"file_key" binding:"required"`
+	Text             string `json:"text" binding:"required"`
+	OriginalFilename string `json:"original_filename"`
+	DocumentType     string `json:"document_type"`
+	ClientName       string `json:"client_name"`
+	FileKey          string `json:"file_key"`
 }
 
 // RenameDocument suggests a name for a document using AI.
 // POST /api/v1/ai/documents/rename
 func (h *AIHandler) RenameDocument(c *gin.Context) {
-	// TODO: Implement when Python service method is available
-	c.JSON(http.StatusNotImplemented, gin.H{
-		"error":   "not_implemented",
-		"message": "Document rename AI not yet implemented",
+	var req RenameDocumentRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{
+			"error":   "validation_error",
+			"message": "Document text is required",
+		})
+		return
+	}
+
+	ctx := h.contextWithRequestID(c)
+
+	result, err := h.client.SuggestDocumentName(ctx, ai.DocumentRenameRequest{
+		Text:             req.Text,
+		OriginalFilename: req.OriginalFilename,
+		DocumentType:     req.DocumentType,
+		ClientName:       req.ClientName,
+		FileKey:          req.FileKey,
 	})
+	if err != nil {
+		log.Error().Err(err).Msg("Failed to suggest document name")
+		c.JSON(http.StatusBadGateway, gin.H{
+			"error":   "ai_service_error",
+			"message": "Failed to communicate with AI service",
+		})
+		return
+	}
+
+	if result.Error != "" {
+		c.JSON(http.StatusUnprocessableEntity, gin.H{
+			"error":   "rename_failed",
+			"message": result.Error,
+		})
+		return
+	}
+
+	c.JSON(http.StatusOK, result)
 }
 
 // SummarizeEmailRequest is the request for email summarization.
 type SummarizeEmailRequest struct {
-	EmailID string `json:"email_id" binding:"required,uuid"`
+	Subject   string `json:"subject" binding:"required"`
+	Body      string `json:"body" binding:"required"`
+	Sender    string `json:"sender"`
+	Recipient string `json:"recipient"`
+	EmailID   string `json:"email_id"`
 }
 
 // SummarizeEmail summarizes an email using AI.
 // POST /api/v1/ai/emails/summarize
 func (h *AIHandler) SummarizeEmail(c *gin.Context) {
-	// TODO: Implement when Python service method is available
-	c.JSON(http.StatusNotImplemented, gin.H{
-		"error":   "not_implemented",
-		"message": "Email summarization AI not yet implemented",
+	var req SummarizeEmailRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{
+			"error":   "validation_error",
+			"message": "subject and body are required",
+		})
+		return
+	}
+
+	ctx := h.contextWithRequestID(c)
+
+	result, err := h.client.SummarizeEmail(ctx, ai.EmailSummarizeRequest{
+		Subject:   req.Subject,
+		Body:      req.Body,
+		Sender:    req.Sender,
+		Recipient: req.Recipient,
+		EmailID:   req.EmailID,
 	})
+	if err != nil {
+		log.Error().Err(err).Msg("Failed to summarize email")
+		c.JSON(http.StatusBadGateway, gin.H{
+			"error":   "ai_service_error",
+			"message": "Failed to communicate with AI service",
+		})
+		return
+	}
+
+	if result.Error != "" {
+		c.JSON(http.StatusUnprocessableEntity, gin.H{
+			"error":   "summarization_failed",
+			"message": result.Error,
+		})
+		return
+	}
+
+	c.JSON(http.StatusOK, result)
 }
 
 // AnalyzeEmailSentimentRequest is the request for email sentiment analysis.
 type AnalyzeEmailSentimentRequest struct {
-	EmailID string `json:"email_id" binding:"required,uuid"`
+	Subject string `json:"subject" binding:"required"`
+	Body    string `json:"body" binding:"required"`
+	Sender  string `json:"sender"`
+	EmailID string `json:"email_id"`
 }
 
 // AnalyzeEmailSentiment analyzes the sentiment of an email.
 // POST /api/v1/ai/emails/sentiment
 func (h *AIHandler) AnalyzeEmailSentiment(c *gin.Context) {
-	// TODO: Implement when Python service method is available
-	c.JSON(http.StatusNotImplemented, gin.H{
-		"error":   "not_implemented",
-		"message": "Email sentiment analysis AI not yet implemented",
+	var req AnalyzeEmailSentimentRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{
+			"error":   "validation_error",
+			"message": "subject and body are required",
+		})
+		return
+	}
+
+	ctx := h.contextWithRequestID(c)
+
+	result, err := h.client.AnalyzeEmailSentiment(ctx, ai.EmailSentimentRequest{
+		Subject: req.Subject,
+		Body:    req.Body,
+		Sender:  req.Sender,
+		EmailID: req.EmailID,
 	})
+	if err != nil {
+		log.Error().Err(err).Msg("Failed to analyze email sentiment")
+		c.JSON(http.StatusBadGateway, gin.H{
+			"error":   "ai_service_error",
+			"message": "Failed to communicate with AI service",
+		})
+		return
+	}
+
+	if result.Error != "" {
+		c.JSON(http.StatusUnprocessableEntity, gin.H{
+			"error":   "sentiment_analysis_failed",
+			"message": result.Error,
+		})
+		return
+	}
+
+	c.JSON(http.StatusOK, result)
 }
 
 // ExtractEmailPromisesRequest is the request for extracting promises from email.
 type ExtractEmailPromisesRequest struct {
-	EmailID string `json:"email_id" binding:"required,uuid"`
+	Subject   string `json:"subject" binding:"required"`
+	Body      string `json:"body" binding:"required"`
+	Sender    string `json:"sender"`
+	Recipient string `json:"recipient"`
+	EmailID   string `json:"email_id"`
 }
 
 // ExtractEmailPromises extracts promised documents/actions from an email.
 // POST /api/v1/ai/emails/promises
 func (h *AIHandler) ExtractEmailPromises(c *gin.Context) {
-	// TODO: Implement when Python service method is available
-	c.JSON(http.StatusNotImplemented, gin.H{
-		"error":   "not_implemented",
-		"message": "Email promise extraction AI not yet implemented",
+	var req ExtractEmailPromisesRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{
+			"error":   "validation_error",
+			"message": "subject and body are required",
+		})
+		return
+	}
+
+	ctx := h.contextWithRequestID(c)
+
+	result, err := h.client.ExtractEmailPromises(ctx, ai.EmailPromisesRequest{
+		Subject:   req.Subject,
+		Body:      req.Body,
+		Sender:    req.Sender,
+		Recipient: req.Recipient,
+		EmailID:   req.EmailID,
 	})
+	if err != nil {
+		log.Error().Err(err).Msg("Failed to extract email promises")
+		c.JSON(http.StatusBadGateway, gin.H{
+			"error":   "ai_service_error",
+			"message": "Failed to communicate with AI service",
+		})
+		return
+	}
+
+	if result.Error != "" {
+		c.JSON(http.StatusUnprocessableEntity, gin.H{
+			"error":   "promise_extraction_failed",
+			"message": result.Error,
+		})
+		return
+	}
+
+	c.JSON(http.StatusOK, result)
 }
 
 // ClientRiskRequest is the request for client risk analysis.
 type ClientRiskRequest struct {
-	ClientID string `json:"client_id" binding:"required,uuid"`
+	ClientID                 string   `json:"client_id" binding:"required,uuid"`
+	ClientName               string   `json:"client_name"`
+	Services                 []string `json:"services"`
+	LastContactDays          int      `json:"last_contact_days"`
+	OutstandingInvoices      int      `json:"outstanding_invoices"`
+	OutstandingAmount        float64  `json:"outstanding_amount"`
+	EmailSentimentHistory    []string `json:"email_sentiment_history"`
+	MissedDeadlines          int      `json:"missed_deadlines"`
+	PaymentDelaysAvg         int      `json:"payment_delays_avg"`
+	RelationshipLengthMonths int      `json:"relationship_length_months"`
 }
 
 // AnalyzeClientRisk analyzes client churn risk.
 // POST /api/v1/ai/risk/client
 func (h *AIHandler) AnalyzeClientRisk(c *gin.Context) {
-	// TODO: Implement when Python service method is available
-	c.JSON(http.StatusNotImplemented, gin.H{
-		"error":   "not_implemented",
-		"message": "Client risk analysis AI not yet implemented",
+	var req ClientRiskRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{
+			"error":   "validation_error",
+			"message": "client_id is required and must be a valid UUID",
+		})
+		return
+	}
+
+	ctx := h.contextWithRequestID(c)
+
+	result, err := h.client.AnalyzeClientRisk(ctx, ai.ClientRiskRequest{
+		ClientID:                 req.ClientID,
+		ClientName:               req.ClientName,
+		Services:                 req.Services,
+		LastContactDays:          req.LastContactDays,
+		OutstandingInvoices:      req.OutstandingInvoices,
+		OutstandingAmount:        req.OutstandingAmount,
+		EmailSentimentHistory:    req.EmailSentimentHistory,
+		MissedDeadlines:          req.MissedDeadlines,
+		PaymentDelaysAvg:         req.PaymentDelaysAvg,
+		RelationshipLengthMonths: req.RelationshipLengthMonths,
 	})
+	if err != nil {
+		log.Error().Err(err).Str("client_id", req.ClientID).Msg("Failed to analyze client risk")
+		c.JSON(http.StatusBadGateway, gin.H{
+			"error":   "ai_service_error",
+			"message": "Failed to communicate with AI service",
+		})
+		return
+	}
+
+	if result.Error != "" {
+		c.JSON(http.StatusUnprocessableEntity, gin.H{
+			"error":   "risk_analysis_failed",
+			"message": result.Error,
+		})
+		return
+	}
+
+	c.JSON(http.StatusOK, result)
 }
 
 // ServiceRiskRequest is the request for service risk analysis.
 type ServiceRiskRequest struct {
-	ServiceID string `json:"service_id" binding:"required,uuid"`
+	ServiceID            string `json:"service_id" binding:"required,uuid"`
+	ServiceType          string `json:"service_type"`
+	ClientName           string `json:"client_name"`
+	Deadline             string `json:"deadline"`
+	DaysUntilDeadline    int    `json:"days_until_deadline"`
+	Status               string `json:"status"`
+	DocumentsReceived    int    `json:"documents_received"`
+	DocumentsRequired    int    `json:"documents_required"`
+	OutstandingQueries   int    `json:"outstanding_queries"`
+	AssignedStaff        string `json:"assigned_staff"`
+	Complexity           string `json:"complexity"`
+	PreviousDelays       bool   `json:"previous_delays"`
+	ClientResponsiveness string `json:"client_responsiveness"`
 }
 
 // AnalyzeServiceRisk analyzes service deadline risk.
 // POST /api/v1/ai/risk/service
 func (h *AIHandler) AnalyzeServiceRisk(c *gin.Context) {
-	// TODO: Implement when Python service method is available
-	c.JSON(http.StatusNotImplemented, gin.H{
-		"error":   "not_implemented",
-		"message": "Service risk analysis AI not yet implemented",
+	var req ServiceRiskRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{
+			"error":   "validation_error",
+			"message": "service_id is required and must be a valid UUID",
+		})
+		return
+	}
+
+	ctx := h.contextWithRequestID(c)
+
+	result, err := h.client.AnalyzeServiceRisk(ctx, ai.ServiceRiskRequest{
+		ServiceID:            req.ServiceID,
+		ServiceType:          req.ServiceType,
+		ClientName:           req.ClientName,
+		Deadline:             req.Deadline,
+		DaysUntilDeadline:    req.DaysUntilDeadline,
+		Status:               req.Status,
+		DocumentsReceived:    req.DocumentsReceived,
+		DocumentsRequired:    req.DocumentsRequired,
+		OutstandingQueries:   req.OutstandingQueries,
+		AssignedStaff:        req.AssignedStaff,
+		Complexity:           req.Complexity,
+		PreviousDelays:       req.PreviousDelays,
+		ClientResponsiveness: req.ClientResponsiveness,
 	})
+	if err != nil {
+		log.Error().Err(err).Str("service_id", req.ServiceID).Msg("Failed to analyze service risk")
+		c.JSON(http.StatusBadGateway, gin.H{
+			"error":   "ai_service_error",
+			"message": "Failed to communicate with AI service",
+		})
+		return
+	}
+
+	if result.Error != "" {
+		c.JSON(http.StatusUnprocessableEntity, gin.H{
+			"error":   "risk_analysis_failed",
+			"message": result.Error,
+		})
+		return
+	}
+
+	c.JSON(http.StatusOK, result)
 }
 
 // ============================================================================
@@ -476,50 +710,196 @@ func (h *AIHandler) AnalyzeServiceRisk(c *gin.Context) {
 
 // AutoFillVATRequest is the request for VAT form auto-fill.
 type AutoFillVATRequest struct {
-	ClientID string `json:"client_id" binding:"required,uuid"`
-	Period   string `json:"period" binding:"required"` // e.g., "Q1-2026"
+	ClientID       string  `json:"client_id" binding:"required,uuid"`
+	Period         string  `json:"period" binding:"required"` // e.g., "Q1-2026"
+	ClientName     string  `json:"client_name"`
+	VATNumber      string  `json:"vat_number"`
+	TotalSales     float64 `json:"total_sales"`
+	TotalPurchases float64 `json:"total_purchases"`
+	VATOnSales     float64 `json:"vat_on_sales"`
+	VATOnPurchases float64 `json:"vat_on_purchases"`
+	EUAcquisitions float64 `json:"eu_acquisitions"`
+	EUSupplies     float64 `json:"eu_supplies"`
 }
 
 // AutoFillVAT auto-fills VAT return data.
 // POST /api/v1/ai/forms/vat
 func (h *AIHandler) AutoFillVAT(c *gin.Context) {
-	// TODO: Implement when Python service method is available
-	c.JSON(http.StatusNotImplemented, gin.H{
-		"error":   "not_implemented",
-		"message": "VAT auto-fill AI not yet implemented",
+	var req AutoFillVATRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{
+			"error":   "validation_error",
+			"message": "client_id and period are required",
+		})
+		return
+	}
+
+	ctx := h.contextWithRequestID(c)
+
+	result, err := h.client.AutoFillVAT(ctx, ai.VATAutoFillRequest{
+		ClientID:       req.ClientID,
+		Period:         req.Period,
+		ClientName:     req.ClientName,
+		VATNumber:      req.VATNumber,
+		TotalSales:     req.TotalSales,
+		TotalPurchases: req.TotalPurchases,
+		VATOnSales:     req.VATOnSales,
+		VATOnPurchases: req.VATOnPurchases,
+		EUAcquisitions: req.EUAcquisitions,
+		EUSupplies:     req.EUSupplies,
 	})
+	if err != nil {
+		log.Error().Err(err).Str("client_id", req.ClientID).Msg("Failed to auto-fill VAT")
+		c.JSON(http.StatusBadGateway, gin.H{
+			"error":   "ai_service_error",
+			"message": "Failed to communicate with AI service",
+		})
+		return
+	}
+
+	if result.Error != "" {
+		c.JSON(http.StatusUnprocessableEntity, gin.H{
+			"error":   "vat_autofill_failed",
+			"message": result.Error,
+		})
+		return
+	}
+
+	c.JSON(http.StatusOK, result)
 }
 
 // AutoFillCT600Request is the request for CT600 form auto-fill.
 type AutoFillCT600Request struct {
-	ClientID string `json:"client_id" binding:"required,uuid"`
-	Year     int    `json:"year" binding:"required"`
+	ClientID         string  `json:"client_id" binding:"required,uuid"`
+	Year             int     `json:"year" binding:"required"`
+	CompanyName      string  `json:"company_name"`
+	CompanyNumber    string  `json:"company_number"`
+	UTR              string  `json:"utr"`
+	Turnover         float64 `json:"turnover"`
+	CostOfSales      float64 `json:"cost_of_sales"`
+	GrossProfit      float64 `json:"gross_profit"`
+	AdminExpenses    float64 `json:"admin_expenses"`
+	Depreciation     float64 `json:"depreciation"`
+	InterestReceived float64 `json:"interest_received"`
+	InterestPaid     float64 `json:"interest_paid"`
+	OtherIncome      float64 `json:"other_income"`
 }
 
 // AutoFillCT600 auto-fills CT600 corporation tax return data.
 // POST /api/v1/ai/forms/ct600
 func (h *AIHandler) AutoFillCT600(c *gin.Context) {
-	// TODO: Implement when Python service method is available
-	c.JSON(http.StatusNotImplemented, gin.H{
-		"error":   "not_implemented",
-		"message": "CT600 auto-fill AI not yet implemented",
+	var req AutoFillCT600Request
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{
+			"error":   "validation_error",
+			"message": "client_id and year are required",
+		})
+		return
+	}
+
+	ctx := h.contextWithRequestID(c)
+
+	result, err := h.client.AutoFillCT600(ctx, ai.CT600AutoFillRequest{
+		ClientID:         req.ClientID,
+		Year:             req.Year,
+		CompanyName:      req.CompanyName,
+		CompanyNumber:    req.CompanyNumber,
+		UTR:              req.UTR,
+		Turnover:         req.Turnover,
+		CostOfSales:      req.CostOfSales,
+		GrossProfit:      req.GrossProfit,
+		AdminExpenses:    req.AdminExpenses,
+		Depreciation:     req.Depreciation,
+		InterestReceived: req.InterestReceived,
+		InterestPaid:     req.InterestPaid,
+		OtherIncome:      req.OtherIncome,
 	})
+	if err != nil {
+		log.Error().Err(err).Str("client_id", req.ClientID).Msg("Failed to auto-fill CT600")
+		c.JSON(http.StatusBadGateway, gin.H{
+			"error":   "ai_service_error",
+			"message": "Failed to communicate with AI service",
+		})
+		return
+	}
+
+	if result.Error != "" {
+		c.JSON(http.StatusUnprocessableEntity, gin.H{
+			"error":   "ct600_autofill_failed",
+			"message": result.Error,
+		})
+		return
+	}
+
+	c.JSON(http.StatusOK, result)
 }
 
 // AutoFillSARequest is the request for Self Assessment form auto-fill.
 type AutoFillSARequest struct {
-	ClientID string `json:"client_id" binding:"required,uuid"`
-	TaxYear  string `json:"tax_year" binding:"required"` // e.g., "2025-26"
+	ClientID               string  `json:"client_id" binding:"required,uuid"`
+	TaxYear                string  `json:"tax_year" binding:"required"` // e.g., "2025-26"
+	TaxpayerName           string  `json:"taxpayer_name"`
+	UTR                    string  `json:"utr"`
+	NINumber               string  `json:"ni_number"`
+	EmploymentIncome       float64 `json:"employment_income"`
+	SelfEmploymentIncome   float64 `json:"self_employment_income"`
+	SelfEmploymentExpenses float64 `json:"self_employment_expenses"`
+	PropertyIncome         float64 `json:"property_income"`
+	PropertyExpenses       float64 `json:"property_expenses"`
+	DividendIncome         float64 `json:"dividend_income"`
+	InterestIncome         float64 `json:"interest_income"`
+	PensionContributions   float64 `json:"pension_contributions"`
+	GiftAid                float64 `json:"gift_aid"`
 }
 
 // AutoFillSA auto-fills Self Assessment tax return data.
 // POST /api/v1/ai/forms/sa
 func (h *AIHandler) AutoFillSA(c *gin.Context) {
-	// TODO: Implement when Python service method is available
-	c.JSON(http.StatusNotImplemented, gin.H{
-		"error":   "not_implemented",
-		"message": "Self Assessment auto-fill AI not yet implemented",
+	var req AutoFillSARequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{
+			"error":   "validation_error",
+			"message": "client_id and tax_year are required",
+		})
+		return
+	}
+
+	ctx := h.contextWithRequestID(c)
+
+	result, err := h.client.AutoFillSA(ctx, ai.SAAutoFillRequest{
+		ClientID:               req.ClientID,
+		TaxYear:                req.TaxYear,
+		TaxpayerName:           req.TaxpayerName,
+		UTR:                    req.UTR,
+		NINumber:               req.NINumber,
+		EmploymentIncome:       req.EmploymentIncome,
+		SelfEmploymentIncome:   req.SelfEmploymentIncome,
+		SelfEmploymentExpenses: req.SelfEmploymentExpenses,
+		PropertyIncome:         req.PropertyIncome,
+		PropertyExpenses:       req.PropertyExpenses,
+		DividendIncome:         req.DividendIncome,
+		InterestIncome:         req.InterestIncome,
+		PensionContributions:   req.PensionContributions,
+		GiftAid:                req.GiftAid,
 	})
+	if err != nil {
+		log.Error().Err(err).Str("client_id", req.ClientID).Msg("Failed to auto-fill Self Assessment")
+		c.JSON(http.StatusBadGateway, gin.H{
+			"error":   "ai_service_error",
+			"message": "Failed to communicate with AI service",
+		})
+		return
+	}
+
+	if result.Error != "" {
+		c.JSON(http.StatusUnprocessableEntity, gin.H{
+			"error":   "sa_autofill_failed",
+			"message": result.Error,
+		})
+		return
+	}
+
+	c.JSON(http.StatusOK, result)
 }
 
 // ============================================================================
@@ -549,17 +929,117 @@ func (h *AIHandler) proxyWithBody(ctx context.Context, method, path string, body
 // Chat History endpoints
 // ============================================================================
 
+// GetChatHistoryRequest is the request for getting chat history.
+type GetChatHistoryRequest struct {
+	UserID   string `form:"user_id" binding:"required,uuid"`
+	TenantID string `form:"tenant_id"`
+	Limit    int    `form:"limit"`
+	Offset   int    `form:"offset"`
+}
+
 // GetChatHistory gets chat history for the current user.
 // GET /api/v1/ai/chat/history
 func (h *AIHandler) GetChatHistory(c *gin.Context) {
-	// TODO: Implement - query MongoDB ai_conversations collection
-	c.JSON(http.StatusNotImplemented, gin.H{
-		"error":   "not_implemented",
-		"message": "Chat history not yet implemented - uses MongoDB",
+	var req GetChatHistoryRequest
+	if err := c.ShouldBindQuery(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{
+			"error":   "validation_error",
+			"message": "user_id is required",
+		})
+		return
+	}
+
+	// Default limit
+	if req.Limit == 0 {
+		req.Limit = 50
+	}
+
+	ctx := h.contextWithRequestID(c)
+
+	result, err := h.client.GetChatHistory(ctx, ai.ChatHistoryRequest{
+		UserID:   req.UserID,
+		TenantID: req.TenantID,
+		Limit:    req.Limit,
+		Offset:   req.Offset,
 	})
+	if err != nil {
+		log.Error().Err(err).Str("user_id", req.UserID).Msg("Failed to get chat history")
+		c.JSON(http.StatusBadGateway, gin.H{
+			"error":   "ai_service_error",
+			"message": "Failed to communicate with AI service",
+		})
+		return
+	}
+
+	if result.Error != "" {
+		c.JSON(http.StatusUnprocessableEntity, gin.H{
+			"error":   "chat_history_failed",
+			"message": result.Error,
+		})
+		return
+	}
+
+	c.JSON(http.StatusOK, result)
 }
 
-// DeleteChatRequest contains the chat ID to delete.
+// SaveChatHistoryRequest is the request for saving a chat message.
+type SaveChatHistoryRequest struct {
+	UserID         string `json:"user_id" binding:"required,uuid"`
+	TenantID       string `json:"tenant_id"`
+	ConversationID string `json:"conversation_id"`
+	Role           string `json:"role" binding:"required,oneof=user assistant system"`
+	Content        string `json:"content" binding:"required"`
+	Metadata       string `json:"metadata"`
+}
+
+// SaveChatHistory saves a chat message to history.
+// POST /api/v1/ai/chat/history
+func (h *AIHandler) SaveChatHistory(c *gin.Context) {
+	var req SaveChatHistoryRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{
+			"error":   "validation_error",
+			"message": "user_id, role, and content are required",
+		})
+		return
+	}
+
+	ctx := h.contextWithRequestID(c)
+
+	result, err := h.client.SaveChatMessage(ctx, ai.SaveChatMessageRequest{
+		UserID:         req.UserID,
+		TenantID:       req.TenantID,
+		ConversationID: req.ConversationID,
+		Role:           req.Role,
+		Content:        req.Content,
+		Metadata:       req.Metadata,
+	})
+	if err != nil {
+		log.Error().Err(err).Str("user_id", req.UserID).Msg("Failed to save chat history")
+		c.JSON(http.StatusBadGateway, gin.H{
+			"error":   "ai_service_error",
+			"message": "Failed to communicate with AI service",
+		})
+		return
+	}
+
+	if result.Error != "" {
+		c.JSON(http.StatusUnprocessableEntity, gin.H{
+			"error":   "save_chat_failed",
+			"message": result.Error,
+		})
+		return
+	}
+
+	c.JSON(http.StatusOK, result)
+}
+
+// DeleteChatQuery contains the user_id for authorization.
+type DeleteChatQuery struct {
+	UserID string `form:"user_id" binding:"required,uuid"`
+}
+
+// DeleteChat deletes a chat conversation.
 // DELETE /api/v1/ai/chat/:id
 func (h *AIHandler) DeleteChat(c *gin.Context) {
 	chatID := c.Param("id")
@@ -571,11 +1051,39 @@ func (h *AIHandler) DeleteChat(c *gin.Context) {
 		return
 	}
 
-	// TODO: Implement - delete from MongoDB ai_conversations collection
-	c.JSON(http.StatusNotImplemented, gin.H{
-		"error":   "not_implemented",
-		"message": "Chat deletion not yet implemented - uses MongoDB",
+	var query DeleteChatQuery
+	if err := c.ShouldBindQuery(&query); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{
+			"error":   "validation_error",
+			"message": "user_id is required for authorization",
+		})
+		return
+	}
+
+	ctx := h.contextWithRequestID(c)
+
+	result, err := h.client.DeleteChat(ctx, ai.DeleteChatRequest{
+		ConversationID: chatID,
+		UserID:         query.UserID,
 	})
+	if err != nil {
+		log.Error().Err(err).Str("chat_id", chatID).Msg("Failed to delete chat")
+		c.JSON(http.StatusBadGateway, gin.H{
+			"error":   "ai_service_error",
+			"message": "Failed to communicate with AI service",
+		})
+		return
+	}
+
+	if result.Error != "" {
+		c.JSON(http.StatusUnprocessableEntity, gin.H{
+			"error":   "delete_failed",
+			"message": result.Error,
+		})
+		return
+	}
+
+	c.JSON(http.StatusOK, result)
 }
 
 // ============================================================================

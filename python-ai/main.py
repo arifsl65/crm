@@ -773,6 +773,885 @@ async def summarize_document(
 
 
 # =============================================================================
+# Email AI Endpoints
+# =============================================================================
+
+
+@app.post("/api/v1/ai/emails/summarize", tags=["Email AI"])
+async def summarize_email(
+    subject: str,
+    body: str,
+    sender: str = "",
+    recipient: str = "",
+    email_id: str = "",
+    state: AppState = Depends(get_app_state),
+) -> Dict[str, Any]:
+    """
+    Summarize an email for quick review.
+
+    Args:
+        subject: Email subject line.
+        body: Email body text.
+        sender: Sender email/name.
+        recipient: Recipient email/name.
+        email_id: Optional email ID for reference.
+
+    Returns:
+        Summary with key points, action items, and urgency.
+    """
+    groq_client = get_groq_client()
+    if not groq_client.is_configured():
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="AI service not configured (missing GROQ_API_KEY)",
+        )
+
+    if not subject and not body:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Email subject or body is required",
+        )
+
+    try:
+        result = await groq_client.summarize_email(
+            subject=subject,
+            body=body,
+            sender=sender,
+            recipient=recipient,
+        )
+        if email_id:
+            result["email_id"] = email_id
+        return result
+    except Exception as e:
+        logger.error("Email summarization failed", error=str(e))
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Email summarization failed: {str(e)}",
+        )
+
+
+@app.post("/api/v1/ai/emails/sentiment", tags=["Email AI"])
+async def analyze_email_sentiment(
+    subject: str,
+    body: str,
+    sender: str = "",
+    email_id: str = "",
+    state: AppState = Depends(get_app_state),
+) -> Dict[str, Any]:
+    """
+    Analyze the sentiment of an email.
+
+    Args:
+        subject: Email subject line.
+        body: Email body text.
+        sender: Sender email/name.
+        email_id: Optional email ID for reference.
+
+    Returns:
+        Sentiment analysis with score, tone, and risk indicators.
+    """
+    groq_client = get_groq_client()
+    if not groq_client.is_configured():
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="AI service not configured (missing GROQ_API_KEY)",
+        )
+
+    if not subject and not body:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Email subject or body is required",
+        )
+
+    try:
+        result = await groq_client.analyze_email_sentiment(
+            subject=subject,
+            body=body,
+            sender=sender,
+        )
+        if email_id:
+            result["email_id"] = email_id
+        return result
+    except Exception as e:
+        logger.error("Email sentiment analysis failed", error=str(e))
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Sentiment analysis failed: {str(e)}",
+        )
+
+
+@app.post("/api/v1/ai/emails/promises", tags=["Email AI"])
+async def extract_email_promises(
+    subject: str,
+    body: str,
+    sender: str = "",
+    recipient: str = "",
+    email_id: str = "",
+    state: AppState = Depends(get_app_state),
+) -> Dict[str, Any]:
+    """
+    Extract promised documents and actions from an email.
+
+    Args:
+        subject: Email subject line.
+        body: Email body text.
+        sender: Sender email/name.
+        recipient: Recipient email/name.
+        email_id: Optional email ID for reference.
+
+    Returns:
+        List of promised documents, actions, and requested items.
+    """
+    groq_client = get_groq_client()
+    if not groq_client.is_configured():
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="AI service not configured (missing GROQ_API_KEY)",
+        )
+
+    if not subject and not body:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Email subject or body is required",
+        )
+
+    try:
+        result = await groq_client.extract_email_promises(
+            subject=subject,
+            body=body,
+            sender=sender,
+            recipient=recipient,
+        )
+        if email_id:
+            result["email_id"] = email_id
+        return result
+    except Exception as e:
+        logger.error("Email promise extraction failed", error=str(e))
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Promise extraction failed: {str(e)}",
+        )
+
+
+# =============================================================================
+# Risk Analysis AI Endpoints
+# =============================================================================
+
+
+@app.post("/api/v1/ai/risk/client", tags=["Risk Analysis"])
+async def analyze_client_risk(
+    client_id: str,
+    client_name: str = "",
+    services: str = "",
+    last_contact_days: int = 0,
+    outstanding_invoices: int = 0,
+    outstanding_amount: float = 0.0,
+    email_sentiment_history: str = "",
+    missed_deadlines: int = 0,
+    payment_delays_avg: int = 0,
+    relationship_length_months: int = 0,
+    state: AppState = Depends(get_app_state),
+) -> Dict[str, Any]:
+    """
+    Analyze client churn risk based on their data and interactions.
+
+    Args:
+        client_id: UUID of the client.
+        client_name: Name of the client.
+        services: Comma-separated list of active services.
+        last_contact_days: Days since last contact.
+        outstanding_invoices: Number of unpaid invoices.
+        outstanding_amount: Total unpaid amount.
+        email_sentiment_history: Comma-separated sentiment values (positive,neutral,negative).
+        missed_deadlines: Number of missed deadlines.
+        payment_delays_avg: Average payment delay in days.
+        relationship_length_months: How long they've been a client.
+
+    Returns:
+        Risk analysis with score, factors, and recommendations.
+    """
+    groq_client = get_groq_client()
+    if not groq_client.is_configured():
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="AI service not configured (missing GROQ_API_KEY)",
+        )
+
+    if not client_id:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="client_id is required",
+        )
+
+    # Build client data from parameters
+    client_data = {
+        "services": [s.strip() for s in services.split(",") if s.strip()] if services else [],
+        "last_contact_days": last_contact_days,
+        "outstanding_invoices": outstanding_invoices,
+        "outstanding_amount": outstanding_amount,
+        "email_sentiment_history": [s.strip() for s in email_sentiment_history.split(",") if s.strip()] if email_sentiment_history else [],
+        "missed_deadlines": missed_deadlines,
+        "payment_delays_avg": payment_delays_avg,
+        "relationship_length_months": relationship_length_months,
+    }
+
+    try:
+        result = await groq_client.analyze_client_risk(
+            client_id=client_id,
+            client_name=client_name,
+            client_data=client_data,
+        )
+        result["client_id"] = client_id
+        return result
+    except Exception as e:
+        logger.error("Client risk analysis failed", error=str(e), client_id=client_id)
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Client risk analysis failed: {str(e)}",
+        )
+
+
+@app.post("/api/v1/ai/risk/service", tags=["Risk Analysis"])
+async def analyze_service_risk(
+    service_id: str,
+    service_type: str = "",
+    client_name: str = "",
+    deadline: str = "",
+    days_until_deadline: int = 0,
+    service_status: str = "",
+    documents_received: int = 0,
+    documents_required: int = 0,
+    outstanding_queries: int = 0,
+    assigned_staff: str = "",
+    complexity: str = "medium",
+    previous_delays: bool = False,
+    client_responsiveness: str = "normal",
+    state: AppState = Depends(get_app_state),
+) -> Dict[str, Any]:
+    """
+    Analyze service deadline risk and identify potential issues.
+
+    Args:
+        service_id: UUID of the service.
+        service_type: Type of service (e.g., "VAT Return", "Annual Accounts").
+        client_name: Name of the client.
+        deadline: Service deadline date (ISO format).
+        days_until_deadline: Days remaining until deadline.
+        service_status: Current status of the service.
+        documents_received: Number of documents received from client.
+        documents_required: Total documents required for completion.
+        outstanding_queries: Number of pending client queries.
+        assigned_staff: Staff member assigned to the service.
+        complexity: Service complexity (low/medium/high).
+        previous_delays: Whether previous services for this client were delayed.
+        client_responsiveness: How responsive the client is (slow/normal/fast).
+
+    Returns:
+        Risk analysis with deadline risk, blockers, and recommendations.
+    """
+    groq_client = get_groq_client()
+    if not groq_client.is_configured():
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="AI service not configured (missing GROQ_API_KEY)",
+        )
+
+    if not service_id:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="service_id is required",
+        )
+
+    # Build service data from parameters
+    service_data = {
+        "client_name": client_name,
+        "deadline": deadline,
+        "days_until_deadline": days_until_deadline,
+        "status": service_status,
+        "documents_received": documents_received,
+        "documents_required": documents_required,
+        "outstanding_queries": outstanding_queries,
+        "assigned_staff": assigned_staff,
+        "complexity": complexity,
+        "previous_delays": previous_delays,
+        "client_responsiveness": client_responsiveness,
+    }
+
+    try:
+        result = await groq_client.analyze_service_risk(
+            service_id=service_id,
+            service_type=service_type,
+            service_data=service_data,
+        )
+        result["service_id"] = service_id
+        return result
+    except Exception as e:
+        logger.error("Service risk analysis failed", error=str(e), service_id=service_id)
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Service risk analysis failed: {str(e)}",
+        )
+
+
+# =============================================================================
+# Form Auto-Fill AI Endpoints
+# =============================================================================
+
+
+@app.post("/api/v1/ai/forms/vat", tags=["Form Auto-Fill"])
+async def auto_fill_vat(
+    client_id: str,
+    period: str,
+    client_name: str = "",
+    vat_number: str = "",
+    total_sales: float = 0.0,
+    total_purchases: float = 0.0,
+    vat_on_sales: float = 0.0,
+    vat_on_purchases: float = 0.0,
+    eu_acquisitions: float = 0.0,
+    eu_supplies: float = 0.0,
+    state: AppState = Depends(get_app_state),
+) -> Dict[str, Any]:
+    """
+    Auto-fill VAT return data based on client financial information.
+
+    Args:
+        client_id: UUID of the client.
+        period: VAT period (e.g., "Q1-2026").
+        client_name: Name of the client.
+        vat_number: VAT registration number.
+        total_sales: Total sales value excluding VAT.
+        total_purchases: Total purchases value excluding VAT.
+        vat_on_sales: VAT collected on sales.
+        vat_on_purchases: VAT paid on purchases.
+        eu_acquisitions: Value of EU acquisitions.
+        eu_supplies: Value of EU supplies.
+
+    Returns:
+        Pre-filled VAT return boxes with calculations.
+    """
+    groq_client = get_groq_client()
+    if not groq_client.is_configured():
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="AI service not configured (missing GROQ_API_KEY)",
+        )
+
+    if not client_id or not period:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="client_id and period are required",
+        )
+
+    client_data = {
+        "client_name": client_name,
+        "vat_number": vat_number,
+        "total_sales": total_sales,
+        "total_purchases": total_purchases,
+        "vat_on_sales": vat_on_sales,
+        "vat_on_purchases": vat_on_purchases,
+        "eu_acquisitions": eu_acquisitions,
+        "eu_supplies": eu_supplies,
+    }
+
+    try:
+        result = await groq_client.auto_fill_vat(
+            client_id=client_id,
+            period=period,
+            client_data=client_data,
+        )
+        result["client_id"] = client_id
+        result["period"] = period
+        return result
+    except Exception as e:
+        logger.error("VAT auto-fill failed", error=str(e), client_id=client_id)
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"VAT auto-fill failed: {str(e)}",
+        )
+
+
+@app.post("/api/v1/ai/forms/ct600", tags=["Form Auto-Fill"])
+async def auto_fill_ct600(
+    client_id: str,
+    year: int,
+    company_name: str = "",
+    company_number: str = "",
+    utr: str = "",
+    turnover: float = 0.0,
+    cost_of_sales: float = 0.0,
+    gross_profit: float = 0.0,
+    admin_expenses: float = 0.0,
+    depreciation: float = 0.0,
+    interest_received: float = 0.0,
+    interest_paid: float = 0.0,
+    other_income: float = 0.0,
+    state: AppState = Depends(get_app_state),
+) -> Dict[str, Any]:
+    """
+    Auto-fill CT600 Corporation Tax return data.
+
+    Args:
+        client_id: UUID of the client.
+        year: Accounting year end (e.g., 2026).
+        company_name: Name of the company.
+        company_number: Companies House number.
+        utr: Unique Taxpayer Reference.
+        turnover: Total turnover/revenue.
+        cost_of_sales: Cost of sales.
+        gross_profit: Gross profit.
+        admin_expenses: Administrative expenses.
+        depreciation: Depreciation (for add-back).
+        interest_received: Interest received.
+        interest_paid: Interest paid.
+        other_income: Other income.
+
+    Returns:
+        Pre-filled CT600 fields with tax calculations.
+    """
+    groq_client = get_groq_client()
+    if not groq_client.is_configured():
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="AI service not configured (missing GROQ_API_KEY)",
+        )
+
+    if not client_id or not year:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="client_id and year are required",
+        )
+
+    client_data = {
+        "company_name": company_name,
+        "company_number": company_number,
+        "utr": utr,
+        "accounts": {
+            "turnover": turnover,
+            "cost_of_sales": cost_of_sales,
+            "gross_profit": gross_profit,
+            "admin_expenses": admin_expenses,
+            "depreciation": depreciation,
+            "interest_received": interest_received,
+            "interest_paid": interest_paid,
+            "other_income": other_income,
+        },
+    }
+
+    try:
+        result = await groq_client.auto_fill_ct600(
+            client_id=client_id,
+            year=year,
+            client_data=client_data,
+        )
+        result["client_id"] = client_id
+        result["year"] = year
+        return result
+    except Exception as e:
+        logger.error("CT600 auto-fill failed", error=str(e), client_id=client_id)
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"CT600 auto-fill failed: {str(e)}",
+        )
+
+
+@app.post("/api/v1/ai/forms/sa", tags=["Form Auto-Fill"])
+async def auto_fill_sa(
+    client_id: str,
+    tax_year: str,
+    taxpayer_name: str = "",
+    utr: str = "",
+    ni_number: str = "",
+    employment_income: float = 0.0,
+    self_employment_income: float = 0.0,
+    self_employment_expenses: float = 0.0,
+    property_income: float = 0.0,
+    property_expenses: float = 0.0,
+    dividend_income: float = 0.0,
+    interest_income: float = 0.0,
+    pension_contributions: float = 0.0,
+    gift_aid: float = 0.0,
+    state: AppState = Depends(get_app_state),
+) -> Dict[str, Any]:
+    """
+    Auto-fill Self Assessment tax return data.
+
+    Args:
+        client_id: UUID of the client.
+        tax_year: Tax year (e.g., "2025-26").
+        taxpayer_name: Name of the taxpayer.
+        utr: Unique Taxpayer Reference.
+        ni_number: National Insurance number.
+        employment_income: Employment income (from P60).
+        self_employment_income: Self-employment income.
+        self_employment_expenses: Self-employment expenses.
+        property_income: Property/rental income.
+        property_expenses: Property expenses.
+        dividend_income: Dividend income.
+        interest_income: Interest income.
+        pension_contributions: Pension contributions (for relief).
+        gift_aid: Gift Aid donations (for relief).
+
+    Returns:
+        Pre-filled Self Assessment fields with tax calculations.
+    """
+    groq_client = get_groq_client()
+    if not groq_client.is_configured():
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="AI service not configured (missing GROQ_API_KEY)",
+        )
+
+    if not client_id or not tax_year:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="client_id and tax_year are required",
+        )
+
+    client_data = {
+        "taxpayer_name": taxpayer_name,
+        "utr": utr,
+        "ni_number": ni_number,
+        "employment_income": employment_income,
+        "self_employment": {
+            "income": self_employment_income,
+            "expenses": self_employment_expenses,
+            "profit": self_employment_income - self_employment_expenses,
+        },
+        "property_income": {
+            "income": property_income,
+            "expenses": property_expenses,
+            "profit": property_income - property_expenses,
+        },
+        "dividend_income": dividend_income,
+        "interest_income": interest_income,
+        "pension_contributions": pension_contributions,
+        "gift_aid": gift_aid,
+    }
+
+    try:
+        result = await groq_client.auto_fill_sa(
+            client_id=client_id,
+            tax_year=tax_year,
+            client_data=client_data,
+        )
+        result["client_id"] = client_id
+        result["tax_year"] = tax_year
+        return result
+    except Exception as e:
+        logger.error("SA auto-fill failed", error=str(e), client_id=client_id)
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Self Assessment auto-fill failed: {str(e)}",
+        )
+
+
+# =============================================================================
+# Document Rename AI Endpoint
+# =============================================================================
+
+
+@app.post("/api/v1/ai/documents/rename", tags=["Documents"])
+async def suggest_document_name(
+    text: str,
+    original_filename: str = "",
+    document_type: str = "",
+    client_name: str = "",
+    file_key: str = "",
+    state: AppState = Depends(get_app_state),
+) -> Dict[str, Any]:
+    """
+    Suggest a descriptive name for a document based on its content.
+
+    Args:
+        text: Extracted text from the document.
+        original_filename: Original filename for reference.
+        document_type: Type of document if known.
+        client_name: Client name if known.
+        file_key: OSS file key for reference.
+
+    Returns:
+        Suggested filename with alternatives and metadata.
+    """
+    groq_client = get_groq_client()
+    if not groq_client.is_configured():
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="AI service not configured (missing GROQ_API_KEY)",
+        )
+
+    if not text:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Document text is required",
+        )
+
+    try:
+        result = await groq_client.suggest_document_name(
+            text=text,
+            original_filename=original_filename,
+            document_type=document_type,
+            client_name=client_name,
+        )
+        if file_key:
+            result["file_key"] = file_key
+        return result
+    except Exception as e:
+        logger.error("Document rename failed", error=str(e))
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Document rename failed: {str(e)}",
+        )
+
+
+# =============================================================================
+# Chat History Endpoints (MongoDB)
+# =============================================================================
+
+from datetime import datetime, timezone
+
+
+@app.get("/api/v1/ai/chat/history", tags=["Chat"])
+async def get_chat_history(
+    user_id: str,
+    tenant_id: str = "",
+    limit: int = 50,
+    offset: int = 0,
+    state: AppState = Depends(get_app_state),
+) -> Dict[str, Any]:
+    """
+    Get chat history for a user.
+
+    Args:
+        user_id: UUID of the user.
+        tenant_id: UUID of the tenant (optional filter).
+        limit: Maximum number of conversations to return.
+        offset: Number of conversations to skip.
+
+    Returns:
+        List of chat conversations with messages.
+    """
+    if not user_id:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="user_id is required",
+        )
+
+    if state.mongodb_database is None:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="MongoDB not available",
+        )
+
+    try:
+        collection = state.mongodb_database["ai_conversations"]
+
+        # Build query filter
+        query: Dict[str, Any] = {"user_id": user_id}
+        if tenant_id:
+            query["tenant_id"] = tenant_id
+
+        # Get conversations sorted by last updated
+        cursor = collection.find(query).sort("updated_at", -1).skip(offset).limit(limit)
+        conversations = await cursor.to_list(length=limit)
+
+        # Get total count
+        total = await collection.count_documents(query)
+
+        # Convert ObjectId to string for JSON serialization
+        for conv in conversations:
+            conv["_id"] = str(conv["_id"])
+
+        return {
+            "conversations": conversations,
+            "total": total,
+            "limit": limit,
+            "offset": offset,
+            "has_more": (offset + len(conversations)) < total,
+        }
+
+    except Exception as e:
+        logger.error("Failed to get chat history", error=str(e), user_id=user_id)
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to get chat history: {str(e)}",
+        )
+
+
+@app.post("/api/v1/ai/chat/history", tags=["Chat"])
+async def save_chat_message(
+    user_id: str,
+    conversation_id: str = "",
+    role: str = "user",
+    content: str = "",
+    tenant_id: str = "",
+    metadata: str = "",
+    state: AppState = Depends(get_app_state),
+) -> Dict[str, Any]:
+    """
+    Save a chat message to history.
+
+    Args:
+        user_id: UUID of the user.
+        conversation_id: UUID of the conversation (creates new if empty).
+        role: Message role (user/assistant/system).
+        content: Message content.
+        tenant_id: UUID of the tenant.
+        metadata: JSON string of additional metadata.
+
+    Returns:
+        Saved conversation with message.
+    """
+    if not user_id or not content:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="user_id and content are required",
+        )
+
+    if state.mongodb_database is None:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="MongoDB not available",
+        )
+
+    try:
+        collection = state.mongodb_database["ai_conversations"]
+        now = datetime.now(timezone.utc)
+
+        # Parse metadata if provided
+        meta = {}
+        if metadata:
+            try:
+                meta = json.loads(metadata)
+            except json.JSONDecodeError:
+                pass
+
+        message = {
+            "role": role,
+            "content": content,
+            "timestamp": now.isoformat(),
+            "metadata": meta,
+        }
+
+        if conversation_id:
+            # Add message to existing conversation
+            result = await collection.update_one(
+                {"conversation_id": conversation_id, "user_id": user_id},
+                {
+                    "$push": {"messages": message},
+                    "$set": {"updated_at": now.isoformat()},
+                },
+            )
+
+            if result.modified_count == 0:
+                raise HTTPException(
+                    status_code=status.HTTP_404_NOT_FOUND,
+                    detail="Conversation not found",
+                )
+
+            return {
+                "conversation_id": conversation_id,
+                "message_added": True,
+                "updated_at": now.isoformat(),
+            }
+
+        else:
+            # Create new conversation
+            import uuid
+            new_conversation_id = str(uuid.uuid4())
+
+            conversation = {
+                "conversation_id": new_conversation_id,
+                "user_id": user_id,
+                "tenant_id": tenant_id,
+                "messages": [message],
+                "created_at": now.isoformat(),
+                "updated_at": now.isoformat(),
+            }
+
+            await collection.insert_one(conversation)
+
+            return {
+                "conversation_id": new_conversation_id,
+                "created": True,
+                "created_at": now.isoformat(),
+            }
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error("Failed to save chat message", error=str(e), user_id=user_id)
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to save chat message: {str(e)}",
+        )
+
+
+@app.delete("/api/v1/ai/chat/{conversation_id}", tags=["Chat"])
+async def delete_chat(
+    conversation_id: str,
+    user_id: str,
+    state: AppState = Depends(get_app_state),
+) -> Dict[str, Any]:
+    """
+    Delete a chat conversation.
+
+    Args:
+        conversation_id: UUID of the conversation to delete.
+        user_id: UUID of the user (for authorization).
+
+    Returns:
+        Deletion confirmation.
+    """
+    if not conversation_id or not user_id:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="conversation_id and user_id are required",
+        )
+
+    if state.mongodb_database is None:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="MongoDB not available",
+        )
+
+    try:
+        collection = state.mongodb_database["ai_conversations"]
+
+        # Delete conversation (only if owned by user)
+        result = await collection.delete_one({
+            "conversation_id": conversation_id,
+            "user_id": user_id,
+        })
+
+        if result.deleted_count == 0:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Conversation not found or not owned by user",
+            )
+
+        logger.info(
+            "Chat conversation deleted",
+            conversation_id=conversation_id,
+            user_id=user_id,
+        )
+
+        return {
+            "conversation_id": conversation_id,
+            "deleted": True,
+        }
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error("Failed to delete chat", error=str(e), conversation_id=conversation_id)
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to delete chat: {str(e)}",
+        )
+
+
+# =============================================================================
 # Error Handlers
 # =============================================================================
 
