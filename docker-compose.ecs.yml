@@ -60,6 +60,8 @@ services:
       - ALIBABA_ACCESS_KEY_SECRET=${ALIBABA_ACCESS_KEY_SECRET}
       - OSS_ENDPOINT=${OSS_ENDPOINT:-https://oss-eu-west-1.aliyuncs.com}
       - OSS_BUCKET_UPLOADS=${OSS_BUCKET_UPLOADS:-fzco-uploads}
+      # Companies House API
+      - COMPANIES_HOUSE_API_KEY=${COMPANIES_HOUSE_API_KEY}
     depends_on:
       redis:
         condition: service_healthy
