@@ -11,13 +11,16 @@ interface MenuItem {
   adminOnly?: boolean;
 }
 
+// UI_MODULES.md Sidebar structure:
+// Daily Use: Dashboard, AI Chat
+// Core Data: Clients, Documents, Services, Email
+// Admin: Staff, Settings
 const menuItems: MenuItem[] = [
   { id: 'dashboard', label: 'Dashboard', icon: '🏠', href: '/dashboard' },
   { id: 'ai', label: 'AI Chat', icon: '🤖', href: '/dashboard/ai' },
   { id: 'clients', label: 'Clients', icon: '👥', href: '/dashboard/clients' },
   { id: 'documents', label: 'Documents', icon: '📄', href: '/dashboard/documents' },
   { id: 'services', label: 'Services', icon: '📋', href: '/dashboard/services' },
-  { id: 'hmrc', label: 'HMRC', icon: '🏛️', href: '/dashboard/hmrc' },
   { id: 'email', label: 'Email', icon: '📧', href: '/dashboard/email' },
   { id: 'staff', label: 'Staff', icon: '👤', href: '/dashboard/staff', adminOnly: true },
   { id: 'settings', label: 'Settings', icon: '⚙️', href: '/dashboard/settings', adminOnly: true },
@@ -37,7 +40,7 @@ export function Sidebar({ userRole, onModuleSelect }: SidebarProps) {
 
   // Group items
   const dailyUse = filteredItems.filter(item => ['dashboard', 'ai'].includes(item.id));
-  const coreData = filteredItems.filter(item => ['clients', 'documents', 'services', 'hmrc', 'email'].includes(item.id));
+  const coreData = filteredItems.filter(item => ['clients', 'documents', 'services', 'email'].includes(item.id));
   const admin = filteredItems.filter(item => ['staff', 'settings'].includes(item.id));
 
   const isActive = (href: string) => {

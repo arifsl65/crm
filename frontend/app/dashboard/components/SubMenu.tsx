@@ -14,6 +14,7 @@ interface ModuleSubMenu {
 }
 
 const subMenuItems: ModuleSubMenu = {
+  // UI_MODULES.md: Dashboard (6 items)
   dashboard: [
     { id: 'today', label: 'Today', icon: '📅', panel: 'today' },
     { id: 'overview', label: 'Overview', icon: '📊', panel: 'overview' },
@@ -22,53 +23,58 @@ const subMenuItems: ModuleSubMenu = {
     { id: 'actions', label: 'Actions', icon: '⚡', panel: 'actions' },
     { id: 'activity', label: 'Activity', icon: '📜', panel: 'activity' },
   ],
+  // UI_MODULES.md: Clients (4 items)
   clients: [
-    { id: 'all', label: 'All Clients', icon: '📋', panel: 'list' },
-    { id: 'add', label: 'Add Client', icon: '➕', panel: 'add' },
+    { id: 'all', label: 'All', icon: '📋', panel: 'list' },
+    { id: 'add', label: 'Add', icon: '➕', panel: 'add' },
     { id: 'ch-lookup', label: 'CH Lookup', icon: '🔍', panel: 'ch-lookup' },
     { id: 'by-staff', label: 'By Staff', icon: '👤', panel: 'by-staff' },
   ],
+  // UI_MODULES.md: Documents (5 items)
   documents: [
-    { id: 'all', label: 'All Documents', icon: '📄', panel: 'list' },
-    { id: 'pending', label: 'Pending Review', icon: '⏳', panel: 'pending' },
-    { id: 'upload', label: 'Upload', icon: '📤', panel: 'upload' },
-    { id: 'firm', label: 'Firm Documents', icon: '🏢', panel: 'firm' },
+    { id: 'all', label: 'All', icon: '📋', panel: 'list' },
+    { id: 'upload', label: 'Upload', icon: '⬆️', panel: 'upload' },
+    { id: 'request', label: 'Request', icon: '📤', panel: 'request' },
+    { id: 'e-sign', label: 'E-Sign', icon: '✍️', panel: 'e-sign' },
+    { id: 'firm', label: 'Firm', icon: '🏢', panel: 'firm' },
   ],
+  // UI_MODULES.md: Services (4 items)
   services: [
-    { id: 'all', label: 'All Services', icon: '📋', panel: 'list' },
-    { id: 'kanban', label: 'Kanban View', icon: '📊', panel: 'kanban' },
-    { id: 'add', label: 'Add Service', icon: '➕', panel: 'add' },
-    { id: 'templates', label: 'Templates', icon: '📑', panel: 'templates' },
-  ],
-  hmrc: [
-    { id: 'overview', label: 'Overview', icon: '🏛️', panel: 'overview' },
-    { id: 'vat', label: 'VAT Returns', icon: '📊', panel: 'vat' },
-    { id: 'ct600', label: 'CT600', icon: '🏢', panel: 'ct600' },
-    { id: 'sa', label: 'Self Assessment', icon: '👤', panel: 'sa' },
+    { id: 'all', label: 'All', icon: '📋', panel: 'list' },
+    { id: 'add', label: 'Add', icon: '➕', panel: 'add' },
+    { id: 'hmrc', label: 'HMRC', icon: '🏛️', panel: 'hmrc' },
     { id: 'deadlines', label: 'Deadlines', icon: '📅', panel: 'deadlines' },
   ],
+  // UI_MODULES.md: Email (5 items)
   email: [
     { id: 'inbox', label: 'Inbox', icon: '📥', panel: 'inbox' },
-    { id: 'sent', label: 'Sent', icon: '📤', panel: 'sent' },
-    { id: 'triage', label: 'Triage', icon: '📋', panel: 'triage' },
-    { id: 'templates', label: 'Templates', icon: '📑', panel: 'templates' },
+    { id: 'compose', label: 'Compose', icon: '✏️', panel: 'compose' },
+    { id: 'chase', label: 'Chase', icon: '🔔', panel: 'chase' },
+    { id: 'templates', label: 'Templates', icon: '📋', panel: 'templates' },
     { id: 'settings', label: 'Settings', icon: '⚙️', panel: 'settings' },
   ],
+  // UI_MODULES.md: Staff (3 items)
   staff: [
-    { id: 'all', label: 'All Staff', icon: '👥', panel: 'list' },
-    { id: 'invite', label: 'Invite', icon: '✉️', panel: 'invite' },
+    { id: 'all', label: 'All', icon: '📋', panel: 'list' },
+    { id: 'add', label: 'Add', icon: '➕', panel: 'add' },
     { id: 'workload', label: 'Workload', icon: '📊', panel: 'workload' },
   ],
+  // UI_MODULES.md: Settings (9 items)
   settings: [
     { id: 'company', label: 'Company', icon: '🏢', panel: 'company' },
-    { id: 'branding', label: 'Branding', icon: '🎨', panel: 'branding' },
-    { id: 'security', label: 'Security', icon: '🔒', panel: 'security' },
     { id: 'integrations', label: 'Integrations', icon: '🔗', panel: 'integrations' },
+    { id: 'doc-types', label: 'Doc Types', icon: '📄', panel: 'doc-types' },
+    { id: 'service-types', label: 'Service Types', icon: '📋', panel: 'service-types' },
+    { id: 'appearance', label: 'Appearance', icon: '🎨', panel: 'appearance' },
+    { id: 'subscription', label: 'Subscription', icon: '💳', panel: 'subscription' },
+    { id: 'branding', label: 'Branding', icon: '🏷️', panel: 'branding' },
+    { id: 'security', label: 'Security', icon: '🔐', panel: 'security' },
+    { id: 'audit-log', label: 'Audit Log', icon: '📊', panel: 'audit-log' },
   ],
+  // UI_MODULES.md: AI Chat (2 items)
   ai: [
     { id: 'chat', label: 'Chat', icon: '💬', panel: 'chat' },
     { id: 'history', label: 'History', icon: '📜', panel: 'history' },
-    { id: 'actions', label: 'Quick Actions', icon: '⚡', panel: 'actions' },
   ],
 };
 
@@ -102,7 +108,6 @@ export function SubMenu({ activePanel, onPanelSelect, currentModule }: SubMenuPr
   const getModuleTitle = () => {
     switch (activeModule) {
       case 'ai': return 'AI Chat';
-      case 'hmrc': return 'HMRC';
       default: return activeModule.charAt(0).toUpperCase() + activeModule.slice(1);
     }
   };
