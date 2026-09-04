@@ -306,6 +306,152 @@ export async function getClientServices(clientId: string): Promise<{ services: S
   return res.json();
 }
 
+// Client Notes API
+export interface ClientNote {
+  id: string;
+  tenant_id: string;
+  client_id: string;
+  staff_id: string;
+  staff_name?: string;
+  note: string;
+  is_pinned?: boolean;
+  created_at: string;
+  updated_at: string;
+}
+
+export async function getClientNotes(clientId: string): Promise<{ notes: ClientNote[] }> {
+  const res = await authFetch(`/api/v1/clients/${clientId}/notes`);
+  if (!res.ok) throw new Error('Failed to fetch client notes');
+  return res.json();
+}
+
+export async function createClientNote(clientId: string, note: string): Promise<{ id: string }> {
+  const res = await authFetch(`/api/v1/clients/${clientId}/notes`, {
+    method: 'POST',
+    body: JSON.stringify({ note }),
+  });
+  if (!res.ok) {
+    const error = await res.json();
+    throw new Error(error.message || 'Failed to create note');
+  }
+  return res.json();
+}
+
+export async function updateClientNote(clientId: string, noteId: string, note: string): Promise<void> {
+  const res = await authFetch(`/api/v1/clients/${clientId}/notes/${noteId}`, {
+    method: 'PATCH',
+    body: JSON.stringify({ note }),
+  });
+  if (!res.ok) {
+    const error = await res.json();
+    throw new Error(error.message || 'Failed to update note');
+  }
+}
+
+export async function deleteClientNote(clientId: string, noteId: string): Promise<void> {
+  const res = await authFetch(`/api/v1/clients/${clientId}/notes/${noteId}`, {
+    method: 'DELETE',
+  });
+  if (!res.ok) throw new Error('Failed to delete note');
+}
+
+// Staff Assignment API
+export async function assignStaffToClient(
+  clientId: string,
+  staffId: string,
+  isPrimary?: boolean
+): Promise<void> {
+  const res = await authFetch(`/api/v1/clients/${clientId}/assign`, {
+    method: 'POST',
+    body: JSON.stringify({ staff_id: staffId, is_primary: isPrimary ?? false }),
+  });
+  if (!res.ok) {
+    const error = await res.json();
+    throw new Error(error.message || 'Failed to assign staff');
+  }
+}
+
+// Companies House API
+export interface CHCompanySearchResult {
+  company_number: string;
+  company_name: string;
+  company_status: string;
+  company_type: string;
+  date_of_creation?: string;
+  address_snippet?: string;
+  registered_office_address?: {
+    address_line_1?: string;
+    address_line_2?: string;
+    locality?: string;
+    region?: string;
+    postal_code?: string;
+    country?: string;
+  };
+}
+
+export interface CHCompanyProfile {
+  company_number: string;
+  company_name: string;
+  company_status: string;
+  company_type: string;
+  date_of_creation?: string;
+  registered_office_address?: {
+    address_line_1?: string;
+    address_line_2?: string;
+    locality?: string;
+    region?: string;
+    postal_code?: string;
+    country?: string;
+  };
+  sic_codes?: string[];
+  accounts?: {
+    accounting_reference_date?: { day?: string; month?: string };
+    last_accounts?: { made_up_to?: string; type?: string };
+    next_due?: string;
+    next_made_up_to?: string;
+  };
+  confirmation_statement?: {
+    last_made_up_to?: string;
+    next_due?: string;
+    next_made_up_to?: string;
+  };
+}
+
+export async function searchCompaniesHouse(query: string): Promise<{ items: CHCompanySearchResult[]; total_results: number }> {
+  const res = await authFetch(`/api/v1/ch/search?q=${encodeURIComponent(query)}`);
+  if (!res.ok) {
+    const error = await res.json();
+    throw new Error(error.message || 'Companies House search failed');
+  }
+  return res.json();
+}
+
+export async function getCompanyFromCH(companyNumber: string): Promise<CHCompanyProfile> {
+  const res = await authFetch(`/api/v1/ch/company/${companyNumber}`);
+  if (!res.ok) {
+    const error = await res.json();
+    throw new Error(error.message || 'Failed to fetch company from Companies House');
+  }
+  return res.json();
+}
+
+export async function syncClientWithCH(clientId: string): Promise<{ directors_synced: number; psc_synced: number }> {
+  const res = await authFetch(`/api/v1/ch/sync/${clientId}`, {
+    method: 'POST',
+  });
+  if (!res.ok) {
+    const error = await res.json();
+    throw new Error(error.message || 'Failed to sync with Companies House');
+  }
+  return res.json();
+}
+
+export async function getCHStatus(): Promise<{ status: string; circuit_state: string }> {
+  const res = await authFetch('/api/v1/ch/status');
+  if (!res.ok) throw new Error('Failed to get Companies House status');
+  return res.json();
+}
+
 // Services API
 export async function getServices(params?: {
   limit?: number;
@@ -469,6 +615,182 @@ export async function restoreDocumentVersion(documentId: string, versionId: stri
     method: 'POST',
   });
   if (!res.ok) throw new Error('Failed to restore document version');
+}
+
+// Download document - returns signed URL for download
+export async function downloadDocument(id: string): Promise<{ download_url: string; expires_at: string }> {
+  const res = await authFetch(`/api/v1/documents/${id}/download`);
+  if (!res.ok) throw new Error('Failed to get document download URL');
+  return res.json();
+}
+
+// Update document metadata
+export async function updateDocument(id: string, data: {
+  name?: string;
+  type_id?: string;
+  expiry_date?: string;
+  notes?: string;
+}): Promise<Document> {
+  const res = await authFetch(`/api/v1/documents/${id}`, {
+    method: 'PATCH',
+    body: JSON.stringify(data),
+  });
+  if (!res.ok) {
+    const error = await res.json();
+    throw new Error(error.message || 'Failed to update document');
+  }
+  return res.json();
+}
+
+// Request document renewal (for expired documents)
+export async function requestDocumentRenewal(id: string, data?: {
+  note?: string;
+  new_expiry_date?: string;
+}): Promise<{ message: string }> {
+  const res = await authFetch(`/api/v1/documents/${id}/renewal`, {
+    method: 'POST',
+    body: JSON.stringify(data || {}),
+  });
+  if (!res.ok) {
+    const error = await res.json();
+    throw new Error(error.message || 'Failed to request document renewal');
+  }
+  return res.json();
+}
+
+// Bulk approve multiple documents
+export async function bulkApproveDocuments(documentIds: string[]): Promise<{ approved: number; failed: number }> {
+  const res = await authFetch('/api/v1/documents/bulk-approve', {
+    method: 'POST',
+    body: JSON.stringify({ document_ids: documentIds }),
+  });
+  if (!res.ok) {
+    const error = await res.json();
+    throw new Error(error.message || 'Failed to bulk approve documents');
+  }
+  return res.json();
+}
+
+// Firm Documents API - documents with client_id=NULL (internal firm documents)
+export async function getFirmDocuments(params?: {
+  limit?: number;
+  offset?: number;
+  search?: string;
+}): Promise<{ documents: Document[]; limit: number; offset: number }> {
+  const searchParams = new URLSearchParams();
+  if (params?.limit) searchParams.set('limit', String(params.limit));
+  if (params?.offset) searchParams.set('offset', String(params.offset));
+  if (params?.search) searchParams.set('search', params.search);
+
+  const res = await authFetch(`/api/v1/documents/firm?${searchParams}`);
+  if (!res.ok) throw new Error('Failed to fetch firm documents');
+  return res.json();
+}
+
+export async function uploadFirmDocument(data: {
+  name: string;
+  type_id?: string;
+  access?: 'private' | 'staff' | 'all';
+}): Promise<{ id: string }> {
+  const res = await authFetch('/api/v1/documents/firm', {
+    method: 'POST',
+    body: JSON.stringify(data),
+  });
+  if (!res.ok) {
+    const error = await res.json();
+    throw new Error(error.message || 'Failed to upload firm document');
+  }
+  return res.json();
+}
+
+export async function getFirmDocumentAccess(id: string): Promise<{
+  access: string;
+  staff_ids?: string[];
+}> {
+  const res = await authFetch(`/api/v1/documents/firm/${id}/access`);
+  if (!res.ok) throw new Error('Failed to fetch document access');
+  return res.json();
+}
+
+export async function updateFirmDocumentAccess(id: string, data: {
+  access: 'private' | 'staff' | 'all';
+  staff_ids?: string[];
+}): Promise<void> {
+  const res = await authFetch(`/api/v1/documents/firm/${id}/access`, {
+    method: 'PATCH',
+    body: JSON.stringify(data),
+  });
+  if (!res.ok) throw new Error('Failed to update document access');
+}
+
+// Bulk Document Request API
+export interface BulkDocumentRequest {
+  client_ids: string[];
+  document_requests: Array<{
+    type_id?: string;
+    name: string;
+    expiry_date?: string;
+  }>;
+  request_note?: string;
+}
+
+export async function bulkRequestDocuments(data: BulkDocumentRequest): Promise<{
+  created: number;
+  document_ids: string[];
+}> {
+  const res = await authFetch('/api/v1/documents/bulk-request', {
+    method: 'POST',
+    body: JSON.stringify(data),
+  });
+  if (!res.ok) {
+    const error = await res.json();
+    throw new Error(error.message || 'Failed to create bulk document request');
+  }
+  return res.json();
+}
+
+// Document Upload URL API
+export async function getDocumentUploadUrl(data: {
+  filename: string;
+  content_type: string;
+  client_id?: string;
+  service_id?: string;
+}): Promise<{
+  upload_url: string;
+  document_id: string;
+  expires_at: string;
+}> {
+  const res = await authFetch('/api/v1/documents/upload-url', {
+    method: 'POST',
+    body: JSON.stringify(data),
+  });
+  if (!res.ok) {
+    const error = await res.json();
+    throw new Error(error.message || 'Failed to get upload URL');
+  }
+  return res.json();
+}
+
+// Confirm document upload after uploading to signed URL
+export async function confirmDocumentUpload(documentId: string, data: {
+  name: string;
+  original_name: string;
+  file_size: number;
+  mime_type: string;
+  type_id?: string;
+}): Promise<Document> {
+  const res = await authFetch(`/api/v1/documents/${documentId}`, {
+    method: 'PATCH',
+    body: JSON.stringify({
+      ...data,
+      status: 'pending_review',
+    }),
+  });
+  if (!res.ok) {
+    const error = await res.json();
+    throw new Error(error.message || 'Failed to confirm document upload');
+  }
+  return res.json();
 }
 
 export async function generateQRToken(data: {
