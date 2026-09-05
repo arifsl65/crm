@@ -1,0 +1,40 @@
+# gqlgen configuration for Accountant CRM GraphQL API
+# Run: go run github.com/99designs/gqlgen generate
+
+schema:
+  - internal/graphql/schema.graphqls
+
+exec:
+  filename: internal/graphql/generated.go
+  package: graphql
+
+model:
+  filename: internal/graphql/model/models_gen.go
+  package: model
+
+resolver:
+  layout: follow-schema
+  dir: internal/graphql
+  package: graphql
+  filename_template: "{name}.resolvers.go"
+
+# Autobind existing models from handlers package
+autobind:
+  - github.com/accountant-crm/go-backend/internal/handlers
+
+# Map GraphQL types to Go types
+models:
+  # Custom scalars - use gqlgen's built-in marshalers
+  UUID:
+    model:
+      - github.com/99designs/gqlgen/graphql.UUID
+  Time:
+    model:
+      - github.com/99designs/gqlgen/graphql.Time
+  JSON:
+    model:
+      - github.com/accountant-crm/go-backend/internal/graphql/model.JSON
+  ID:
+    model:
+      - github.com/99designs/gqlgen/graphql.ID
+  # Enums will be auto-generated in models_gen.go

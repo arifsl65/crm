@@ -27,6 +27,7 @@ const (
 	ActionSessionRevoke      Action = "session_revoke"
 	ActionSessionRevokeAll   Action = "session_revoke_all"
 	ActionProfileUpdate      Action = "profile_update"
+	ActionUpdate             Action = "update" // Generic update action
 	Action2FASetup           Action = "2fa_setup"
 	Action2FAVerify          Action = "2fa_verify"
 	Action2FADisable         Action = "2fa_disable"

@@ -1,0 +1,567 @@
+# Accountant CRM GraphQL Schema
+# Version: 1.0.0
+# Generated from GRAPHQL.md specification
+
+# =============================================================================
+# Custom Scalars
+# =============================================================================
+
+scalar UUID
+scalar Time
+scalar JSON
+
+# =============================================================================
+# Enums
+# =============================================================================
+
+enum ClientStatus {
+  ACTIVE
+  INACTIVE
+  ARCHIVED
+  PROSPECT
+}
+
+enum DocumentStatus {
+  REQUESTED
+  UPLOADED
+  UNDER_REVIEW
+  APPROVED
+  REJECTED
+  EXPIRED
+}
+
+enum ServiceStatus {
+  NOT_STARTED
+  IN_PROGRESS
+  AWAITING_INFO
+  UNDER_REVIEW
+  COMPLETED
+  ON_HOLD
+  CANCELLED
+}
+
+enum ServicePriority {
+  LOW
+  MEDIUM
+  HIGH
+  URGENT
+}
+
+enum EmailDirection {
+  INBOUND
+  OUTBOUND
+}
+
+enum EmailSentiment {
+  POSITIVE
+  NEUTRAL
+  NEGATIVE
+  URGENT
+}
+
+enum EmailStatus {
+  DRAFT
+  QUEUED
+  SENT
+  DELIVERED
+  BOUNCED
+  FAILED
+}
+
+# =============================================================================
+# Core Entity Types
+# =============================================================================
+
+type User {
+  id: UUID!
+  tenant_id: UUID!
+  email: String!
+  name: String!
+  role: String!
+  avatar_url: String
+  is_active: Boolean!
+  last_login_at: Time
+  created_at: Time!
+  updated_at: Time!
+}
+
+type Client {
+  id: UUID!
+  tenant_id: UUID!
+  user_id: UUID
+  company_name: String!
+  contact_name: String!
+  email: String!
+  phone: String
+  address: String
+  year_end: String
+  utr: String
+  company_number: String
+  company_type: String
+  incorporation_date: String
+  vat_number: String
+  vat_quarter: String
+  status: ClientStatus!
+  risk_score: Int
+  email_status: String!
+  last_contact_at: Time
+  created_at: Time!
+  updated_at: Time!
+
+  # Nested resolvers with DataLoader
+  documents(limit: Int = 10): [Document!]!
+  services(limit: Int = 10): [Service!]!
+  emails(limit: Int = 10): [Email!]!
+  notes(limit: Int = 20): [ClientNote!]!
+  assigned_staff: [User!]!
+}
+
+type ClientNote {
+  id: UUID!
+  tenant_id: UUID!
+  client_id: UUID!
+  staff_id: UUID!
+  note: String!
+  created_at: Time!
+  updated_at: Time!
+  staff: User
+}
+
+type Document {
+  id: UUID!
+  tenant_id: UUID!
+  client_id: UUID!
+  service_id: UUID
+  name: String!
+  original_name: String!
+  file_key: String
+  file_size: Int
+  mime_type: String
+  status: DocumentStatus!
+  ai_summary: String
+  ai_extracted: JSON
+  requested_by: UUID
+  uploaded_by: UUID
+  reviewed_by: UUID
+  reviewed_at: Time
+  expires_at: Time
+  created_at: Time!
+  updated_at: Time!
+
+  # Nested resolvers
+  client: Client!
+  service: Service
+  document_type: DocumentType
+  requested_by_user: User
+  uploaded_by_user: User
+  reviewed_by_user: User
+}
+
+type DocumentType {
+  id: UUID!
+  tenant_id: UUID!
+  name: String!
+  description: String
+  category: String
+  is_active: Boolean!
+  created_at: Time!
+}
+
+type Service {
+  id: UUID!
+  tenant_id: UUID!
+  client_id: UUID!
+  service_type_id: UUID
+  name: String!
+  description: String
+  status: ServiceStatus!
+  priority: ServicePriority!
+  deadline: Time
+  completed_at: Time
+  docs_required: Int!
+  docs_received: Int!
+  assigned_to: UUID
+  hmrc_data: JSON
+  created_at: Time!
+  updated_at: Time!
+
+  # Nested resolvers
+  client: Client!
+  service_type: ServiceType
+  assigned_user: User
+  documents(limit: Int = 10): [Document!]!
+}
+
+type ServiceType {
+  id: UUID!
+  tenant_id: UUID!
+  name: String!
+  description: String
+  category: String
+  default_deadline_days: Int
+  required_documents: [String!]
+  is_active: Boolean!
+  created_at: Time!
+}
+
+type Email {
+  id: UUID!
+  tenant_id: UUID!
+  client_id: UUID
+  staff_id: UUID
+  thread_id: UUID
+  direction: EmailDirection!
+  from_email: String!
+  to_email: String!
+  subject: String!
+  body_text: String
+  body_html: String
+  status: EmailStatus!
+  is_read: Boolean!
+  sentiment: EmailSentiment
+  ai_summary: String
+  ai_action_items: [String!]
+  sent_at: Time
+  received_at: Time
+  created_at: Time!
+
+  # Nested resolvers
+  client: Client
+  staff: User
+  thread: EmailThread
+}
+
+type EmailThread {
+  id: UUID!
+  tenant_id: UUID!
+  client_id: UUID
+  subject: String!
+  last_message_at: Time!
+  message_count: Int!
+  created_at: Time!
+
+  # Nested resolvers
+  emails(limit: Int = 20): [Email!]!
+  client: Client
+}
+
+type Notification {
+  id: UUID!
+  tenant_id: UUID!
+  user_id: UUID!
+  type: String!
+  title: String!
+  message: String!
+  entity_type: String
+  entity_id: UUID
+  is_read: Boolean!
+  read_at: Time
+  created_at: Time!
+}
+
+# =============================================================================
+# Dashboard Types
+# =============================================================================
+
+type Dashboard {
+  stats: DashboardStats!
+  urgent_items: [UrgentItem!]!
+  deadlines(days: Int = 14): [DeadlineItem!]!
+  recent_activity(limit: Int = 10): [ActivityItem!]!
+  kanban: KanbanBoard!
+}
+
+type DashboardStats {
+  total_clients: Int!
+  active_clients: Int!
+  total_services: Int!
+  active_services: Int!
+  services_at_risk: Int!
+  total_documents: Int!
+  pending_documents: Int!
+  unread_emails: Int!
+  unread_notifications: Int!
+}
+
+type UrgentItem {
+  type: String!
+  entity_id: UUID!
+  title: String!
+  description: String!
+  due_at: Time
+  priority: String!
+  client_name: String
+}
+
+type DeadlineItem {
+  service_id: UUID!
+  service_name: String!
+  client_id: UUID!
+  client_name: String!
+  deadline: Time!
+  days_remaining: Int!
+  status: ServiceStatus!
+  priority: ServicePriority!
+  docs_progress: String!
+}
+
+type ActivityItem {
+  id: UUID!
+  action: String!
+  entity_type: String!
+  entity_id: UUID
+  description: String!
+  user_name: String
+  created_at: Time!
+}
+
+type KanbanBoard {
+  not_started: [KanbanService!]!
+  in_progress: [KanbanService!]!
+  awaiting_info: [KanbanService!]!
+  under_review: [KanbanService!]!
+  completed: [KanbanService!]!
+}
+
+type KanbanService {
+  id: UUID!
+  name: String!
+  client_id: UUID!
+  client_name: String!
+  priority: ServicePriority!
+  deadline: Time
+  docs_progress: String!
+}
+
+# =============================================================================
+# AI Types
+# =============================================================================
+
+type AIConversation {
+  id: String!
+  conversation_id: String!
+  user_id: UUID!
+  tenant_id: UUID
+  messages: [AIMessage!]!
+  created_at: Time!
+  updated_at: Time!
+}
+
+type AIMessage {
+  role: String!
+  content: String!
+  timestamp: Time!
+  metadata: JSON
+}
+
+type TroublemakerClient {
+  client_id: UUID!
+  client_name: String!
+  company_name: String!
+  risk_score: Int!
+  risk_level: String!
+  risk_factors: [RiskFactor!]!
+  recommended_actions: [String!]!
+  last_contact_at: Time
+  overdue_services: Int!
+  pending_documents: Int!
+}
+
+type RiskFactor {
+  factor: String!
+  severity: String!
+  description: String!
+}
+
+type AnomalyItem {
+  type: String!
+  entity_type: String!
+  entity_id: UUID!
+  title: String!
+  description: String!
+  severity: String!
+  detected_at: Time!
+  client_name: String
+}
+
+# =============================================================================
+# Search Types
+# =============================================================================
+
+type SearchResults {
+  clients: [SearchResult!]!
+  documents: [SearchResult!]!
+  services: [SearchResult!]!
+  emails: [SearchResult!]!
+  total_count: Int!
+}
+
+type SearchResult {
+  id: UUID!
+  type: String!
+  title: String!
+  subtitle: String
+  description: String
+  highlight: String
+  url: String!
+}
+
+# =============================================================================
+# Pagination Types (Relay-style)
+# =============================================================================
+
+type PageInfo {
+  has_next_page: Boolean!
+  has_previous_page: Boolean!
+  start_cursor: String
+  end_cursor: String
+}
+
+type ClientConnection {
+  edges: [ClientEdge!]!
+  page_info: PageInfo!
+  total_count: Int!
+}
+
+type ClientEdge {
+  cursor: String!
+  node: Client!
+}
+
+type DocumentConnection {
+  edges: [DocumentEdge!]!
+  page_info: PageInfo!
+  total_count: Int!
+}
+
+type DocumentEdge {
+  cursor: String!
+  node: Document!
+}
+
+type ServiceConnection {
+  edges: [ServiceEdge!]!
+  page_info: PageInfo!
+  total_count: Int!
+}
+
+type ServiceEdge {
+  cursor: String!
+  node: Service!
+}
+
+# =============================================================================
+# Input Types
+# =============================================================================
+
+input ClientFilter {
+  status: ClientStatus
+  search: String
+  assigned_to: UUID
+  has_overdue_services: Boolean
+  risk_score_min: Int
+  risk_score_max: Int
+}
+
+input DocumentFilter {
+  client_id: UUID
+  service_id: UUID
+  status: DocumentStatus
+  document_type_id: UUID
+  uploaded_after: Time
+  uploaded_before: Time
+}
+
+input ServiceFilter {
+  client_id: UUID
+  status: ServiceStatus
+  priority: ServicePriority
+  service_type_id: UUID
+  assigned_to: UUID
+  deadline_before: Time
+  deadline_after: Time
+}
+
+# =============================================================================
+# Query Type
+# =============================================================================
+
+type Query {
+  # Dashboard (aggregated - primary GraphQL use case)
+  dashboard: Dashboard!
+
+  # Clients
+  client(id: UUID!): Client
+  clients(filter: ClientFilter, first: Int = 20, after: String): ClientConnection!
+
+  # Documents
+  document(id: UUID!): Document
+  documents(filter: DocumentFilter, first: Int = 20, after: String): DocumentConnection!
+
+  # Services
+  service(id: UUID!): Service
+  services(filter: ServiceFilter, first: Int = 20, after: String): ServiceConnection!
+
+  # Emails
+  email(id: UUID!): Email
+  email_thread(id: UUID!): EmailThread
+
+  # Notifications
+  notifications(unread_only: Boolean = false, limit: Int = 20): [Notification!]!
+  unread_notification_count: Int!
+
+  # AI Chat (via Python proxy → MongoDB)
+  ai_conversations(limit: Int = 20): [AIConversation!]!
+  ai_conversation(id: String!): AIConversation
+
+  # AI Analysis
+  troublemaker_clients(limit: Int = 10): [TroublemakerClient!]!
+  anomalies(limit: Int = 10): [AnomalyItem!]!
+
+  # Search (unified)
+  search(query: String!, limit: Int = 20): SearchResults!
+  recent_searches(limit: Int = 5): [SearchResult!]!
+
+  # Lookup types
+  document_types: [DocumentType!]!
+  service_types: [ServiceType!]!
+
+  # Current user
+  me: User!
+}
+
+# =============================================================================
+# Mutation Type (Limited - most mutations use REST)
+# =============================================================================
+
+type Mutation {
+  # Notifications
+  mark_notification_read(id: UUID!): Notification!
+  mark_all_notifications_read: Int!
+  dismiss_notification(id: UUID!): Boolean!
+
+  # Quick document actions
+  approve_document(id: UUID!, note: String): Document!
+  reject_document(id: UUID!, note: String!): Document!
+
+  # Quick service actions
+  update_service_status(id: UUID!, status: ServiceStatus!): Service!
+
+  # Email actions
+  claim_email(id: UUID!): Email!
+  unclaim_email(id: UUID!): Email!
+  mark_email_read(id: UUID!): Email!
+
+  # AI Chat
+  delete_ai_conversation(id: String!): Boolean!
+}
+
+# =============================================================================
+# Subscription Type (Optional - WebSocket hub handles real-time)
+# =============================================================================
+
+type Subscription {
+  notification_received: Notification!
+  document_processed(client_id: UUID): Document!
+  service_at_risk: Service!
+}
