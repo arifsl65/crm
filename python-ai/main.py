@@ -933,6 +933,278 @@ async def extract_email_promises(
         )
 
 
+@app.post("/api/v1/ai/emails/draft", tags=["Email AI"])
+async def draft_email(
+    context: str,
+    tone: str = "professional",
+    intent: str = "reply",
+    client_name: str = "",
+    staff_name: str = "",
+    original_subject: str = "",
+    original_body: str = "",
+    original_sender: str = "",
+    additional_instructions: str = "",
+    email_id: str = "",
+    state: AppState = Depends(get_app_state),
+) -> Dict[str, Any]:
+    """
+    Generate an AI-drafted email reply or new email.
+
+    Args:
+        context: Context or instructions for the email.
+        tone: Desired tone (professional, friendly, formal, casual).
+        intent: Email intent (reply, follow_up, request_documents, chase, thank_you).
+        client_name: Name of the client for personalization.
+        staff_name: Name of the staff member sending the email.
+        original_subject: Subject of original email (for replies).
+        original_body: Body of original email (for replies).
+        original_sender: Sender of original email (for replies).
+        additional_instructions: Any additional instructions for the AI.
+        email_id: Optional email ID for reference.
+
+    Returns:
+        Draft email with subject, body, and suggestions.
+    """
+    groq_client = get_groq_client()
+    if not groq_client.is_configured():
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="AI service not configured (missing GROQ_API_KEY)",
+        )
+
+    if not context:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Context or instructions are required",
+        )
+
+    # Build original email dict if provided
+    original_email = None
+    if original_body or original_subject:
+        original_email = {
+            "subject": original_subject,
+            "body": original_body,
+            "sender": original_sender,
+        }
+
+    try:
+        result = await groq_client.draft_email(
+            context=context,
+            original_email=original_email,
+            tone=tone,
+            intent=intent,
+            client_name=client_name,
+            staff_name=staff_name,
+            additional_instructions=additional_instructions,
+        )
+        if email_id:
+            result["email_id"] = email_id
+        return result
+    except Exception as e:
+        logger.error("Email draft generation failed", error=str(e))
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Email draft generation failed: {str(e)}",
+        )
+
+
+@app.post("/api/v1/ai/emails/match-client", tags=["Email AI"])
+async def match_email_to_client(
+    sender_email: str,
+    sender_name: str = "",
+    email_content: str = "",
+    known_clients: str = "",
+    email_id: str = "",
+    state: AppState = Depends(get_app_state),
+) -> Dict[str, Any]:
+    """
+    Match an unknown email sender to an existing client.
+
+    Args:
+        sender_email: Email address of the sender.
+        sender_name: Display name of the sender.
+        email_content: Content of the email for context clues.
+        known_clients: JSON string of known clients list.
+        email_id: Optional email ID for reference.
+
+    Returns:
+        Match results with confidence and reasoning.
+    """
+    groq_client = get_groq_client()
+    if not groq_client.is_configured():
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="AI service not configured (missing GROQ_API_KEY)",
+        )
+
+    if not sender_email:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Sender email is required",
+        )
+
+    # Parse known clients JSON
+    clients_list = []
+    if known_clients:
+        try:
+            clients_list = json.loads(known_clients)
+        except json.JSONDecodeError:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Invalid known_clients format (must be JSON array)",
+            )
+
+    # Extract domain from email
+    email_domain = sender_email.split("@")[-1] if "@" in sender_email else ""
+
+    try:
+        result = await groq_client.match_email_to_client(
+            sender_email=sender_email,
+            sender_name=sender_name,
+            email_domain=email_domain,
+            email_content=email_content,
+            known_clients=clients_list,
+        )
+        if email_id:
+            result["email_id"] = email_id
+        return result
+    except Exception as e:
+        logger.error("Client matching failed", error=str(e))
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Client matching failed: {str(e)}",
+        )
+
+
+@app.post("/api/v1/ai/emails/thread-summary", tags=["Email AI"])
+async def summarize_email_thread(
+    emails: str,
+    focus: str = "general",
+    thread_id: str = "",
+    state: AppState = Depends(get_app_state),
+) -> Dict[str, Any]:
+    """
+    Summarize an email conversation thread.
+
+    Args:
+        emails: JSON string of emails in chronological order.
+        focus: What to focus on (general, action_items, decisions, timeline, documents).
+        thread_id: Optional thread ID for reference.
+
+    Returns:
+        Thread summary with key points and action items.
+    """
+    groq_client = get_groq_client()
+    if not groq_client.is_configured():
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="AI service not configured (missing GROQ_API_KEY)",
+        )
+
+    if not emails:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Emails list is required",
+        )
+
+    # Parse emails JSON
+    try:
+        emails_list = json.loads(emails)
+    except json.JSONDecodeError:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Invalid emails format (must be JSON array)",
+        )
+
+    if not emails_list:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="At least one email is required",
+        )
+
+    try:
+        result = await groq_client.summarize_email_thread(
+            emails=emails_list,
+            focus=focus,
+        )
+        if thread_id:
+            result["thread_id"] = thread_id
+        return result
+    except Exception as e:
+        logger.error("Thread summarization failed", error=str(e))
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Thread summarization failed: {str(e)}",
+        )
+
+
+@app.post("/api/v1/ai/emails/find-alternate", tags=["Email AI"])
+async def find_alternate_email(
+    bounced_email: str,
+    client_name: str = "",
+    company_name: str = "",
+    known_contacts: str = "",
+    company_domain: str = "",
+    email_id: str = "",
+    state: AppState = Depends(get_app_state),
+) -> Dict[str, Any]:
+    """
+    Suggest alternate email addresses when an email bounces.
+
+    Args:
+        bounced_email: The email address that bounced.
+        client_name: Name of the client.
+        company_name: Name of the company.
+        known_contacts: JSON string of known contacts.
+        company_domain: Known company email domain.
+        email_id: Optional email ID for reference.
+
+    Returns:
+        Suggestions for alternate emails and actions.
+    """
+    groq_client = get_groq_client()
+    if not groq_client.is_configured():
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="AI service not configured (missing GROQ_API_KEY)",
+        )
+
+    if not bounced_email:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Bounced email address is required",
+        )
+
+    # Parse known contacts JSON
+    contacts_list = []
+    if known_contacts:
+        try:
+            contacts_list = json.loads(known_contacts)
+        except json.JSONDecodeError:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Invalid known_contacts format (must be JSON array)",
+            )
+
+    try:
+        result = await groq_client.find_alternate_email(
+            bounced_email=bounced_email,
+            client_name=client_name,
+            company_name=company_name,
+            known_contacts=contacts_list,
+            company_domain=company_domain,
+        )
+        if email_id:
+            result["email_id"] = email_id
+        return result
+    except Exception as e:
+        logger.error("Alternate email search failed", error=str(e))
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Alternate email search failed: {str(e)}",
+        )
+
+
 # =============================================================================
 # Risk Analysis AI Endpoints
 # =============================================================================
@@ -1648,6 +1920,420 @@ async def delete_chat(
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Failed to delete chat: {str(e)}",
+        )
+
+
+# =============================================================================
+# Template AI Endpoints
+# =============================================================================
+
+
+@app.post("/api/v1/ai/templates/generate", tags=["Template AI"])
+async def generate_email_template(
+    purpose: str,
+    template_type: str = "general",
+    tone: str = "professional",
+    include_placeholders: bool = True,
+    example_context: str = "",
+    state: AppState = Depends(get_app_state),
+) -> Dict[str, Any]:
+    """
+    Generate an email template using AI.
+
+    Args:
+        purpose: Purpose/description of the template.
+        template_type: Type (document_request, chase, welcome, reminder, etc.).
+        tone: Desired tone (professional, friendly, formal, casual).
+        include_placeholders: Whether to include merge placeholders.
+        example_context: Optional example context for better template.
+
+    Returns:
+        Generated template with subject, body, and placeholders.
+    """
+    groq_client = get_groq_client()
+    if not groq_client.is_configured():
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="AI service not configured (missing GROQ_API_KEY)",
+        )
+
+    if not purpose:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Template purpose is required",
+        )
+
+    try:
+        result = await groq_client.generate_email_template(
+            purpose=purpose,
+            template_type=template_type,
+            tone=tone,
+            include_placeholders=include_placeholders,
+            example_context=example_context,
+        )
+        return result
+    except Exception as e:
+        logger.error("Template generation failed", error=str(e))
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Template generation failed: {str(e)}",
+        )
+
+
+# =============================================================================
+# Client AI Endpoints
+# =============================================================================
+
+
+@app.post("/api/v1/ai/clients/duplicate-check", tags=["Client AI"])
+async def check_duplicate_clients(
+    new_client: str,
+    existing_clients: str = "",
+    state: AppState = Depends(get_app_state),
+) -> Dict[str, Any]:
+    """
+    Check if a new client is a duplicate of existing clients.
+
+    Args:
+        new_client: JSON string of new client data.
+        existing_clients: JSON string of existing clients list.
+
+    Returns:
+        Duplicate analysis with potential matches.
+    """
+    groq_client = get_groq_client()
+    if not groq_client.is_configured():
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="AI service not configured (missing GROQ_API_KEY)",
+        )
+
+    if not new_client:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="New client data is required",
+        )
+
+    # Parse JSON inputs
+    try:
+        new_client_data = json.loads(new_client)
+    except json.JSONDecodeError:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Invalid new_client format (must be JSON object)",
+        )
+
+    existing_clients_list = []
+    if existing_clients:
+        try:
+            existing_clients_list = json.loads(existing_clients)
+        except json.JSONDecodeError:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Invalid existing_clients format (must be JSON array)",
+            )
+
+    try:
+        result = await groq_client.check_duplicate_clients(
+            new_client=new_client_data,
+            existing_clients=existing_clients_list,
+        )
+        return result
+    except Exception as e:
+        logger.error("Duplicate check failed", error=str(e))
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Duplicate check failed: {str(e)}",
+        )
+
+
+# =============================================================================
+# Service AI Endpoints
+# =============================================================================
+
+
+@app.post("/api/v1/ai/services/auto-name", tags=["Service AI"])
+async def auto_name_service(
+    service_type: str,
+    client_name: str,
+    period: str = "",
+    year: str = "",
+    additional_context: str = "",
+    state: AppState = Depends(get_app_state),
+) -> Dict[str, Any]:
+    """
+    Auto-generate a service name based on type and client.
+
+    Args:
+        service_type: Type of service (VAT Return, Annual Accounts, etc.).
+        client_name: Name of the client.
+        period: Relevant period (Q1, Q2, etc.).
+        year: Tax/financial year.
+        additional_context: Any additional context.
+
+    Returns:
+        Suggested service name and variations.
+    """
+    groq_client = get_groq_client()
+    if not groq_client.is_configured():
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="AI service not configured (missing GROQ_API_KEY)",
+        )
+
+    if not service_type or not client_name:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="service_type and client_name are required",
+        )
+
+    try:
+        result = await groq_client.auto_name_service(
+            service_type=service_type,
+            client_name=client_name,
+            period=period,
+            year=year,
+            additional_context=additional_context,
+        )
+        return result
+    except Exception as e:
+        logger.error("Service auto-naming failed", error=str(e))
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Service auto-naming failed: {str(e)}",
+        )
+
+
+@app.post("/api/v1/ai/services/completion-summary", tags=["Service AI"])
+async def generate_completion_summary(
+    service_type: str,
+    client_name: str,
+    completion_data: str = "",
+    service_id: str = "",
+    state: AppState = Depends(get_app_state),
+) -> Dict[str, Any]:
+    """
+    Generate a completion summary for a finished service.
+
+    Args:
+        service_type: Type of service completed.
+        client_name: Name of the client.
+        completion_data: JSON string of completion data.
+        service_id: Optional service ID for reference.
+
+    Returns:
+        Summary suitable for client communication and internal records.
+    """
+    groq_client = get_groq_client()
+    if not groq_client.is_configured():
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="AI service not configured (missing GROQ_API_KEY)",
+        )
+
+    if not service_type or not client_name:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="service_type and client_name are required",
+        )
+
+    # Parse completion data
+    completion_data_dict = {}
+    if completion_data:
+        try:
+            completion_data_dict = json.loads(completion_data)
+        except json.JSONDecodeError:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Invalid completion_data format (must be JSON object)",
+            )
+
+    try:
+        result = await groq_client.generate_completion_summary(
+            service_type=service_type,
+            client_name=client_name,
+            completion_data=completion_data_dict,
+        )
+        if service_id:
+            result["service_id"] = service_id
+        return result
+    except Exception as e:
+        logger.error("Completion summary generation failed", error=str(e))
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Completion summary generation failed: {str(e)}",
+        )
+
+
+# =============================================================================
+# Dashboard AI Endpoints
+# =============================================================================
+
+
+@app.post("/api/v1/ai/dashboard/troublemakers", tags=["Dashboard AI"])
+async def find_troublemakers(
+    clients: str,
+    threshold_days_overdue: int = 7,
+    state: AppState = Depends(get_app_state),
+) -> Dict[str, Any]:
+    """
+    Identify problematic clients who need attention.
+
+    Args:
+        clients: JSON string of clients with their metrics.
+        threshold_days_overdue: Days before considered overdue.
+
+    Returns:
+        Ranked list of troublemakers with recommended actions.
+    """
+    groq_client = get_groq_client()
+    if not groq_client.is_configured():
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="AI service not configured (missing GROQ_API_KEY)",
+        )
+
+    if not clients:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Clients data is required",
+        )
+
+    # Parse clients JSON
+    try:
+        clients_list = json.loads(clients)
+    except json.JSONDecodeError:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Invalid clients format (must be JSON array)",
+        )
+
+    try:
+        result = await groq_client.find_troublemakers(
+            clients=clients_list,
+            threshold_days_overdue=threshold_days_overdue,
+        )
+        return result
+    except Exception as e:
+        logger.error("Troublemaker analysis failed", error=str(e))
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Troublemaker analysis failed: {str(e)}",
+        )
+
+
+@app.post("/api/v1/ai/dashboard/anomalies", tags=["Dashboard AI"])
+async def detect_anomalies(
+    data_type: str,
+    data: str,
+    context: str = "",
+    state: AppState = Depends(get_app_state),
+) -> Dict[str, Any]:
+    """
+    Detect anomalies in various types of data.
+
+    Args:
+        data_type: Type of data (client_financials, service_metrics, etc.).
+        data: JSON string of data records to analyze.
+        context: Additional context about what to look for.
+
+    Returns:
+        Detected anomalies with explanations.
+    """
+    groq_client = get_groq_client()
+    if not groq_client.is_configured():
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="AI service not configured (missing GROQ_API_KEY)",
+        )
+
+    if not data_type or not data:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="data_type and data are required",
+        )
+
+    # Parse data JSON
+    try:
+        data_list = json.loads(data)
+    except json.JSONDecodeError:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Invalid data format (must be JSON array)",
+        )
+
+    try:
+        result = await groq_client.detect_anomalies(
+            data_type=data_type,
+            data=data_list,
+            context=context,
+        )
+        return result
+    except Exception as e:
+        logger.error("Anomaly detection failed", error=str(e))
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Anomaly detection failed: {str(e)}",
+        )
+
+
+@app.post("/api/v1/ai/staff/activity", tags=["Staff AI"])
+async def analyze_staff_activity(
+    staff_id: str,
+    staff_name: str,
+    activity_data: str = "",
+    period: str = "last_week",
+    state: AppState = Depends(get_app_state),
+) -> Dict[str, Any]:
+    """
+    Generate a staff activity report.
+
+    Args:
+        staff_id: UUID of the staff member.
+        staff_name: Name of the staff member.
+        activity_data: JSON string of activity metrics.
+        period: Time period (last_week, last_month, custom).
+
+    Returns:
+        Comprehensive activity report with insights.
+    """
+    groq_client = get_groq_client()
+    if not groq_client.is_configured():
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="AI service not configured (missing GROQ_API_KEY)",
+        )
+
+    if not staff_id or not staff_name:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="staff_id and staff_name are required",
+        )
+
+    # Parse activity data
+    activity_data_dict = {}
+    if activity_data:
+        try:
+            activity_data_dict = json.loads(activity_data)
+        except json.JSONDecodeError:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Invalid activity_data format (must be JSON object)",
+            )
+
+    try:
+        result = await groq_client.analyze_staff_activity(
+            staff_id=staff_id,
+            staff_name=staff_name,
+            activity_data=activity_data_dict,
+            period=period,
+        )
+        return result
+    except Exception as e:
+        logger.error("Staff activity analysis failed", error=str(e))
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Staff activity analysis failed: {str(e)}",
         )
 
 

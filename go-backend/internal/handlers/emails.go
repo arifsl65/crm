@@ -825,3 +825,266 @@ func (h *EmailHandler) SendFromTemplate(c *gin.Context) {
 		"message": "Email queued for delivery",
 	})
 }
+
+// ============================================================================
+// Email Thread Handlers
+// ============================================================================
+
+// EmailThread represents an email thread/conversation.
+type EmailThread struct {
+	ID            uuid.UUID       `json:"id"`
+	TenantID      uuid.UUID       `json:"tenant_id"`
+	ThreadKey     string          `json:"thread_key"`
+	ClientID      *uuid.UUID      `json:"client_id,omitempty"`
+	FirstEmailID  *uuid.UUID      `json:"first_email_id,omitempty"`
+	Subject       string          `json:"subject"`
+	Participants  json.RawMessage `json:"participants"`
+	LastMessageAt *time.Time      `json:"last_message_at,omitempty"`
+	MessageCount  int             `json:"message_count"`
+	AISummary     *string         `json:"ai_summary,omitempty"`
+	CreatedAt     time.Time       `json:"created_at"`
+	UpdatedAt     time.Time       `json:"updated_at"`
+	// Computed fields
+	ClientName *string `json:"client_name,omitempty"`
+}
+
+// ListThreads returns all email threads for the tenant.
+// GET /api/v1/emails/threads
+func (h *EmailHandler) ListThreads(c *gin.Context) {
+	tenantID, _ := middleware.GetTenantID(c)
+
+	tenantDB, ok := middleware.GetTenantDB(c)
+	if !ok {
+		log.Error().Msg("TenantDB not found in context")
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "internal_error"})
+		return
+	}
+
+	// Pagination
+	limit, _ := strconv.Atoi(c.DefaultQuery("limit", "50"))
+	offset, _ := strconv.Atoi(c.DefaultQuery("offset", "0"))
+	if limit > 100 {
+		limit = 100
+	}
+
+	// Filters
+	clientID := c.Query("client_id")
+	search := c.Query("search")
+
+	var query strings.Builder
+	var args []interface{}
+	argNum := 1
+
+	query.WriteString(`
+		SELECT t.id, t.tenant_id, t.thread_key, t.client_id, t.first_email_id,
+		       t.subject, t.participants, t.last_message_at, t.message_count,
+		       t.ai_summary, t.created_at, t.updated_at,
+		       cl.company_name as client_name
+		FROM email_threads t
+		LEFT JOIN clients cl ON t.client_id = cl.id
+		WHERE t.tenant_id = $1
+	`)
+	args = append(args, tenantID)
+	argNum++
+
+	if clientID != "" {
+		if cid, err := uuid.Parse(clientID); err == nil {
+			query.WriteString(` AND t.client_id = $`)
+			query.WriteString(strconv.Itoa(argNum))
+			args = append(args, cid)
+			argNum++
+		}
+	}
+
+	if search != "" {
+		query.WriteString(` AND (t.subject ILIKE $`)
+		query.WriteString(strconv.Itoa(argNum))
+		query.WriteString(` OR t.ai_summary ILIKE $`)
+		query.WriteString(strconv.Itoa(argNum))
+		query.WriteString(`)`)
+		args = append(args, "%"+search+"%")
+		argNum++
+	}
+
+	query.WriteString(` ORDER BY t.last_message_at DESC NULLS LAST, t.created_at DESC LIMIT $`)
+	query.WriteString(strconv.Itoa(argNum))
+	args = append(args, limit)
+	argNum++
+
+	query.WriteString(` OFFSET $`)
+	query.WriteString(strconv.Itoa(argNum))
+	args = append(args, offset)
+
+	var threads []EmailThread
+	err := tenantDB.Query(c, query.String(), args, func(rows pgx.Rows) error {
+		var t EmailThread
+		err := rows.Scan(
+			&t.ID, &t.TenantID, &t.ThreadKey, &t.ClientID, &t.FirstEmailID,
+			&t.Subject, &t.Participants, &t.LastMessageAt, &t.MessageCount,
+			&t.AISummary, &t.CreatedAt, &t.UpdatedAt,
+			&t.ClientName,
+		)
+		if err != nil {
+			return err
+		}
+		threads = append(threads, t)
+		return nil
+	})
+
+	if err != nil {
+		log.Error().Err(err).Msg("Failed to list email threads")
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to fetch email threads"})
+		return
+	}
+
+	if threads == nil {
+		threads = []EmailThread{}
+	}
+
+	c.JSON(http.StatusOK, gin.H{
+		"threads": threads,
+		"count":   len(threads),
+	})
+}
+
+// GetThread returns a single email thread.
+// GET /api/v1/emails/threads/:id
+func (h *EmailHandler) GetThread(c *gin.Context) {
+	tenantID, _ := middleware.GetTenantID(c)
+	id := c.Param("id")
+
+	tenantDB, ok := middleware.GetTenantDB(c)
+	if !ok {
+		log.Error().Msg("TenantDB not found in context")
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "internal_error"})
+		return
+	}
+
+	threadID, err := uuid.Parse(id)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid thread ID"})
+		return
+	}
+
+	query := `
+		SELECT t.id, t.tenant_id, t.thread_key, t.client_id, t.first_email_id,
+		       t.subject, t.participants, t.last_message_at, t.message_count,
+		       t.ai_summary, t.created_at, t.updated_at,
+		       cl.company_name as client_name
+		FROM email_threads t
+		LEFT JOIN clients cl ON t.client_id = cl.id
+		WHERE t.id = $1 AND t.tenant_id = $2
+	`
+
+	var t EmailThread
+	err = tenantDB.QueryRowScan(c, []interface{}{
+		&t.ID, &t.TenantID, &t.ThreadKey, &t.ClientID, &t.FirstEmailID,
+		&t.Subject, &t.Participants, &t.LastMessageAt, &t.MessageCount,
+		&t.AISummary, &t.CreatedAt, &t.UpdatedAt,
+		&t.ClientName,
+	}, query, threadID, tenantID)
+
+	if err == pgx.ErrNoRows {
+		c.JSON(http.StatusNotFound, gin.H{"error": "Thread not found"})
+		return
+	}
+	if err != nil {
+		log.Error().Err(err).Msg("Failed to get email thread")
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to fetch thread"})
+		return
+	}
+
+	c.JSON(http.StatusOK, t)
+}
+
+// GetThreadMessages returns all emails in a thread.
+// GET /api/v1/emails/threads/:id/messages
+func (h *EmailHandler) GetThreadMessages(c *gin.Context) {
+	tenantID, _ := middleware.GetTenantID(c)
+	id := c.Param("id")
+
+	tenantDB, ok := middleware.GetTenantDB(c)
+	if !ok {
+		log.Error().Msg("TenantDB not found in context")
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "internal_error"})
+		return
+	}
+
+	threadID, err := uuid.Parse(id)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid thread ID"})
+		return
+	}
+
+	// Pagination
+	limit, _ := strconv.Atoi(c.DefaultQuery("limit", "50"))
+	offset, _ := strconv.Atoi(c.DefaultQuery("offset", "0"))
+	if limit > 100 {
+		limit = 100
+	}
+
+	// First verify the thread exists and belongs to this tenant
+	var threadKey string
+	err = tenantDB.QueryRowScan(c, []interface{}{&threadKey},
+		`SELECT thread_key FROM email_threads WHERE id = $1 AND tenant_id = $2`,
+		threadID, tenantID)
+
+	if err == pgx.ErrNoRows {
+		c.JSON(http.StatusNotFound, gin.H{"error": "Thread not found"})
+		return
+	}
+	if err != nil {
+		log.Error().Err(err).Msg("Failed to verify thread")
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to fetch thread"})
+		return
+	}
+
+	// Get emails in this thread (by thread_key since emails.thread_id stores thread_key)
+	query := `
+		SELECT e.id, e.tenant_id, e.client_id, e.staff_id, e.template_id,
+		       e.thread_id, e.reply_to_id, e.direction, e.to_email, e.to_name,
+		       e.from_email, e.subject, e.body_html, e.body_text, e.type, e.status,
+		       e.resend_id, e.is_read, e.ai_summary, e.sentiment,
+		       e.sent_at, e.opened_at, e.bounced_at, e.bounce_reason, e.created_at,
+		       cl.company_name as client_name, COALESCE(u.name, '') as staff_name
+		FROM emails e
+		LEFT JOIN clients cl ON e.client_id = cl.id
+		LEFT JOIN users u ON e.staff_id = u.id
+		WHERE e.thread_id = $1 AND e.tenant_id = $2
+		ORDER BY e.created_at ASC
+		LIMIT $3 OFFSET $4
+	`
+
+	var emails []Email
+	err = tenantDB.Query(c, query, []interface{}{threadKey, tenantID, limit, offset}, func(rows pgx.Rows) error {
+		var e Email
+		err := rows.Scan(
+			&e.ID, &e.TenantID, &e.ClientID, &e.StaffID, &e.TemplateID,
+			&e.ThreadID, &e.ReplyToID, &e.Direction, &e.ToEmail, &e.ToName,
+			&e.FromEmail, &e.Subject, &e.BodyHTML, &e.BodyText, &e.Type, &e.Status,
+			&e.ResendID, &e.IsRead, &e.AISummary, &e.Sentiment,
+			&e.SentAt, &e.OpenedAt, &e.BouncedAt, &e.BounceReason, &e.CreatedAt,
+			&e.ClientName, &e.StaffName,
+		)
+		if err != nil {
+			return err
+		}
+		emails = append(emails, e)
+		return nil
+	})
+
+	if err != nil {
+		log.Error().Err(err).Msg("Failed to list thread messages")
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to fetch messages"})
+		return
+	}
+
+	if emails == nil {
+		emails = []Email{}
+	}
+
+	c.JSON(http.StatusOK, gin.H{
+		"messages": emails,
+		"count":    len(emails),
+	})
+}

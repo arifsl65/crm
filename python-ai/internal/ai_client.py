@@ -701,6 +701,402 @@ Respond with JSON:
             logger.error("Email promise extraction failed", error=str(e))
             raise
 
+    async def draft_email(
+        self,
+        context: str,
+        original_email: Optional[Dict[str, str]] = None,
+        tone: str = "professional",
+        intent: str = "reply",
+        client_name: str = "",
+        staff_name: str = "",
+        additional_instructions: str = "",
+    ) -> Dict[str, Any]:
+        """
+        Generate an AI-drafted email reply or new email.
+
+        Args:
+            context: Context or instructions for the email.
+            original_email: Original email dict with subject, body, sender, recipient (for replies).
+            tone: Desired tone (professional, friendly, formal, casual).
+            intent: Email intent (reply, follow_up, request_documents, chase, thank_you, introduction).
+            client_name: Name of the client for personalization.
+            staff_name: Name of the staff member sending the email.
+            additional_instructions: Any additional instructions for the AI.
+
+        Returns:
+            Draft email with subject, body, and suggestions.
+        """
+        settings = get_settings()
+
+        system_prompt = f"""You are an expert email writer for an accounting firm.
+Generate a {tone} email based on the given context and instructions.
+
+Guidelines:
+- Be concise and clear
+- Maintain a {tone} tone throughout
+- Include appropriate greeting and closing
+- Reference specific details when available
+- For replies, address the original email's points
+- Avoid jargon unless appropriate for the recipient
+- Be helpful and action-oriented
+
+The email is being sent by: {staff_name or "the accounting team"}
+The recipient is: {client_name or "the client"}
+
+Respond with JSON:
+{{
+    "subject": "Email subject line (for new emails or if suggesting change)",
+    "body": "Full email body with greeting and signature placeholder",
+    "suggestions": ["suggestion 1 for improvement", "suggestion 2"],
+    "tone_achieved": "{tone}",
+    "word_count": 150,
+    "reading_time_seconds": 30,
+    "calls_to_action": ["action 1", "action 2"]
+}}"""
+
+        # Build the user prompt
+        user_prompt_parts = [f"Intent: {intent}"]
+
+        if original_email:
+            user_prompt_parts.append(f"\n--- Original Email ---")
+            user_prompt_parts.append(f"From: {original_email.get('sender', 'Unknown')}")
+            user_prompt_parts.append(f"Subject: {original_email.get('subject', 'No subject')}")
+            user_prompt_parts.append(f"Body:\n{original_email.get('body', '')[:4000]}")
+            user_prompt_parts.append(f"--- End Original Email ---\n")
+
+        user_prompt_parts.append(f"Context/Instructions: {context}")
+
+        if additional_instructions:
+            user_prompt_parts.append(f"Additional Instructions: {additional_instructions}")
+
+        user_prompt = "\n".join(user_prompt_parts)
+
+        try:
+            result_text = await self._call_with_fallback(
+                system_prompt=system_prompt,
+                user_prompt=user_prompt,
+                max_tokens=2048,
+                temperature=0.7,  # Slightly higher for more creative writing
+                json_response=True,
+            )
+            result = json.loads(result_text)
+
+            logger.info(
+                "Email draft generated",
+                intent=intent,
+                tone=tone,
+                word_count=result.get("word_count"),
+            )
+
+            return result
+
+        except json.JSONDecodeError as e:
+            logger.error("Failed to parse email draft response", error=str(e))
+            return {"error": "Failed to parse AI response", "body": ""}
+        except Exception as e:
+            logger.error("Email draft generation failed", error=str(e))
+            raise
+
+    async def match_email_to_client(
+        self,
+        sender_email: str,
+        sender_name: str,
+        email_domain: str,
+        email_content: str,
+        known_clients: List[Dict[str, Any]],
+    ) -> Dict[str, Any]:
+        """
+        Match an unknown email sender to an existing client.
+
+        Args:
+            sender_email: Email address of the sender.
+            sender_name: Display name of the sender.
+            email_domain: Domain of the sender's email.
+            email_content: Content of the email for context clues.
+            known_clients: List of known clients with name, email, company_name, contacts.
+
+        Returns:
+            Match results with confidence and reasoning.
+        """
+        settings = get_settings()
+
+        system_prompt = """You are an expert at matching email senders to client records for an accounting firm.
+Analyze the sender information and email content to identify which known client this email belongs to.
+
+Consider:
+- Email domain matching company domains
+- Name similarities (accounting for variations like Bob/Robert)
+- References to company names or account numbers in the email
+- Context clues about services or previous interactions
+- Multiple contacts per client (director, accountant, assistant)
+
+Respond with JSON:
+{
+    "matched": true/false,
+    "client_id": "uuid of matched client or null",
+    "client_name": "name of matched client or null",
+    "confidence": 0.95,
+    "match_reasons": [
+        "Email domain matches company domain",
+        "Sender name matches known contact"
+    ],
+    "is_new_contact": true/false,
+    "suggested_action": "link_to_client/create_new_contact/create_new_client/review_manually",
+    "alternate_matches": [
+        {
+            "client_id": "uuid",
+            "client_name": "name",
+            "confidence": 0.65,
+            "reason": "Partial name match"
+        }
+    ]
+}"""
+
+        # Build client list summary (limit to prevent token overflow)
+        clients_summary = []
+        for client in known_clients[:50]:  # Limit to 50 clients
+            clients_summary.append({
+                "id": client.get("id"),
+                "name": client.get("name"),
+                "company_name": client.get("company_name"),
+                "email": client.get("email"),
+                "domain": client.get("domain"),
+                "contacts": client.get("contacts", [])[:5],  # Limit contacts
+            })
+
+        user_prompt = f"""Match this email sender to a known client:
+
+Sender Email: {sender_email}
+Sender Name: {sender_name}
+Email Domain: {email_domain}
+
+Email Content Preview:
+{email_content[:2000]}
+
+Known Clients:
+{json.dumps(clients_summary, indent=2)}"""
+
+        try:
+            result_text = await self._call_with_fallback(
+                system_prompt=system_prompt,
+                user_prompt=user_prompt,
+                max_tokens=1024,
+                temperature=settings.groq_temperature,
+                json_response=True,
+            )
+            result = json.loads(result_text)
+
+            logger.info(
+                "Email sender match attempted",
+                matched=result.get("matched"),
+                confidence=result.get("confidence"),
+                sender_email=sender_email,
+            )
+
+            return result
+
+        except json.JSONDecodeError as e:
+            logger.error("Failed to parse client match response", error=str(e))
+            return {"error": "Failed to parse AI response", "matched": False}
+        except Exception as e:
+            logger.error("Client matching failed", error=str(e))
+            raise
+
+    async def summarize_email_thread(
+        self,
+        emails: List[Dict[str, str]],
+        focus: str = "general",
+    ) -> Dict[str, Any]:
+        """
+        Summarize an email conversation thread.
+
+        Args:
+            emails: List of emails in chronological order, each with subject, body, sender, date.
+            focus: What to focus on (general, action_items, decisions, timeline, documents).
+
+        Returns:
+            Thread summary with key points and action items.
+        """
+        settings = get_settings()
+
+        system_prompt = f"""You are an expert at summarizing email threads for an accounting firm.
+Create a comprehensive summary of the email conversation with focus on: {focus}
+
+Analyze:
+- Main topic and purpose of the conversation
+- Key decisions made
+- Outstanding action items and who owns them
+- Documents mentioned or promised
+- Timeline of events and deadlines
+- Current status and next steps
+
+Respond with JSON:
+{{
+    "thread_subject": "Main subject of the thread",
+    "summary": "2-3 paragraph summary of the entire conversation",
+    "participants": ["name1", "name2"],
+    "message_count": 5,
+    "date_range": {{"start": "2024-01-15", "end": "2024-01-20"}},
+    "key_points": ["point 1", "point 2", "point 3"],
+    "decisions_made": ["decision 1", "decision 2"],
+    "action_items": [
+        {{
+            "action": "Send bank statements",
+            "owner": "Client",
+            "due_date": "2024-01-25",
+            "status": "pending"
+        }}
+    ],
+    "documents_mentioned": ["Bank Statement Q4", "VAT Return"],
+    "unresolved_questions": ["question 1"],
+    "current_status": "awaiting_client_response/in_progress/resolved",
+    "recommended_next_step": "Follow up with client about bank statements"
+}}"""
+
+        # Build thread text
+        thread_text = []
+        for i, email in enumerate(emails[:20], 1):  # Limit to 20 emails
+            # Support alternate field names (from/sender, to/recipient, content/body)
+            sender = email.get('sender') or email.get('from') or email.get('from_email') or 'Unknown'
+            recipient = email.get('recipient') or email.get('to') or email.get('to_email') or 'Unknown'
+            body = email.get('body') or email.get('content') or email.get('body_text') or ''
+            subject = email.get('subject') or 'No subject'
+            date = email.get('date') or email.get('sent_at') or email.get('created_at') or 'Unknown'
+
+            thread_text.append(f"--- Email {i} ---")
+            thread_text.append(f"Date: {date}")
+            thread_text.append(f"From: {sender}")
+            thread_text.append(f"To: {recipient}")
+            thread_text.append(f"Subject: {subject}")
+            thread_text.append(f"Body:\n{body[:1500]}")
+            thread_text.append("")
+
+        user_prompt = f"Summarize this email thread:\n\n" + "\n".join(thread_text)
+
+        try:
+            result_text = await self._call_with_fallback(
+                system_prompt=system_prompt,
+                user_prompt=user_prompt[:12000],  # Limit total prompt size
+                max_tokens=2048,
+                temperature=settings.groq_temperature,
+                json_response=True,
+            )
+            result = json.loads(result_text)
+
+            logger.info(
+                "Email thread summarized",
+                message_count=len(emails),
+                action_items=len(result.get("action_items", [])),
+            )
+
+            return result
+
+        except json.JSONDecodeError as e:
+            logger.error("Failed to parse thread summary response", error=str(e))
+            return {"error": "Failed to parse AI response", "summary": ""}
+        except Exception as e:
+            logger.error("Thread summarization failed", error=str(e))
+            raise
+
+    async def find_alternate_email(
+        self,
+        bounced_email: str,
+        client_name: str,
+        company_name: str,
+        known_contacts: List[Dict[str, str]],
+        company_domain: str = "",
+    ) -> Dict[str, Any]:
+        """
+        Suggest alternate email addresses when an email bounces.
+
+        Args:
+            bounced_email: The email address that bounced.
+            client_name: Name of the client.
+            company_name: Name of the company.
+            known_contacts: List of known contacts with name and email.
+            company_domain: Known company email domain.
+
+        Returns:
+            Suggestions for alternate emails and actions.
+        """
+        settings = get_settings()
+
+        system_prompt = """You are an expert at finding alternate contact methods for an accounting firm.
+When an email bounces, suggest alternate contacts or actions to reach the client.
+
+Consider:
+- Other known contacts at the same company
+- Common email patterns (firstname.lastname@, f.lastname@, etc.)
+- Whether the person may have left the company
+- Alternative communication methods
+
+Respond with JSON:
+{
+    "suggested_contacts": [
+        {
+            "name": "Contact name",
+            "email": "email@example.com",
+            "role": "Director/Accountant/Assistant",
+            "confidence": 0.9,
+            "reason": "Known company contact"
+        }
+    ],
+    "email_pattern_suggestions": [
+        "john.smith@company.com",
+        "j.smith@company.com"
+    ],
+    "possible_reasons": ["Person may have left", "Email typo", "Domain changed"],
+    "recommended_actions": [
+        {
+            "action": "Try alternate contact",
+            "priority": "high",
+            "details": "Contact Jane Doe at jane@company.com"
+        },
+        {
+            "action": "Verify email address",
+            "priority": "medium",
+            "details": "Check original source for typos"
+        }
+    ],
+    "should_flag_for_review": true,
+    "urgency": "high/medium/low"
+}"""
+
+        user_prompt = f"""Find alternate contacts for this bounced email:
+
+Bounced Email: {bounced_email}
+Client Name: {client_name}
+Company Name: {company_name}
+Company Domain: {company_domain or "Unknown"}
+
+Known Contacts:
+{json.dumps(known_contacts, indent=2)}"""
+
+        try:
+            result_text = await self._call_with_fallback(
+                system_prompt=system_prompt,
+                user_prompt=user_prompt,
+                max_tokens=1024,
+                temperature=settings.groq_temperature,
+                json_response=True,
+            )
+            result = json.loads(result_text)
+
+            logger.info(
+                "Alternate email search completed",
+                bounced_email=bounced_email,
+                suggestions_count=len(result.get("suggested_contacts", [])),
+            )
+
+            return result
+
+        except json.JSONDecodeError as e:
+            logger.error("Failed to parse alternate email response", error=str(e))
+            return {"error": "Failed to parse AI response", "suggested_contacts": []}
+        except Exception as e:
+            logger.error("Alternate email search failed", error=str(e))
+            raise
+
     # =========================================================================
     # Risk Analysis AI Methods
     # =========================================================================
@@ -1331,6 +1727,677 @@ Document content:
             return {"error": "Failed to parse AI response", "suggested_name": ""}
         except Exception as e:
             logger.error("Document rename failed", error=str(e))
+            raise
+
+    # =========================================================================
+    # Template AI Methods
+    # =========================================================================
+
+    async def generate_email_template(
+        self,
+        purpose: str,
+        template_type: str = "general",
+        tone: str = "professional",
+        include_placeholders: bool = True,
+        example_context: str = "",
+    ) -> Dict[str, Any]:
+        """
+        Generate an email template using AI.
+
+        Args:
+            purpose: Purpose/description of the template.
+            template_type: Type (document_request, chase, welcome, reminder, etc.).
+            tone: Desired tone (professional, friendly, formal, casual).
+            include_placeholders: Whether to include merge placeholders.
+            example_context: Optional example context for better template.
+
+        Returns:
+            Generated template with subject, body, and placeholders.
+        """
+        settings = get_settings()
+
+        system_prompt = f"""You are an expert email template writer for an accounting firm.
+Generate a reusable email template based on the requirements.
+
+Template Requirements:
+- Purpose: {purpose}
+- Type: {template_type}
+- Tone: {tone}
+- Include placeholders: {include_placeholders}
+
+Available Placeholders (use double curly braces):
+- {{{{client_name}}}} - Client's name
+- {{{{company_name}}}} - Company name
+- {{{{deadline}}}} - Relevant deadline
+- {{{{document_type}}}} - Type of document
+- {{{{staff_name}}}} - Staff member's name
+- {{{{firm_name}}}} - Accounting firm name
+- {{{{period}}}} - Relevant period (Q1, 2024, etc.)
+- {{{{amount}}}} - Monetary amount
+- {{{{service_name}}}} - Name of service
+- {{{{portal_link}}}} - Client portal link
+
+Respond with JSON:
+{{
+    "name": "Template name (e.g., 'Document Request - VAT')",
+    "description": "Brief description of when to use this template",
+    "subject": "Email subject line with placeholders",
+    "body": "Full email body with greeting, content, and signature placeholder",
+    "placeholders_used": ["client_name", "deadline", "document_type"],
+    "suggested_attachments": ["document_checklist.pdf"],
+    "category": "document_request/chase/welcome/reminder/completion/other",
+    "tone_achieved": "{tone}",
+    "estimated_read_time_seconds": 30
+}}"""
+
+        user_prompt = f"Generate an email template for: {purpose}"
+        if example_context:
+            user_prompt += f"\n\nExample context for reference:\n{example_context}"
+
+        try:
+            result_text = await self._call_with_fallback(
+                system_prompt=system_prompt,
+                user_prompt=user_prompt,
+                max_tokens=2048,
+                temperature=0.7,
+                json_response=True,
+            )
+            result = json.loads(result_text)
+
+            logger.info(
+                "Email template generated",
+                template_type=template_type,
+                placeholders=len(result.get("placeholders_used", [])),
+            )
+
+            return result
+
+        except json.JSONDecodeError as e:
+            logger.error("Failed to parse template response", error=str(e))
+            return {"error": "Failed to parse AI response", "body": ""}
+        except Exception as e:
+            logger.error("Template generation failed", error=str(e))
+            raise
+
+    # =========================================================================
+    # Client AI Methods
+    # =========================================================================
+
+    async def check_duplicate_clients(
+        self,
+        new_client: Dict[str, Any],
+        existing_clients: List[Dict[str, Any]],
+    ) -> Dict[str, Any]:
+        """
+        Check if a new client is a duplicate of existing clients.
+
+        Args:
+            new_client: New client data (name, email, company_number, address, etc.).
+            existing_clients: List of existing clients to check against.
+
+        Returns:
+            Duplicate analysis with potential matches.
+        """
+        settings = get_settings()
+
+        system_prompt = """You are an expert at identifying duplicate client records for an accounting firm.
+Analyze the new client against existing clients to identify potential duplicates.
+
+Consider these matching factors (in order of importance):
+1. Company Number (exact match = definite duplicate)
+2. Email domain + company name similarity
+3. Registered address match
+4. Trading name variations (Ltd/Limited, & vs and, abbreviations)
+5. Contact person names appearing in multiple records
+
+Respond with JSON:
+{
+    "is_duplicate": true/false,
+    "confidence": 0.95,
+    "potential_matches": [
+        {
+            "client_id": "uuid",
+            "client_name": "name",
+            "match_score": 0.92,
+            "match_reasons": ["Company number matches", "Same address"],
+            "differences": ["Different contact email"],
+            "recommendation": "merge/review/likely_different"
+        }
+    ],
+    "duplicate_type": "exact/likely/possible/none",
+    "recommended_action": "block_creation/warn_user/allow_creation/merge_with_existing",
+    "fields_to_review": ["company_number", "address"],
+    "merge_suggestions": {
+        "preferred_record_id": "uuid of record to keep",
+        "fields_to_update": {"email": "newer@company.com"}
+    }
+}"""
+
+        # Limit existing clients to prevent token overflow
+        limited_clients = []
+        for client in existing_clients[:100]:
+            limited_clients.append({
+                "id": client.get("id"),
+                "name": client.get("name"),
+                "company_name": client.get("company_name"),
+                "company_number": client.get("company_number"),
+                "email": client.get("email"),
+                "address": client.get("address"),
+                "trading_name": client.get("trading_name"),
+            })
+
+        user_prompt = f"""Check if this new client is a duplicate:
+
+New Client:
+{json.dumps(new_client, indent=2)}
+
+Existing Clients:
+{json.dumps(limited_clients, indent=2)}"""
+
+        try:
+            result_text = await self._call_with_fallback(
+                system_prompt=system_prompt,
+                user_prompt=user_prompt[:12000],
+                max_tokens=1024,
+                temperature=settings.groq_temperature,
+                json_response=True,
+            )
+            result = json.loads(result_text)
+
+            logger.info(
+                "Duplicate check completed",
+                is_duplicate=result.get("is_duplicate"),
+                confidence=result.get("confidence"),
+                matches=len(result.get("potential_matches", [])),
+            )
+
+            return result
+
+        except json.JSONDecodeError as e:
+            logger.error("Failed to parse duplicate check response", error=str(e))
+            return {"error": "Failed to parse AI response", "is_duplicate": False}
+        except Exception as e:
+            logger.error("Duplicate check failed", error=str(e))
+            raise
+
+    # =========================================================================
+    # Service AI Methods
+    # =========================================================================
+
+    async def auto_name_service(
+        self,
+        service_type: str,
+        client_name: str,
+        period: str = "",
+        year: str = "",
+        additional_context: str = "",
+    ) -> Dict[str, Any]:
+        """
+        Auto-generate a service name based on type and client.
+
+        Args:
+            service_type: Type of service (VAT Return, Annual Accounts, etc.).
+            client_name: Name of the client.
+            period: Relevant period (Q1, Q2, etc.).
+            year: Tax/financial year.
+            additional_context: Any additional context.
+
+        Returns:
+            Suggested service name and variations.
+        """
+        settings = get_settings()
+
+        system_prompt = """You are an expert at naming accounting services for clear identification.
+Generate a clear, consistent service name following accounting firm conventions.
+
+Naming Conventions:
+- Include service type first
+- Add period/year qualifier
+- Client name is handled separately (not in service name)
+- Be concise but clear
+- Use standard abbreviations (Q1, FY, YE)
+
+Examples:
+- "VAT Return Q2 2024"
+- "Annual Accounts YE Dec 2024"
+- "Corporation Tax CT600 FY 2024"
+- "Self Assessment 2024-25"
+- "Payroll Monthly - January 2024"
+- "Management Accounts Q3 2024"
+
+Respond with JSON:
+{
+    "suggested_name": "Primary suggested name",
+    "display_name": "Shorter display version",
+    "alternatives": ["Alternative 1", "Alternative 2"],
+    "period_formatted": "Q2 2024",
+    "year_formatted": "2024",
+    "deadline_hint": "One month after quarter end",
+    "category": "tax/accounts/payroll/advisory/other"
+}"""
+
+        user_prompt = f"""Generate a service name:
+Service Type: {service_type}
+Client: {client_name}
+Period: {period or 'Not specified'}
+Year: {year or 'Current'}
+Context: {additional_context or 'None'}"""
+
+        try:
+            result_text = await self._call_with_fallback(
+                system_prompt=system_prompt,
+                user_prompt=user_prompt,
+                max_tokens=512,
+                temperature=settings.groq_temperature,
+                json_response=True,
+            )
+            result = json.loads(result_text)
+
+            logger.info(
+                "Service name generated",
+                service_type=service_type,
+                suggested_name=result.get("suggested_name"),
+            )
+
+            return result
+
+        except json.JSONDecodeError as e:
+            logger.error("Failed to parse service name response", error=str(e))
+            return {"error": "Failed to parse AI response", "suggested_name": service_type}
+        except Exception as e:
+            logger.error("Service naming failed", error=str(e))
+            raise
+
+    async def generate_completion_summary(
+        self,
+        service_type: str,
+        client_name: str,
+        completion_data: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        """
+        Generate a completion summary for a finished service.
+
+        Args:
+            service_type: Type of service completed.
+            client_name: Name of the client.
+            completion_data: Data about the completed service:
+                - documents_used: List of documents used
+                - key_figures: Important figures from the service
+                - filing_reference: Reference number if filed
+                - completed_by: Staff member who completed it
+                - completion_date: When completed
+
+        Returns:
+            Summary suitable for client communication and internal records.
+        """
+        settings = get_settings()
+
+        system_prompt = """You are an expert at creating service completion summaries for an accounting firm.
+Generate a professional summary suitable for both internal records and client communication.
+
+Include:
+- Brief overview of what was completed
+- Key figures/outcomes (tax due, refund expected, etc.)
+- Any important notes or follow-up items
+- Professional closing suitable for client email
+
+Respond with JSON:
+{
+    "internal_summary": "Detailed summary for internal records",
+    "client_summary": "Professional summary suitable for sending to client",
+    "subject_line": "Email subject for completion notification",
+    "key_outcomes": [
+        {
+            "label": "Tax Due",
+            "value": "£2,500",
+            "note": "Payment due by 31 January"
+        }
+    ],
+    "follow_up_items": ["File payment by deadline", "Keep records for 6 years"],
+    "documents_to_send": ["VAT Return copy", "Submission confirmation"],
+    "next_service_reminder": "Q3 VAT Return due in 3 months",
+    "professional_notes": "Any professional observations",
+    "tone": "congratulatory/informative/neutral"
+}"""
+
+        user_prompt = f"""Generate completion summary:
+Service Type: {service_type}
+Client: {client_name}
+
+Completion Data:
+{json.dumps(completion_data, indent=2, default=str)}"""
+
+        try:
+            result_text = await self._call_with_fallback(
+                system_prompt=system_prompt,
+                user_prompt=user_prompt,
+                max_tokens=2048,
+                temperature=0.5,
+                json_response=True,
+            )
+            result = json.loads(result_text)
+
+            logger.info(
+                "Completion summary generated",
+                service_type=service_type,
+                client=client_name,
+            )
+
+            return result
+
+        except json.JSONDecodeError as e:
+            logger.error("Failed to parse completion summary response", error=str(e))
+            return {"error": "Failed to parse AI response", "internal_summary": ""}
+        except Exception as e:
+            logger.error("Completion summary generation failed", error=str(e))
+            raise
+
+    # =========================================================================
+    # Dashboard AI Methods
+    # =========================================================================
+
+    async def find_troublemakers(
+        self,
+        clients: List[Dict[str, Any]],
+        threshold_days_overdue: int = 7,
+    ) -> Dict[str, Any]:
+        """
+        Identify problematic clients who need attention.
+
+        Args:
+            clients: List of clients with their metrics:
+                - id, name, company_name
+                - missing_documents: count
+                - days_overdue: max days any doc is overdue
+                - missed_deadlines: count
+                - last_chase_date: when last chased
+                - email_unsubscribed: bool
+                - payment_status: outstanding/current
+            threshold_days_overdue: Days before considered overdue.
+
+        Returns:
+            Ranked list of troublemakers with recommended actions.
+        """
+        settings = get_settings()
+
+        system_prompt = f"""You are a client management analyst for an accounting firm.
+Identify "troublemaker" clients who need immediate attention.
+
+Criteria for troublemakers (in priority order):
+1. Missing documents that are blocking service completion
+2. Days overdue > {threshold_days_overdue}
+3. Multiple missed deadlines
+4. Haven't responded to chases
+5. Payment issues
+
+Respond with JSON:
+{{
+    "troublemakers": [
+        {{
+            "client_id": "uuid",
+            "client_name": "name",
+            "company_name": "company",
+            "severity": "critical/high/medium",
+            "score": 95,
+            "issues": [
+                {{
+                    "type": "missing_documents",
+                    "description": "3 documents overdue by 15 days",
+                    "urgency": "critical"
+                }}
+            ],
+            "recommended_action": "Call client directly - emails not working",
+            "chase_method": "phone/email/both",
+            "contact_preference": "Director prefers calls",
+            "last_chase": "3 days ago",
+            "escalation_needed": true
+        }}
+    ],
+    "summary": {{
+        "total_troublemakers": 5,
+        "critical": 2,
+        "high": 2,
+        "medium": 1,
+        "blocked_services": 7,
+        "total_overdue_documents": 12
+    }},
+    "recommended_batch_actions": [
+        {{
+            "action": "Send batch chase email",
+            "target_clients": 3,
+            "template": "urgent_document_request"
+        }}
+    ]
+}}"""
+
+        # Limit clients for token safety
+        limited_clients = clients[:50]
+
+        user_prompt = f"""Identify troublemaker clients from this list:
+
+Clients:
+{json.dumps(limited_clients, indent=2, default=str)}"""
+
+        try:
+            result_text = await self._call_with_fallback(
+                system_prompt=system_prompt,
+                user_prompt=user_prompt[:12000],
+                max_tokens=2048,
+                temperature=settings.groq_temperature,
+                json_response=True,
+            )
+            result = json.loads(result_text)
+
+            logger.info(
+                "Troublemakers identified",
+                total=result.get("summary", {}).get("total_troublemakers", 0),
+                critical=result.get("summary", {}).get("critical", 0),
+            )
+
+            return result
+
+        except json.JSONDecodeError as e:
+            logger.error("Failed to parse troublemakers response", error=str(e))
+            return {"error": "Failed to parse AI response", "troublemakers": []}
+        except Exception as e:
+            logger.error("Troublemaker analysis failed", error=str(e))
+            raise
+
+    async def detect_anomalies(
+        self,
+        data_type: str,
+        data: List[Dict[str, Any]],
+        context: str = "",
+    ) -> Dict[str, Any]:
+        """
+        Detect anomalies in various types of data.
+
+        Args:
+            data_type: Type of data (client_financials, service_metrics, staff_activity, etc.).
+            data: List of data records to analyze.
+            context: Additional context about what to look for.
+
+        Returns:
+            Detected anomalies with explanations.
+        """
+        settings = get_settings()
+
+        system_prompt = f"""You are a data anomaly detection expert for an accounting firm.
+Analyze the {data_type} data for anomalies, outliers, and unusual patterns.
+
+Look for:
+- Statistical outliers (values far from the mean)
+- Unusual patterns or trends
+- Data inconsistencies
+- Potential errors or fraud indicators
+- Missing expected data points
+
+Respond with JSON:
+{{
+    "anomalies_found": true/false,
+    "anomaly_count": 5,
+    "anomalies": [
+        {{
+            "id": "record_id",
+            "field": "field_name",
+            "value": "actual_value",
+            "expected_range": "expected_range",
+            "severity": "critical/high/medium/low",
+            "type": "outlier/inconsistency/pattern/missing",
+            "description": "Explanation of the anomaly",
+            "recommended_action": "What to do about it",
+            "false_positive_likelihood": 0.2
+        }}
+    ],
+    "patterns_detected": [
+        {{
+            "pattern": "Increasing trend in late payments",
+            "affected_records": 10,
+            "significance": "high"
+        }}
+    ],
+    "data_quality_score": 0.85,
+    "summary": "Overall summary of data quality and anomalies"
+}}"""
+
+        user_prompt = f"""Analyze this {data_type} data for anomalies:
+
+Context: {context or 'General anomaly detection'}
+
+Data:
+{json.dumps(data[:100], indent=2, default=str)}"""
+
+        try:
+            result_text = await self._call_with_fallback(
+                system_prompt=system_prompt,
+                user_prompt=user_prompt[:12000],
+                max_tokens=2048,
+                temperature=settings.groq_temperature,
+                json_response=True,
+            )
+            result = json.loads(result_text)
+
+            logger.info(
+                "Anomaly detection completed",
+                data_type=data_type,
+                anomalies_found=result.get("anomaly_count", 0),
+            )
+
+            return result
+
+        except json.JSONDecodeError as e:
+            logger.error("Failed to parse anomaly detection response", error=str(e))
+            return {"error": "Failed to parse AI response", "anomalies_found": False}
+        except Exception as e:
+            logger.error("Anomaly detection failed", error=str(e))
+            raise
+
+    async def analyze_staff_activity(
+        self,
+        staff_id: str,
+        staff_name: str,
+        activity_data: Dict[str, Any],
+        period: str = "last_week",
+    ) -> Dict[str, Any]:
+        """
+        Generate a staff activity report.
+
+        Args:
+            staff_id: UUID of the staff member.
+            staff_name: Name of the staff member.
+            activity_data: Activity metrics:
+                - services_completed: List of completed services
+                - emails_sent: Number of emails sent
+                - documents_processed: Number processed
+                - client_interactions: List of interactions
+                - time_logged: Hours logged by activity
+            period: Time period (last_week, last_month, custom).
+
+        Returns:
+            Comprehensive activity report with insights.
+        """
+        settings = get_settings()
+
+        system_prompt = f"""You are a staff performance analyst for an accounting firm.
+Generate a comprehensive activity report for the {period} period.
+
+Analyze:
+- Productivity metrics
+- Client interaction quality
+- Service completion rate
+- Time allocation
+- Areas of strength
+- Areas for improvement
+- Comparison to typical patterns
+
+Respond with JSON:
+{{
+    "staff_id": "{staff_id}",
+    "staff_name": "{staff_name}",
+    "period": "{period}",
+    "summary": "Brief executive summary of performance",
+    "productivity": {{
+        "services_completed": 12,
+        "documents_processed": 45,
+        "emails_handled": 78,
+        "average_completion_time": "2.5 hours",
+        "efficiency_score": 0.85
+    }},
+    "client_interactions": {{
+        "total_interactions": 25,
+        "clients_served": 15,
+        "average_response_time": "2 hours",
+        "satisfaction_indicators": "positive"
+    }},
+    "time_allocation": {{
+        "service_work": "60%",
+        "client_communication": "25%",
+        "admin": "15%"
+    }},
+    "highlights": [
+        "Completed 3 complex tax returns ahead of schedule",
+        "High client satisfaction feedback"
+    ],
+    "areas_for_improvement": [
+        "Response time to emails could be faster"
+    ],
+    "recommendations": [
+        "Consider delegating routine tasks to focus on complex work"
+    ],
+    "workload_assessment": "optimal/overloaded/underutilized",
+    "trend": "improving/stable/declining"
+}}"""
+
+        user_prompt = f"""Generate activity report for {staff_name}:
+
+Period: {period}
+
+Activity Data:
+{json.dumps(activity_data, indent=2, default=str)}"""
+
+        try:
+            result_text = await self._call_with_fallback(
+                system_prompt=system_prompt,
+                user_prompt=user_prompt,
+                max_tokens=2048,
+                temperature=0.5,
+                json_response=True,
+            )
+            result = json.loads(result_text)
+
+            logger.info(
+                "Staff activity report generated",
+                staff_id=staff_id,
+                period=period,
+            )
+
+            return result
+
+        except json.JSONDecodeError as e:
+            logger.error("Failed to parse staff activity response", error=str(e))
+            return {"error": "Failed to parse AI response", "summary": ""}
+        except Exception as e:
+            logger.error("Staff activity analysis failed", error=str(e))
             raise
 
 

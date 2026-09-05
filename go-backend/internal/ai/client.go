@@ -612,6 +612,245 @@ func (c *Client) ExtractEmailPromises(ctx context.Context, req EmailPromisesRequ
 }
 
 // =============================================================================
+// Email Draft AI Methods
+// =============================================================================
+
+// EmailDraftRequest is the request body for AI email drafting.
+type EmailDraftRequest struct {
+	Context                string `json:"context"`
+	Tone                   string `json:"tone,omitempty"`
+	Intent                 string `json:"intent,omitempty"`
+	ClientName             string `json:"client_name,omitempty"`
+	StaffName              string `json:"staff_name,omitempty"`
+	OriginalSubject        string `json:"original_subject,omitempty"`
+	OriginalBody           string `json:"original_body,omitempty"`
+	OriginalSender         string `json:"original_sender,omitempty"`
+	AdditionalInstructions string `json:"additional_instructions,omitempty"`
+	EmailID                string `json:"email_id,omitempty"`
+}
+
+// EmailDraftResponse is the response from AI email drafting.
+type EmailDraftResponse struct {
+	Subject            string   `json:"subject"`
+	Body               string   `json:"body"`
+	Suggestions        []string `json:"suggestions"`
+	ToneAchieved       string   `json:"tone_achieved"`
+	WordCount          int      `json:"word_count"`
+	ReadingTimeSeconds int      `json:"reading_time_seconds"`
+	CallsToAction      []string `json:"calls_to_action"`
+	EmailID            string   `json:"email_id,omitempty"`
+	Error              string   `json:"error,omitempty"`
+}
+
+// DraftEmail calls the Python AI service to generate an email draft.
+func (c *Client) DraftEmail(ctx context.Context, req EmailDraftRequest) (*EmailDraftResponse, error) {
+	path := fmt.Sprintf("/api/v1/ai/emails/draft?context=%s&tone=%s&intent=%s&client_name=%s&staff_name=%s&original_subject=%s&original_body=%s&original_sender=%s&additional_instructions=%s&email_id=%s",
+		url.QueryEscape(req.Context),
+		url.QueryEscape(req.Tone),
+		url.QueryEscape(req.Intent),
+		url.QueryEscape(req.ClientName),
+		url.QueryEscape(req.StaffName),
+		url.QueryEscape(req.OriginalSubject),
+		url.QueryEscape(req.OriginalBody),
+		url.QueryEscape(req.OriginalSender),
+		url.QueryEscape(req.AdditionalInstructions),
+		url.QueryEscape(req.EmailID),
+	)
+
+	resp, err := c.post(ctx, path, nil)
+	if err != nil {
+		return nil, err
+	}
+	defer drainAndClose(resp.Body)
+
+	var result EmailDraftResponse
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		return nil, fmt.Errorf("failed to decode response: %w", err)
+	}
+
+	return &result, nil
+}
+
+// EmailMatchClientRequest is the request body for matching email to client.
+type EmailMatchClientRequest struct {
+	SenderEmail  string `json:"sender_email"`
+	SenderName   string `json:"sender_name,omitempty"`
+	EmailContent string `json:"email_content,omitempty"`
+	KnownClients string `json:"known_clients,omitempty"` // JSON string of clients
+	EmailID      string `json:"email_id,omitempty"`
+}
+
+// AlternateMatch represents an alternative client match.
+type AlternateMatch struct {
+	ClientID   string  `json:"client_id"`
+	ClientName string  `json:"client_name"`
+	Confidence float64 `json:"confidence"`
+	Reason     string  `json:"reason"`
+}
+
+// EmailMatchClientResponse is the response from email-to-client matching.
+type EmailMatchClientResponse struct {
+	Matched          bool             `json:"matched"`
+	ClientID         *string          `json:"client_id"`
+	ClientName       *string          `json:"client_name"`
+	Confidence       float64          `json:"confidence"`
+	MatchReasons     []string         `json:"match_reasons"`
+	IsNewContact     bool             `json:"is_new_contact"`
+	SuggestedAction  string           `json:"suggested_action"`
+	AlternateMatches []AlternateMatch `json:"alternate_matches"`
+	EmailID          string           `json:"email_id,omitempty"`
+	Error            string           `json:"error,omitempty"`
+}
+
+// MatchEmailToClient calls the Python AI service to match an email sender to a client.
+func (c *Client) MatchEmailToClient(ctx context.Context, req EmailMatchClientRequest) (*EmailMatchClientResponse, error) {
+	path := fmt.Sprintf("/api/v1/ai/emails/match-client?sender_email=%s&sender_name=%s&email_content=%s&known_clients=%s&email_id=%s",
+		url.QueryEscape(req.SenderEmail),
+		url.QueryEscape(req.SenderName),
+		url.QueryEscape(req.EmailContent),
+		url.QueryEscape(req.KnownClients),
+		url.QueryEscape(req.EmailID),
+	)
+
+	resp, err := c.post(ctx, path, nil)
+	if err != nil {
+		return nil, err
+	}
+	defer drainAndClose(resp.Body)
+
+	var result EmailMatchClientResponse
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		return nil, fmt.Errorf("failed to decode response: %w", err)
+	}
+
+	return &result, nil
+}
+
+// EmailThreadSummaryRequest is the request body for email thread summarization.
+type EmailThreadSummaryRequest struct {
+	Emails   string `json:"emails"` // JSON string of emails
+	Focus    string `json:"focus,omitempty"`
+	ThreadID string `json:"thread_id,omitempty"`
+}
+
+// ThreadActionItem represents an action item from a thread.
+type ThreadActionItem struct {
+	Action  string `json:"action"`
+	Owner   string `json:"owner"`
+	DueDate string `json:"due_date,omitempty"`
+	Status  string `json:"status"`
+}
+
+// ThreadDateRange represents the date range of a thread.
+type ThreadDateRange struct {
+	Start string `json:"start"`
+	End   string `json:"end"`
+}
+
+// EmailThreadSummaryResponse is the response from email thread summarization.
+type EmailThreadSummaryResponse struct {
+	ThreadSubject       string             `json:"thread_subject"`
+	Summary             string             `json:"summary"`
+	Participants        []string           `json:"participants"`
+	MessageCount        int                `json:"message_count"`
+	DateRange           ThreadDateRange    `json:"date_range"`
+	KeyPoints           []string           `json:"key_points"`
+	DecisionsMade       []string           `json:"decisions_made"`
+	ActionItems         []ThreadActionItem `json:"action_items"`
+	DocumentsMentioned  []string           `json:"documents_mentioned"`
+	UnresolvedQuestions []string           `json:"unresolved_questions"`
+	CurrentStatus       string             `json:"current_status"`
+	RecommendedNextStep string             `json:"recommended_next_step"`
+	ThreadID            string             `json:"thread_id,omitempty"`
+	Error               string             `json:"error,omitempty"`
+}
+
+// SummarizeEmailThread calls the Python AI service to summarize an email thread.
+func (c *Client) SummarizeEmailThread(ctx context.Context, req EmailThreadSummaryRequest) (*EmailThreadSummaryResponse, error) {
+	path := fmt.Sprintf("/api/v1/ai/emails/thread-summary?emails=%s&focus=%s&thread_id=%s",
+		url.QueryEscape(req.Emails),
+		url.QueryEscape(req.Focus),
+		url.QueryEscape(req.ThreadID),
+	)
+
+	resp, err := c.post(ctx, path, nil)
+	if err != nil {
+		return nil, err
+	}
+	defer drainAndClose(resp.Body)
+
+	var result EmailThreadSummaryResponse
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		return nil, fmt.Errorf("failed to decode response: %w", err)
+	}
+
+	return &result, nil
+}
+
+// FindAlternateEmailRequest is the request body for finding alternate emails.
+type FindAlternateEmailRequest struct {
+	BouncedEmail  string `json:"bounced_email"`
+	ClientName    string `json:"client_name,omitempty"`
+	CompanyName   string `json:"company_name,omitempty"`
+	KnownContacts string `json:"known_contacts,omitempty"` // JSON string
+	CompanyDomain string `json:"company_domain,omitempty"`
+	EmailID       string `json:"email_id,omitempty"`
+}
+
+// SuggestedContact represents an alternate contact suggestion.
+type SuggestedContact struct {
+	Name       string  `json:"name"`
+	Email      string  `json:"email"`
+	Role       string  `json:"role"`
+	Confidence float64 `json:"confidence"`
+	Reason     string  `json:"reason"`
+}
+
+// AlternateAction represents a recommended action for bounced emails.
+type AlternateAction struct {
+	Action   string `json:"action"`
+	Priority string `json:"priority"`
+	Details  string `json:"details"`
+}
+
+// FindAlternateEmailResponse is the response from finding alternate emails.
+type FindAlternateEmailResponse struct {
+	SuggestedContacts       []SuggestedContact `json:"suggested_contacts"`
+	EmailPatternSuggestions []string           `json:"email_pattern_suggestions"`
+	PossibleReasons         []string           `json:"possible_reasons"`
+	RecommendedActions      []AlternateAction  `json:"recommended_actions"`
+	ShouldFlagForReview     bool               `json:"should_flag_for_review"`
+	Urgency                 string             `json:"urgency"`
+	EmailID                 string             `json:"email_id,omitempty"`
+	Error                   string             `json:"error,omitempty"`
+}
+
+// FindAlternateEmail calls the Python AI service to find alternate emails.
+func (c *Client) FindAlternateEmail(ctx context.Context, req FindAlternateEmailRequest) (*FindAlternateEmailResponse, error) {
+	path := fmt.Sprintf("/api/v1/ai/emails/find-alternate?bounced_email=%s&client_name=%s&company_name=%s&known_contacts=%s&company_domain=%s&email_id=%s",
+		url.QueryEscape(req.BouncedEmail),
+		url.QueryEscape(req.ClientName),
+		url.QueryEscape(req.CompanyName),
+		url.QueryEscape(req.KnownContacts),
+		url.QueryEscape(req.CompanyDomain),
+		url.QueryEscape(req.EmailID),
+	)
+
+	resp, err := c.post(ctx, path, nil)
+	if err != nil {
+		return nil, err
+	}
+	defer drainAndClose(resp.Body)
+
+	var result FindAlternateEmailResponse
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		return nil, fmt.Errorf("failed to decode response: %w", err)
+	}
+
+	return &result, nil
+}
+
+// =============================================================================
 // Risk Analysis AI Methods
 // =============================================================================
 
@@ -1301,6 +1540,440 @@ func (c *Client) delete(ctx context.Context, path string) (*http.Response, error
 	}
 
 	return nil, fmt.Errorf("request failed after %d retries: %w", c.retryConfig.MaxRetries, lastErr)
+}
+
+// =============================================================================
+// Template AI Methods
+// =============================================================================
+
+// GenerateTemplateRequest is the request body for template generation.
+type GenerateTemplateRequest struct {
+	Purpose             string `json:"purpose"`
+	TemplateType        string `json:"template_type,omitempty"`
+	Tone                string `json:"tone,omitempty"`
+	IncludePlaceholders bool   `json:"include_placeholders,omitempty"`
+	ExampleContext      string `json:"example_context,omitempty"`
+}
+
+// GenerateTemplateResponse is the response from template generation.
+type GenerateTemplateResponse struct {
+	Name                    string   `json:"name"`
+	Description             string   `json:"description"`
+	Subject                 string   `json:"subject"`
+	Body                    string   `json:"body"`
+	PlaceholdersUsed        []string `json:"placeholders_used"`
+	SuggestedAttachments    []string `json:"suggested_attachments"`
+	Category                string   `json:"category"`
+	ToneAchieved            string   `json:"tone_achieved"`
+	EstimatedReadTimeSeconds int      `json:"estimated_read_time_seconds"`
+	Error                   string   `json:"error,omitempty"`
+}
+
+// GenerateTemplate calls the Python AI service to generate an email template.
+func (c *Client) GenerateTemplate(ctx context.Context, req GenerateTemplateRequest) (*GenerateTemplateResponse, error) {
+	includePlaceholders := "true"
+	if !req.IncludePlaceholders {
+		includePlaceholders = "false"
+	}
+	path := fmt.Sprintf("/api/v1/ai/templates/generate?purpose=%s&template_type=%s&tone=%s&include_placeholders=%s&example_context=%s",
+		url.QueryEscape(req.Purpose),
+		url.QueryEscape(req.TemplateType),
+		url.QueryEscape(req.Tone),
+		includePlaceholders,
+		url.QueryEscape(req.ExampleContext),
+	)
+
+	resp, err := c.post(ctx, path, nil)
+	if err != nil {
+		return nil, err
+	}
+	defer drainAndClose(resp.Body)
+
+	var result GenerateTemplateResponse
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		return nil, fmt.Errorf("failed to decode response: %w", err)
+	}
+
+	return &result, nil
+}
+
+// =============================================================================
+// Client AI Methods
+// =============================================================================
+
+// CheckDuplicateClientsRequest is the request body for duplicate checking.
+type CheckDuplicateClientsRequest struct {
+	NewClient       string `json:"new_client"`       // JSON string
+	ExistingClients string `json:"existing_clients"` // JSON string
+}
+
+// PotentialMatch represents a potential duplicate match.
+type PotentialMatch struct {
+	ClientID       string   `json:"client_id"`
+	ClientName     string   `json:"client_name"`
+	MatchScore     float64  `json:"match_score"`
+	MatchReasons   []string `json:"match_reasons"`
+	Differences    []string `json:"differences"`
+	Recommendation string   `json:"recommendation"`
+}
+
+// MergeSuggestion represents merge suggestions for duplicates.
+type MergeSuggestion struct {
+	PreferredRecordID string            `json:"preferred_record_id"`
+	FieldsToUpdate    map[string]string `json:"fields_to_update"`
+}
+
+// CheckDuplicateClientsResponse is the response from duplicate checking.
+type CheckDuplicateClientsResponse struct {
+	IsDuplicate       bool             `json:"is_duplicate"`
+	Confidence        float64          `json:"confidence"`
+	PotentialMatches  []PotentialMatch `json:"potential_matches"`
+	DuplicateType     string           `json:"duplicate_type"`
+	RecommendedAction string           `json:"recommended_action"`
+	FieldsToReview    []string         `json:"fields_to_review"`
+	MergeSuggestions  *MergeSuggestion `json:"merge_suggestions,omitempty"`
+	Error             string           `json:"error,omitempty"`
+}
+
+// CheckDuplicateClients calls the Python AI service to check for duplicate clients.
+func (c *Client) CheckDuplicateClients(ctx context.Context, req CheckDuplicateClientsRequest) (*CheckDuplicateClientsResponse, error) {
+	path := fmt.Sprintf("/api/v1/ai/clients/duplicate-check?new_client=%s&existing_clients=%s",
+		url.QueryEscape(req.NewClient),
+		url.QueryEscape(req.ExistingClients),
+	)
+
+	resp, err := c.post(ctx, path, nil)
+	if err != nil {
+		return nil, err
+	}
+	defer drainAndClose(resp.Body)
+
+	var result CheckDuplicateClientsResponse
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		return nil, fmt.Errorf("failed to decode response: %w", err)
+	}
+
+	return &result, nil
+}
+
+// =============================================================================
+// Service AI Methods
+// =============================================================================
+
+// AutoNameServiceRequest is the request body for service auto-naming.
+type AutoNameServiceRequest struct {
+	ServiceType       string `json:"service_type"`
+	ClientName        string `json:"client_name"`
+	Period            string `json:"period,omitempty"`
+	Year              string `json:"year,omitempty"`
+	AdditionalContext string `json:"additional_context,omitempty"`
+}
+
+// AutoNameServiceResponse is the response from service auto-naming.
+type AutoNameServiceResponse struct {
+	SuggestedName   string   `json:"suggested_name"`
+	DisplayName     string   `json:"display_name"`
+	Alternatives    []string `json:"alternatives"`
+	PeriodFormatted string   `json:"period_formatted"`
+	YearFormatted   string   `json:"year_formatted"`
+	DeadlineHint    string   `json:"deadline_hint"`
+	Category        string   `json:"category"`
+	Error           string   `json:"error,omitempty"`
+}
+
+// AutoNameService calls the Python AI service to auto-generate a service name.
+func (c *Client) AutoNameService(ctx context.Context, req AutoNameServiceRequest) (*AutoNameServiceResponse, error) {
+	path := fmt.Sprintf("/api/v1/ai/services/auto-name?service_type=%s&client_name=%s&period=%s&year=%s&additional_context=%s",
+		url.QueryEscape(req.ServiceType),
+		url.QueryEscape(req.ClientName),
+		url.QueryEscape(req.Period),
+		url.QueryEscape(req.Year),
+		url.QueryEscape(req.AdditionalContext),
+	)
+
+	resp, err := c.post(ctx, path, nil)
+	if err != nil {
+		return nil, err
+	}
+	defer drainAndClose(resp.Body)
+
+	var result AutoNameServiceResponse
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		return nil, fmt.Errorf("failed to decode response: %w", err)
+	}
+
+	return &result, nil
+}
+
+// CompletionSummaryRequest is the request body for completion summary generation.
+type CompletionSummaryRequest struct {
+	ServiceType    string `json:"service_type"`
+	ClientName     string `json:"client_name"`
+	CompletionData string `json:"completion_data"` // JSON string
+	ServiceID      string `json:"service_id,omitempty"`
+}
+
+// KeyOutcome represents a key outcome from service completion.
+type KeyOutcome struct {
+	Label string `json:"label"`
+	Value string `json:"value"`
+	Note  string `json:"note,omitempty"`
+}
+
+// CompletionSummaryResponse is the response from completion summary generation.
+type CompletionSummaryResponse struct {
+	InternalSummary     string       `json:"internal_summary"`
+	ClientSummary       string       `json:"client_summary"`
+	SubjectLine         string       `json:"subject_line"`
+	KeyOutcomes         []KeyOutcome `json:"key_outcomes"`
+	FollowUpItems       []string     `json:"follow_up_items"`
+	DocumentsToSend     []string     `json:"documents_to_send"`
+	NextServiceReminder string       `json:"next_service_reminder"`
+	ProfessionalNotes   string       `json:"professional_notes"`
+	Tone                string       `json:"tone"`
+	ServiceID           string       `json:"service_id,omitempty"`
+	Error               string       `json:"error,omitempty"`
+}
+
+// GenerateCompletionSummary calls the Python AI service to generate completion summary.
+func (c *Client) GenerateCompletionSummary(ctx context.Context, req CompletionSummaryRequest) (*CompletionSummaryResponse, error) {
+	path := fmt.Sprintf("/api/v1/ai/services/completion-summary?service_type=%s&client_name=%s&completion_data=%s&service_id=%s",
+		url.QueryEscape(req.ServiceType),
+		url.QueryEscape(req.ClientName),
+		url.QueryEscape(req.CompletionData),
+		url.QueryEscape(req.ServiceID),
+	)
+
+	resp, err := c.post(ctx, path, nil)
+	if err != nil {
+		return nil, err
+	}
+	defer drainAndClose(resp.Body)
+
+	var result CompletionSummaryResponse
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		return nil, fmt.Errorf("failed to decode response: %w", err)
+	}
+
+	return &result, nil
+}
+
+// =============================================================================
+// Dashboard AI Methods
+// =============================================================================
+
+// TroublemakersRequest is the request body for finding troublemakers.
+type TroublemakersRequest struct {
+	Clients               string `json:"clients"` // JSON string
+	ThresholdDaysOverdue  int    `json:"threshold_days_overdue,omitempty"`
+}
+
+// TroublemakerIssue represents an issue with a troublemaker client.
+type TroublemakerIssue struct {
+	Type        string `json:"type"`
+	Description string `json:"description"`
+	Urgency     string `json:"urgency"`
+}
+
+// Troublemaker represents a problematic client.
+type Troublemaker struct {
+	ClientID          string              `json:"client_id"`
+	ClientName        string              `json:"client_name"`
+	CompanyName       string              `json:"company_name"`
+	Severity          string              `json:"severity"`
+	Score             int                 `json:"score"`
+	Issues            []TroublemakerIssue `json:"issues"`
+	RecommendedAction string              `json:"recommended_action"`
+	ChaseMethod       string              `json:"chase_method"`
+	ContactPreference string              `json:"contact_preference"`
+	LastChase         string              `json:"last_chase"`
+	EscalationNeeded  bool                `json:"escalation_needed"`
+}
+
+// TroublemakersSummary represents summary statistics.
+type TroublemakersSummary struct {
+	TotalTroublemakers    int `json:"total_troublemakers"`
+	Critical              int `json:"critical"`
+	High                  int `json:"high"`
+	Medium                int `json:"medium"`
+	BlockedServices       int `json:"blocked_services"`
+	TotalOverdueDocuments int `json:"total_overdue_documents"`
+}
+
+// BatchAction represents a recommended batch action.
+type BatchAction struct {
+	Action        string `json:"action"`
+	TargetClients int    `json:"target_clients"`
+	Template      string `json:"template"`
+}
+
+// TroublemakersResponse is the response from troublemakers analysis.
+type TroublemakersResponse struct {
+	Troublemakers           []Troublemaker       `json:"troublemakers"`
+	Summary                 TroublemakersSummary `json:"summary"`
+	RecommendedBatchActions []BatchAction        `json:"recommended_batch_actions"`
+	Error                   string               `json:"error,omitempty"`
+}
+
+// FindTroublemakers calls the Python AI service to find troublemaker clients.
+func (c *Client) FindTroublemakers(ctx context.Context, req TroublemakersRequest) (*TroublemakersResponse, error) {
+	threshold := 7
+	if req.ThresholdDaysOverdue > 0 {
+		threshold = req.ThresholdDaysOverdue
+	}
+	path := fmt.Sprintf("/api/v1/ai/dashboard/troublemakers?clients=%s&threshold_days_overdue=%d",
+		url.QueryEscape(req.Clients),
+		threshold,
+	)
+
+	resp, err := c.post(ctx, path, nil)
+	if err != nil {
+		return nil, err
+	}
+	defer drainAndClose(resp.Body)
+
+	var result TroublemakersResponse
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		return nil, fmt.Errorf("failed to decode response: %w", err)
+	}
+
+	return &result, nil
+}
+
+// AnomaliesRequest is the request body for anomaly detection.
+type AnomaliesRequest struct {
+	DataType string `json:"data_type"`
+	Data     string `json:"data"` // JSON string
+	Context  string `json:"context,omitempty"`
+}
+
+// Anomaly represents a detected anomaly.
+type Anomaly struct {
+	ID                     string  `json:"id"`
+	Field                  string  `json:"field"`
+	Value                  string  `json:"value"`
+	ExpectedRange          string  `json:"expected_range"`
+	Severity               string  `json:"severity"`
+	Type                   string  `json:"type"`
+	Description            string  `json:"description"`
+	RecommendedAction      string  `json:"recommended_action"`
+	FalsePositiveLikelihood float64 `json:"false_positive_likelihood"`
+}
+
+// Pattern represents a detected pattern.
+type Pattern struct {
+	Pattern         string `json:"pattern"`
+	AffectedRecords int    `json:"affected_records"`
+	Significance    string `json:"significance"`
+}
+
+// AnomaliesResponse is the response from anomaly detection.
+type AnomaliesResponse struct {
+	AnomaliesFound   bool      `json:"anomalies_found"`
+	AnomalyCount     int       `json:"anomaly_count"`
+	Anomalies        []Anomaly `json:"anomalies"`
+	PatternsDetected []Pattern `json:"patterns_detected"`
+	DataQualityScore float64   `json:"data_quality_score"`
+	Summary          string    `json:"summary"`
+	Error            string    `json:"error,omitempty"`
+}
+
+// DetectAnomalies calls the Python AI service to detect anomalies.
+func (c *Client) DetectAnomalies(ctx context.Context, req AnomaliesRequest) (*AnomaliesResponse, error) {
+	path := fmt.Sprintf("/api/v1/ai/dashboard/anomalies?data_type=%s&data=%s&context=%s",
+		url.QueryEscape(req.DataType),
+		url.QueryEscape(req.Data),
+		url.QueryEscape(req.Context),
+	)
+
+	resp, err := c.post(ctx, path, nil)
+	if err != nil {
+		return nil, err
+	}
+	defer drainAndClose(resp.Body)
+
+	var result AnomaliesResponse
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		return nil, fmt.Errorf("failed to decode response: %w", err)
+	}
+
+	return &result, nil
+}
+
+// StaffActivityRequest is the request body for staff activity analysis.
+type StaffActivityRequest struct {
+	StaffID      string `json:"staff_id"`
+	StaffName    string `json:"staff_name"`
+	ActivityData string `json:"activity_data"` // JSON string
+	Period       string `json:"period,omitempty"`
+}
+
+// ProductivityMetrics represents productivity statistics.
+type ProductivityMetrics struct {
+	ServicesCompleted     int     `json:"services_completed"`
+	DocumentsProcessed    int     `json:"documents_processed"`
+	EmailsHandled         int     `json:"emails_handled"`
+	AverageCompletionTime string  `json:"average_completion_time"`
+	EfficiencyScore       float64 `json:"efficiency_score"`
+}
+
+// ClientInteractionMetrics represents client interaction statistics.
+type ClientInteractionMetrics struct {
+	TotalInteractions      int    `json:"total_interactions"`
+	ClientsServed          int    `json:"clients_served"`
+	AverageResponseTime    string `json:"average_response_time"`
+	SatisfactionIndicators string `json:"satisfaction_indicators"`
+}
+
+// TimeAllocation represents time allocation breakdown.
+type TimeAllocation struct {
+	ServiceWork         string `json:"service_work"`
+	ClientCommunication string `json:"client_communication"`
+	Admin               string `json:"admin"`
+}
+
+// StaffActivityResponse is the response from staff activity analysis.
+type StaffActivityResponse struct {
+	StaffID              string                   `json:"staff_id"`
+	StaffName            string                   `json:"staff_name"`
+	Period               string                   `json:"period"`
+	Summary              string                   `json:"summary"`
+	Productivity         ProductivityMetrics      `json:"productivity"`
+	ClientInteractions   ClientInteractionMetrics `json:"client_interactions"`
+	TimeAllocation       TimeAllocation           `json:"time_allocation"`
+	Highlights           []string                 `json:"highlights"`
+	AreasForImprovement  []string                 `json:"areas_for_improvement"`
+	Recommendations      []string                 `json:"recommendations"`
+	WorkloadAssessment   string                   `json:"workload_assessment"`
+	Trend                string                   `json:"trend"`
+	Error                string                   `json:"error,omitempty"`
+}
+
+// AnalyzeStaffActivity calls the Python AI service to analyze staff activity.
+func (c *Client) AnalyzeStaffActivity(ctx context.Context, req StaffActivityRequest) (*StaffActivityResponse, error) {
+	period := "last_week"
+	if req.Period != "" {
+		period = req.Period
+	}
+	path := fmt.Sprintf("/api/v1/ai/staff/activity?staff_id=%s&staff_name=%s&activity_data=%s&period=%s",
+		url.QueryEscape(req.StaffID),
+		url.QueryEscape(req.StaffName),
+		url.QueryEscape(req.ActivityData),
+		url.QueryEscape(period),
+	)
+
+	resp, err := c.post(ctx, path, nil)
+	if err != nil {
+		return nil, err
+	}
+	defer drainAndClose(resp.Body)
+
+	var result StaffActivityResponse
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		return nil, fmt.Errorf("failed to decode response: %w", err)
+	}
+
+	return &result, nil
 }
 
 // Close closes the client and releases resources.

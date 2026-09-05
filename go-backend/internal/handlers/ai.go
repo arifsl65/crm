@@ -704,6 +704,282 @@ func (h *AIHandler) ExtractEmailPromises(c *gin.Context) {
 	c.JSON(http.StatusOK, result)
 }
 
+// DraftEmailRequest is the request for AI email drafting.
+type DraftEmailRequest struct {
+	Context                string `json:"context" binding:"required"`
+	Tone                   string `json:"tone"`
+	Intent                 string `json:"intent"`
+	ClientName             string `json:"client_name"`
+	StaffName              string `json:"staff_name"`
+	OriginalSubject        string `json:"original_subject"`
+	OriginalBody           string `json:"original_body"`
+	OriginalSender         string `json:"original_sender"`
+	AdditionalInstructions string `json:"additional_instructions"`
+	EmailID                string `json:"email_id"`
+}
+
+// DraftEmail generates an AI-drafted email.
+// POST /api/v1/ai/emails/draft
+func (h *AIHandler) DraftEmail(c *gin.Context) {
+	var req DraftEmailRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{
+			"error":   "validation_error",
+			"message": "context is required",
+		})
+		return
+	}
+
+	// Check circuit breaker
+	if !h.circuit.Allow() {
+		log.Warn().Msg("AI service circuit breaker is open")
+		c.JSON(http.StatusServiceUnavailable, gin.H{
+			"error":   "service_unavailable",
+			"message": "AI service is temporarily unavailable, please try again later",
+		})
+		return
+	}
+
+	ctx := h.contextWithRequestID(c)
+
+	// Set defaults
+	tone := req.Tone
+	if tone == "" {
+		tone = "professional"
+	}
+	intent := req.Intent
+	if intent == "" {
+		intent = "reply"
+	}
+
+	result, err := h.client.DraftEmail(ctx, ai.EmailDraftRequest{
+		Context:                req.Context,
+		Tone:                   tone,
+		Intent:                 intent,
+		ClientName:             req.ClientName,
+		StaffName:              req.StaffName,
+		OriginalSubject:        req.OriginalSubject,
+		OriginalBody:           req.OriginalBody,
+		OriginalSender:         req.OriginalSender,
+		AdditionalInstructions: req.AdditionalInstructions,
+		EmailID:                req.EmailID,
+	})
+	if err != nil {
+		h.circuit.RecordFailure()
+		log.Error().Err(err).Msg("Failed to draft email")
+		c.JSON(http.StatusBadGateway, gin.H{
+			"error":   "ai_service_error",
+			"message": "Failed to communicate with AI service",
+		})
+		return
+	}
+
+	h.circuit.RecordSuccess()
+
+	if result.Error != "" {
+		c.JSON(http.StatusUnprocessableEntity, gin.H{
+			"error":   "draft_failed",
+			"message": result.Error,
+		})
+		return
+	}
+
+	c.JSON(http.StatusOK, result)
+}
+
+// MatchEmailToClientRequest is the request for matching email to client.
+type MatchEmailToClientRequest struct {
+	SenderEmail  string `json:"sender_email" binding:"required,email"`
+	SenderName   string `json:"sender_name"`
+	EmailContent string `json:"email_content"`
+	KnownClients string `json:"known_clients"` // JSON string of clients
+	EmailID      string `json:"email_id"`
+}
+
+// MatchEmailToClient matches an email sender to a client.
+// POST /api/v1/ai/emails/match-client
+func (h *AIHandler) MatchEmailToClient(c *gin.Context) {
+	var req MatchEmailToClientRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{
+			"error":   "validation_error",
+			"message": "sender_email is required and must be a valid email",
+		})
+		return
+	}
+
+	// Check circuit breaker
+	if !h.circuit.Allow() {
+		log.Warn().Msg("AI service circuit breaker is open")
+		c.JSON(http.StatusServiceUnavailable, gin.H{
+			"error":   "service_unavailable",
+			"message": "AI service is temporarily unavailable, please try again later",
+		})
+		return
+	}
+
+	ctx := h.contextWithRequestID(c)
+
+	result, err := h.client.MatchEmailToClient(ctx, ai.EmailMatchClientRequest{
+		SenderEmail:  req.SenderEmail,
+		SenderName:   req.SenderName,
+		EmailContent: req.EmailContent,
+		KnownClients: req.KnownClients,
+		EmailID:      req.EmailID,
+	})
+	if err != nil {
+		h.circuit.RecordFailure()
+		log.Error().Err(err).Msg("Failed to match email to client")
+		c.JSON(http.StatusBadGateway, gin.H{
+			"error":   "ai_service_error",
+			"message": "Failed to communicate with AI service",
+		})
+		return
+	}
+
+	h.circuit.RecordSuccess()
+
+	if result.Error != "" {
+		c.JSON(http.StatusUnprocessableEntity, gin.H{
+			"error":   "match_failed",
+			"message": result.Error,
+		})
+		return
+	}
+
+	c.JSON(http.StatusOK, result)
+}
+
+// SummarizeEmailThreadRequest is the request for email thread summarization.
+type SummarizeEmailThreadRequest struct {
+	Emails   string `json:"emails" binding:"required"` // JSON string of emails
+	Focus    string `json:"focus"`
+	ThreadID string `json:"thread_id"`
+}
+
+// SummarizeEmailThread summarizes an email thread.
+// POST /api/v1/ai/emails/thread-summary
+func (h *AIHandler) SummarizeEmailThread(c *gin.Context) {
+	var req SummarizeEmailThreadRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{
+			"error":   "validation_error",
+			"message": "emails is required (JSON array of email objects)",
+		})
+		return
+	}
+
+	// Check circuit breaker
+	if !h.circuit.Allow() {
+		log.Warn().Msg("AI service circuit breaker is open")
+		c.JSON(http.StatusServiceUnavailable, gin.H{
+			"error":   "service_unavailable",
+			"message": "AI service is temporarily unavailable, please try again later",
+		})
+		return
+	}
+
+	ctx := h.contextWithRequestID(c)
+
+	// Set default focus
+	focus := req.Focus
+	if focus == "" {
+		focus = "general"
+	}
+
+	result, err := h.client.SummarizeEmailThread(ctx, ai.EmailThreadSummaryRequest{
+		Emails:   req.Emails,
+		Focus:    focus,
+		ThreadID: req.ThreadID,
+	})
+	if err != nil {
+		h.circuit.RecordFailure()
+		log.Error().Err(err).Msg("Failed to summarize email thread")
+		c.JSON(http.StatusBadGateway, gin.H{
+			"error":   "ai_service_error",
+			"message": "Failed to communicate with AI service",
+		})
+		return
+	}
+
+	h.circuit.RecordSuccess()
+
+	if result.Error != "" {
+		c.JSON(http.StatusUnprocessableEntity, gin.H{
+			"error":   "summarization_failed",
+			"message": result.Error,
+		})
+		return
+	}
+
+	c.JSON(http.StatusOK, result)
+}
+
+// FindAlternateEmailRequest is the request for finding alternate emails.
+type FindAlternateEmailRequest struct {
+	BouncedEmail  string `json:"bounced_email" binding:"required,email"`
+	ClientName    string `json:"client_name"`
+	CompanyName   string `json:"company_name"`
+	KnownContacts string `json:"known_contacts"` // JSON string
+	CompanyDomain string `json:"company_domain"`
+	EmailID       string `json:"email_id"`
+}
+
+// FindAlternateEmail finds alternate email addresses for bounced emails.
+// POST /api/v1/ai/emails/find-alternate
+func (h *AIHandler) FindAlternateEmail(c *gin.Context) {
+	var req FindAlternateEmailRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{
+			"error":   "validation_error",
+			"message": "bounced_email is required and must be a valid email",
+		})
+		return
+	}
+
+	// Check circuit breaker
+	if !h.circuit.Allow() {
+		log.Warn().Msg("AI service circuit breaker is open")
+		c.JSON(http.StatusServiceUnavailable, gin.H{
+			"error":   "service_unavailable",
+			"message": "AI service is temporarily unavailable, please try again later",
+		})
+		return
+	}
+
+	ctx := h.contextWithRequestID(c)
+
+	result, err := h.client.FindAlternateEmail(ctx, ai.FindAlternateEmailRequest{
+		BouncedEmail:  req.BouncedEmail,
+		ClientName:    req.ClientName,
+		CompanyName:   req.CompanyName,
+		KnownContacts: req.KnownContacts,
+		CompanyDomain: req.CompanyDomain,
+		EmailID:       req.EmailID,
+	})
+	if err != nil {
+		h.circuit.RecordFailure()
+		log.Error().Err(err).Msg("Failed to find alternate email")
+		c.JSON(http.StatusBadGateway, gin.H{
+			"error":   "ai_service_error",
+			"message": "Failed to communicate with AI service",
+		})
+		return
+	}
+
+	h.circuit.RecordSuccess()
+
+	if result.Error != "" {
+		c.JSON(http.StatusUnprocessableEntity, gin.H{
+			"error":   "search_failed",
+			"message": result.Error,
+		})
+		return
+	}
+
+	c.JSON(http.StatusOK, result)
+}
+
 // ClientRiskRequest is the request for client risk analysis.
 type ClientRiskRequest struct {
 	ClientID                 string   `json:"client_id" binding:"required,uuid"`
@@ -1230,6 +1506,463 @@ func (h *AIHandler) DeleteChat(c *gin.Context) {
 	if result.Error != "" {
 		c.JSON(http.StatusUnprocessableEntity, gin.H{
 			"error":   "delete_failed",
+			"message": result.Error,
+		})
+		return
+	}
+
+	c.JSON(http.StatusOK, result)
+}
+
+// ============================================================================
+// Template AI Handlers
+// ============================================================================
+
+// GenerateTemplateRequest is the request for template generation.
+type GenerateTemplateRequest struct {
+	Purpose             string `json:"purpose" binding:"required"`
+	TemplateType        string `json:"template_type"`
+	Tone                string `json:"tone"`
+	IncludePlaceholders bool   `json:"include_placeholders"`
+	ExampleContext      string `json:"example_context"`
+}
+
+// GenerateTemplate generates an email template using AI.
+// POST /api/v1/ai/templates/generate
+func (h *AIHandler) GenerateTemplate(c *gin.Context) {
+	var req GenerateTemplateRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{
+			"error":   "validation_error",
+			"message": "purpose is required",
+		})
+		return
+	}
+
+	// Check circuit breaker
+	if !h.circuit.Allow() {
+		log.Warn().Msg("AI service circuit breaker is open")
+		c.JSON(http.StatusServiceUnavailable, gin.H{
+			"error":   "service_unavailable",
+			"message": "AI service is temporarily unavailable, please try again later",
+		})
+		return
+	}
+
+	ctx := h.contextWithRequestID(c)
+
+	// Set defaults
+	templateType := req.TemplateType
+	if templateType == "" {
+		templateType = "general"
+	}
+	tone := req.Tone
+	if tone == "" {
+		tone = "professional"
+	}
+
+	result, err := h.client.GenerateTemplate(ctx, ai.GenerateTemplateRequest{
+		Purpose:             req.Purpose,
+		TemplateType:        templateType,
+		Tone:                tone,
+		IncludePlaceholders: req.IncludePlaceholders,
+		ExampleContext:      req.ExampleContext,
+	})
+	if err != nil {
+		h.circuit.RecordFailure()
+		log.Error().Err(err).Msg("Failed to generate template")
+		c.JSON(http.StatusBadGateway, gin.H{
+			"error":   "ai_service_error",
+			"message": "Failed to communicate with AI service",
+		})
+		return
+	}
+
+	h.circuit.RecordSuccess()
+
+	if result.Error != "" {
+		c.JSON(http.StatusUnprocessableEntity, gin.H{
+			"error":   "generation_failed",
+			"message": result.Error,
+		})
+		return
+	}
+
+	c.JSON(http.StatusOK, result)
+}
+
+// ============================================================================
+// Client AI Handlers
+// ============================================================================
+
+// CheckDuplicateClientsRequest is the request for duplicate checking.
+type CheckDuplicateClientsRequest struct {
+	NewClient       string `json:"new_client" binding:"required"`
+	ExistingClients string `json:"existing_clients"`
+}
+
+// CheckDuplicateClients checks for duplicate clients using AI.
+// POST /api/v1/ai/clients/duplicate-check
+func (h *AIHandler) CheckDuplicateClients(c *gin.Context) {
+	var req CheckDuplicateClientsRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{
+			"error":   "validation_error",
+			"message": "new_client is required (JSON string)",
+		})
+		return
+	}
+
+	// Check circuit breaker
+	if !h.circuit.Allow() {
+		log.Warn().Msg("AI service circuit breaker is open")
+		c.JSON(http.StatusServiceUnavailable, gin.H{
+			"error":   "service_unavailable",
+			"message": "AI service is temporarily unavailable, please try again later",
+		})
+		return
+	}
+
+	ctx := h.contextWithRequestID(c)
+
+	result, err := h.client.CheckDuplicateClients(ctx, ai.CheckDuplicateClientsRequest{
+		NewClient:       req.NewClient,
+		ExistingClients: req.ExistingClients,
+	})
+	if err != nil {
+		h.circuit.RecordFailure()
+		log.Error().Err(err).Msg("Failed to check duplicate clients")
+		c.JSON(http.StatusBadGateway, gin.H{
+			"error":   "ai_service_error",
+			"message": "Failed to communicate with AI service",
+		})
+		return
+	}
+
+	h.circuit.RecordSuccess()
+
+	if result.Error != "" {
+		c.JSON(http.StatusUnprocessableEntity, gin.H{
+			"error":   "check_failed",
+			"message": result.Error,
+		})
+		return
+	}
+
+	c.JSON(http.StatusOK, result)
+}
+
+// ============================================================================
+// Service AI Handlers
+// ============================================================================
+
+// AutoNameServiceRequest is the request for service auto-naming.
+type AutoNameServiceRequest struct {
+	ServiceType       string `json:"service_type" binding:"required"`
+	ClientName        string `json:"client_name" binding:"required"`
+	Period            string `json:"period"`
+	Year              string `json:"year"`
+	AdditionalContext string `json:"additional_context"`
+}
+
+// AutoNameService auto-generates a service name using AI.
+// POST /api/v1/ai/services/auto-name
+func (h *AIHandler) AutoNameService(c *gin.Context) {
+	var req AutoNameServiceRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{
+			"error":   "validation_error",
+			"message": "service_type and client_name are required",
+		})
+		return
+	}
+
+	// Check circuit breaker
+	if !h.circuit.Allow() {
+		log.Warn().Msg("AI service circuit breaker is open")
+		c.JSON(http.StatusServiceUnavailable, gin.H{
+			"error":   "service_unavailable",
+			"message": "AI service is temporarily unavailable, please try again later",
+		})
+		return
+	}
+
+	ctx := h.contextWithRequestID(c)
+
+	result, err := h.client.AutoNameService(ctx, ai.AutoNameServiceRequest{
+		ServiceType:       req.ServiceType,
+		ClientName:        req.ClientName,
+		Period:            req.Period,
+		Year:              req.Year,
+		AdditionalContext: req.AdditionalContext,
+	})
+	if err != nil {
+		h.circuit.RecordFailure()
+		log.Error().Err(err).Msg("Failed to auto-name service")
+		c.JSON(http.StatusBadGateway, gin.H{
+			"error":   "ai_service_error",
+			"message": "Failed to communicate with AI service",
+		})
+		return
+	}
+
+	h.circuit.RecordSuccess()
+
+	if result.Error != "" {
+		c.JSON(http.StatusUnprocessableEntity, gin.H{
+			"error":   "naming_failed",
+			"message": result.Error,
+		})
+		return
+	}
+
+	c.JSON(http.StatusOK, result)
+}
+
+// CompletionSummaryRequest is the request for completion summary generation.
+type CompletionSummaryRequest struct {
+	ServiceType    string `json:"service_type" binding:"required"`
+	ClientName     string `json:"client_name" binding:"required"`
+	CompletionData string `json:"completion_data"`
+	ServiceID      string `json:"service_id"`
+}
+
+// GenerateCompletionSummary generates a completion summary for a service.
+// POST /api/v1/ai/services/completion-summary
+func (h *AIHandler) GenerateCompletionSummary(c *gin.Context) {
+	var req CompletionSummaryRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{
+			"error":   "validation_error",
+			"message": "service_type and client_name are required",
+		})
+		return
+	}
+
+	// Check circuit breaker
+	if !h.circuit.Allow() {
+		log.Warn().Msg("AI service circuit breaker is open")
+		c.JSON(http.StatusServiceUnavailable, gin.H{
+			"error":   "service_unavailable",
+			"message": "AI service is temporarily unavailable, please try again later",
+		})
+		return
+	}
+
+	ctx := h.contextWithRequestID(c)
+
+	result, err := h.client.GenerateCompletionSummary(ctx, ai.CompletionSummaryRequest{
+		ServiceType:    req.ServiceType,
+		ClientName:     req.ClientName,
+		CompletionData: req.CompletionData,
+		ServiceID:      req.ServiceID,
+	})
+	if err != nil {
+		h.circuit.RecordFailure()
+		log.Error().Err(err).Msg("Failed to generate completion summary")
+		c.JSON(http.StatusBadGateway, gin.H{
+			"error":   "ai_service_error",
+			"message": "Failed to communicate with AI service",
+		})
+		return
+	}
+
+	h.circuit.RecordSuccess()
+
+	if result.Error != "" {
+		c.JSON(http.StatusUnprocessableEntity, gin.H{
+			"error":   "summary_failed",
+			"message": result.Error,
+		})
+		return
+	}
+
+	c.JSON(http.StatusOK, result)
+}
+
+// ============================================================================
+// Dashboard AI Handlers
+// ============================================================================
+
+// FindTroublemakersRequest is the request for finding troublemakers.
+type FindTroublemakersRequest struct {
+	Clients              string `json:"clients" binding:"required"`
+	ThresholdDaysOverdue int    `json:"threshold_days_overdue"`
+}
+
+// FindTroublemakers finds problematic clients using AI.
+// POST /api/v1/ai/dashboard/troublemakers
+func (h *AIHandler) FindTroublemakers(c *gin.Context) {
+	var req FindTroublemakersRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{
+			"error":   "validation_error",
+			"message": "clients is required (JSON string)",
+		})
+		return
+	}
+
+	// Check circuit breaker
+	if !h.circuit.Allow() {
+		log.Warn().Msg("AI service circuit breaker is open")
+		c.JSON(http.StatusServiceUnavailable, gin.H{
+			"error":   "service_unavailable",
+			"message": "AI service is temporarily unavailable, please try again later",
+		})
+		return
+	}
+
+	ctx := h.contextWithRequestID(c)
+
+	threshold := req.ThresholdDaysOverdue
+	if threshold == 0 {
+		threshold = 7
+	}
+
+	result, err := h.client.FindTroublemakers(ctx, ai.TroublemakersRequest{
+		Clients:              req.Clients,
+		ThresholdDaysOverdue: threshold,
+	})
+	if err != nil {
+		h.circuit.RecordFailure()
+		log.Error().Err(err).Msg("Failed to find troublemakers")
+		c.JSON(http.StatusBadGateway, gin.H{
+			"error":   "ai_service_error",
+			"message": "Failed to communicate with AI service",
+		})
+		return
+	}
+
+	h.circuit.RecordSuccess()
+
+	if result.Error != "" {
+		c.JSON(http.StatusUnprocessableEntity, gin.H{
+			"error":   "analysis_failed",
+			"message": result.Error,
+		})
+		return
+	}
+
+	c.JSON(http.StatusOK, result)
+}
+
+// DetectAnomaliesRequest is the request for anomaly detection.
+type DetectAnomaliesRequest struct {
+	DataType string `json:"data_type" binding:"required"`
+	Data     string `json:"data" binding:"required"`
+	Context  string `json:"context"`
+}
+
+// DetectAnomalies detects anomalies in data using AI.
+// POST /api/v1/ai/dashboard/anomalies
+func (h *AIHandler) DetectAnomalies(c *gin.Context) {
+	var req DetectAnomaliesRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{
+			"error":   "validation_error",
+			"message": "data_type and data are required",
+		})
+		return
+	}
+
+	// Check circuit breaker
+	if !h.circuit.Allow() {
+		log.Warn().Msg("AI service circuit breaker is open")
+		c.JSON(http.StatusServiceUnavailable, gin.H{
+			"error":   "service_unavailable",
+			"message": "AI service is temporarily unavailable, please try again later",
+		})
+		return
+	}
+
+	ctx := h.contextWithRequestID(c)
+
+	result, err := h.client.DetectAnomalies(ctx, ai.AnomaliesRequest{
+		DataType: req.DataType,
+		Data:     req.Data,
+		Context:  req.Context,
+	})
+	if err != nil {
+		h.circuit.RecordFailure()
+		log.Error().Err(err).Msg("Failed to detect anomalies")
+		c.JSON(http.StatusBadGateway, gin.H{
+			"error":   "ai_service_error",
+			"message": "Failed to communicate with AI service",
+		})
+		return
+	}
+
+	h.circuit.RecordSuccess()
+
+	if result.Error != "" {
+		c.JSON(http.StatusUnprocessableEntity, gin.H{
+			"error":   "detection_failed",
+			"message": result.Error,
+		})
+		return
+	}
+
+	c.JSON(http.StatusOK, result)
+}
+
+// AnalyzeStaffActivityRequest is the request for staff activity analysis.
+type AnalyzeStaffActivityRequest struct {
+	StaffID      string `json:"staff_id" binding:"required,uuid"`
+	StaffName    string `json:"staff_name" binding:"required"`
+	ActivityData string `json:"activity_data"`
+	Period       string `json:"period"`
+}
+
+// AnalyzeStaffActivity analyzes staff activity using AI.
+// POST /api/v1/ai/staff/activity
+func (h *AIHandler) AnalyzeStaffActivity(c *gin.Context) {
+	var req AnalyzeStaffActivityRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{
+			"error":   "validation_error",
+			"message": "staff_id (UUID) and staff_name are required",
+		})
+		return
+	}
+
+	// Check circuit breaker
+	if !h.circuit.Allow() {
+		log.Warn().Msg("AI service circuit breaker is open")
+		c.JSON(http.StatusServiceUnavailable, gin.H{
+			"error":   "service_unavailable",
+			"message": "AI service is temporarily unavailable, please try again later",
+		})
+		return
+	}
+
+	ctx := h.contextWithRequestID(c)
+
+	period := req.Period
+	if period == "" {
+		period = "last_week"
+	}
+
+	result, err := h.client.AnalyzeStaffActivity(ctx, ai.StaffActivityRequest{
+		StaffID:      req.StaffID,
+		StaffName:    req.StaffName,
+		ActivityData: req.ActivityData,
+		Period:       period,
+	})
+	if err != nil {
+		h.circuit.RecordFailure()
+		log.Error().Err(err).Str("staff_id", req.StaffID).Msg("Failed to analyze staff activity")
+		c.JSON(http.StatusBadGateway, gin.H{
+			"error":   "ai_service_error",
+			"message": "Failed to communicate with AI service",
+		})
+		return
+	}
+
+	h.circuit.RecordSuccess()
+
+	if result.Error != "" {
+		c.JSON(http.StatusUnprocessableEntity, gin.H{
+			"error":   "analysis_failed",
 			"message": result.Error,
 		})
 		return

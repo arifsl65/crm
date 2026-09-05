@@ -580,10 +580,10 @@ func setupRouter(app *Application) *gin.Engine {
 			aiRoutes.POST("/emails/summarize", h.AI.SummarizeEmail)
 			aiRoutes.POST("/emails/sentiment", h.AI.AnalyzeEmailSentiment)
 			aiRoutes.POST("/emails/promises", h.AI.ExtractEmailPromises)
-			aiRoutes.POST("/emails/draft", h.AI.NotImplementedAI)
-			aiRoutes.POST("/emails/match-client", h.AI.NotImplementedAI)
-			aiRoutes.POST("/emails/thread-summary", h.AI.NotImplementedAI)
-			aiRoutes.POST("/emails/find-alternate", h.AI.NotImplementedAI)
+			aiRoutes.POST("/emails/draft", h.AI.DraftEmail)
+			aiRoutes.POST("/emails/match-client", h.AI.MatchEmailToClient)
+			aiRoutes.POST("/emails/thread-summary", h.AI.SummarizeEmailThread)
+			aiRoutes.POST("/emails/find-alternate", h.AI.FindAlternateEmail)
 
 			// Form AI
 			aiRoutes.POST("/forms/extract", h.AI.ExtractFormData)
@@ -596,19 +596,19 @@ func setupRouter(app *Application) *gin.Engine {
 			aiRoutes.POST("/risk/service", h.AI.AnalyzeServiceRisk)
 
 			// Template AI
-			aiRoutes.POST("/templates/generate", h.AI.NotImplementedAI)
+			aiRoutes.POST("/templates/generate", h.AI.GenerateTemplate)
 
 			// Client AI
-			aiRoutes.POST("/clients/duplicate-check", h.AI.NotImplementedAI)
+			aiRoutes.POST("/clients/duplicate-check", h.AI.CheckDuplicateClients)
 
 			// Service AI
-			aiRoutes.POST("/services/auto-name", h.AI.NotImplementedAI)
-			aiRoutes.POST("/services/completion-summary", h.AI.NotImplementedAI)
+			aiRoutes.POST("/services/auto-name", h.AI.AutoNameService)
+			aiRoutes.POST("/services/completion-summary", h.AI.GenerateCompletionSummary)
 
 			// Dashboard AI
-			aiRoutes.POST("/dashboard/troublemakers", h.AI.NotImplementedAI)
-			aiRoutes.POST("/dashboard/anomalies", h.AI.NotImplementedAI)
-			aiRoutes.POST("/staff/activity", h.AI.NotImplementedAI)
+			aiRoutes.POST("/dashboard/troublemakers", h.AI.FindTroublemakers)
+			aiRoutes.POST("/dashboard/anomalies", h.AI.DetectAnomalies)
+			aiRoutes.POST("/staff/activity", h.AI.AnalyzeStaffActivity)
 
 			// Staff Workload Rebalance (admin only)
 			aiRoutes.GET("/staff/workload", middleware.RequireRole("super_admin", "tenant_admin"), h.Rebalance.GetWorkloads)
@@ -635,6 +635,11 @@ func setupRouter(app *Application) *gin.Engine {
 			emails.GET("/stats", h.Email.GetStats)
 			emails.POST("", middleware.RequireRole("super_admin", "tenant_admin", "staff"), h.Email.Send)
 			emails.POST("/send-template", middleware.RequireRole("super_admin", "tenant_admin", "staff"), h.Email.SendFromTemplate)
+			// Thread routes (must be before /:id to avoid conflicts)
+			emails.GET("/threads", h.Email.ListThreads)
+			emails.GET("/threads/:id", middleware.ValidateUUID("id"), h.Email.GetThread)
+			emails.GET("/threads/:id/messages", middleware.ValidateUUID("id"), h.Email.GetThreadMessages)
+			// Individual email routes
 			emails.GET("/:id", middleware.ValidateUUID("id"), h.Email.Get)
 			emails.PATCH("/:id/read", middleware.ValidateUUID("id"), h.Email.MarkRead)
 			emails.PATCH("/:id/claim", middleware.ValidateUUID("id"), h.Email.Claim)
