@@ -49,7 +49,7 @@ VALUES (
     '00000000-0000-0000-0000-000000000001',
     'admin@dev.local',
     'Admin User',
-    '$argon2id$v=19$m=65536,t=3,p=4$c29tZXNhbHQ$RdescudvJCsgt3ub+b+dWRWJTmaaJObG',
+    '$argon2id$v=19$m=65536,t=3,p=4$9/C3C2YPgSUZlNR8nsmw1w$bDboFNFT/wRbeOEmWeG7vEWZgeRpsi8HwrilV0swVhk',
     'tenant_admin'
 ) ON CONFLICT DO NOTHING;
 

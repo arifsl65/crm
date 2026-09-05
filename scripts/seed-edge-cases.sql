@@ -29,15 +29,15 @@ INSERT INTO tenants (id, name, domain, plan, timezone, is_active, deleted_at) VA
 INSERT INTO users (id, tenant_id, email, password, name, role, status) VALUES
 -- Tech Bros admin
 ('c1000000-0000-0000-0000-000000000001', 'b1000000-0000-0000-0000-000000000001',
- 'admin@techbros.io', '$argon2id$v=19$m=65536,t=3,p=4$c29tZXNhbHQ$RdescudvJCsgt3ub+b+dWRWJTmaaJObG',
+ 'admin@techbros.io', '$argon2id$v=19$m=65536,t=3,p=4$9/C3C2YPgSUZlNR8nsmw1w$bDboFNFT/wRbeOEmWeG7vEWZgeRpsi8HwrilV0swVhk',
  'Jake Developer', 'tenant_admin', 'active'),
 -- Global Finance admin
 ('c2000000-0000-0000-0000-000000000001', 'b2000000-0000-0000-0000-000000000001',
- 'admin@globalfin.com', '$argon2id$v=19$m=65536,t=3,p=4$c29tZXNhbHQ$RdescudvJCsgt3ub+b+dWRWJTmaaJObG',
+ 'admin@globalfin.com', '$argon2id$v=19$m=65536,t=3,p=4$9/C3C2YPgSUZlNR8nsmw1w$bDboFNFT/wRbeOEmWeG7vEWZgeRpsi8HwrilV0swVhk',
  'Maria Finance', 'tenant_admin', 'active'),
 -- Old Firm admin (suspended)
 ('c3000000-0000-0000-0000-000000000001', 'b3000000-0000-0000-0000-000000000001',
- 'admin@oldfirm.co.uk', '$argon2id$v=19$m=65536,t=3,p=4$c29tZXNhbHQ$RdescudvJCsgt3ub+b+dWRWJTmaaJObG',
+ 'admin@oldfirm.co.uk', '$argon2id$v=19$m=65536,t=3,p=4$9/C3C2YPgSUZlNR8nsmw1w$bDboFNFT/wRbeOEmWeG7vEWZgeRpsi8HwrilV0swVhk',
  'Robert Old', 'tenant_admin', 'inactive');
 
 -- Clients for new tenants (usage stats)
