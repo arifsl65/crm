@@ -495,6 +495,152 @@ func (h *EmailHandler) MarkRead(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{"message": "Email marked as read"})
 }
 
+// Claim claims an email for the current user (for triage).
+// PATCH /api/v1/emails/:id/claim
+func (h *EmailHandler) Claim(c *gin.Context) {
+	ctx := c.Request.Context()
+	tenantID, _ := middleware.GetTenantID(c)
+	userID, _ := middleware.GetUserID(c)
+	id := c.Param("id")
+
+	tenantDB, ok := middleware.GetTenantDB(c)
+	if !ok {
+		log.Error().Msg("TenantDB not found in context")
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "internal_error"})
+		return
+	}
+
+	emailID, err := uuid.Parse(id)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid email ID"})
+		return
+	}
+
+	// Check if email exists and is not already claimed
+	var existingClaimedBy *uuid.UUID
+	err = tenantDB.QueryRowScan(c, []interface{}{&existingClaimedBy},
+		`SELECT claimed_by FROM emails WHERE id = $1 AND tenant_id = $2`, emailID, tenantID)
+
+	if err == pgx.ErrNoRows {
+		c.JSON(http.StatusNotFound, gin.H{"error": "Email not found"})
+		return
+	}
+	if err != nil {
+		log.Error().Err(err).Msg("Failed to check email claim status")
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to check email"})
+		return
+	}
+
+	// If already claimed by someone else, return conflict
+	if existingClaimedBy != nil && *existingClaimedBy != userID {
+		c.JSON(http.StatusConflict, gin.H{
+			"error":   "already_claimed",
+			"message": "Email is already claimed by another user",
+		})
+		return
+	}
+
+	// Claim the email
+	now := time.Now()
+	result, err := tenantDB.Exec(c,
+		`UPDATE emails SET claimed_by = $1, claimed_at = $2 WHERE id = $3 AND tenant_id = $4`,
+		userID, now, emailID, tenantID)
+
+	if err != nil {
+		log.Error().Err(err).Msg("Failed to claim email")
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to claim email"})
+		return
+	}
+
+	if result.RowsAffected() == 0 {
+		c.JSON(http.StatusNotFound, gin.H{"error": "Email not found"})
+		return
+	}
+
+	// Audit log
+	h.audit.LogEntity(ctx, audit.ActionUpdate, &userID, &tenantID, "email", &emailID, c.ClientIP(), map[string]interface{}{
+		"action":     "claim",
+		"claimed_by": userID.String(),
+		"claimed_at": now,
+	})
+
+	c.JSON(http.StatusOK, gin.H{
+		"message":    "Email claimed successfully",
+		"claimed_by": userID,
+		"claimed_at": now,
+	})
+}
+
+// Unclaim removes the claim on an email.
+// PATCH /api/v1/emails/:id/unclaim
+func (h *EmailHandler) Unclaim(c *gin.Context) {
+	ctx := c.Request.Context()
+	tenantID, _ := middleware.GetTenantID(c)
+	userID, _ := middleware.GetUserID(c)
+	id := c.Param("id")
+
+	tenantDB, ok := middleware.GetTenantDB(c)
+	if !ok {
+		log.Error().Msg("TenantDB not found in context")
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "internal_error"})
+		return
+	}
+
+	emailID, err := uuid.Parse(id)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid email ID"})
+		return
+	}
+
+	// Only allow unclaim if user is the one who claimed it (or admin)
+	role, _ := middleware.GetRole(c)
+	var existingClaimedBy *uuid.UUID
+	err = tenantDB.QueryRowScan(c, []interface{}{&existingClaimedBy},
+		`SELECT claimed_by FROM emails WHERE id = $1 AND tenant_id = $2`, emailID, tenantID)
+
+	if err == pgx.ErrNoRows {
+		c.JSON(http.StatusNotFound, gin.H{"error": "Email not found"})
+		return
+	}
+	if err != nil {
+		log.Error().Err(err).Msg("Failed to check email claim status")
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to check email"})
+		return
+	}
+
+	// Check permission: only the claimer or admin can unclaim
+	if existingClaimedBy != nil && *existingClaimedBy != userID && role != "super_admin" && role != "tenant_admin" {
+		c.JSON(http.StatusForbidden, gin.H{
+			"error":   "not_authorized",
+			"message": "You can only unclaim emails you have claimed",
+		})
+		return
+	}
+
+	// Unclaim the email
+	result, err := tenantDB.Exec(c,
+		`UPDATE emails SET claimed_by = NULL, claimed_at = NULL WHERE id = $1 AND tenant_id = $2`,
+		emailID, tenantID)
+
+	if err != nil {
+		log.Error().Err(err).Msg("Failed to unclaim email")
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to unclaim email"})
+		return
+	}
+
+	if result.RowsAffected() == 0 {
+		c.JSON(http.StatusNotFound, gin.H{"error": "Email not found"})
+		return
+	}
+
+	// Audit log
+	h.audit.LogEntity(ctx, audit.ActionUpdate, &userID, &tenantID, "email", &emailID, c.ClientIP(), map[string]interface{}{
+		"action": "unclaim",
+	})
+
+	c.JSON(http.StatusOK, gin.H{"message": "Email unclaimed successfully"})
+}
+
 // GetStats returns email statistics for the tenant.
 // GET /api/v1/emails/stats
 func (h *EmailHandler) GetStats(c *gin.Context) {

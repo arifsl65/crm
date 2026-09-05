@@ -6,7 +6,6 @@ import { useAuth } from '@/components/auth-guard';
 import { Sidebar } from './Sidebar';
 import { SubMenu } from './SubMenu';
 import { Header } from './Header';
-import { AIChat } from './AIChat';
 import {
   TodayPanel,
   OverviewPanel,
@@ -40,7 +39,6 @@ export function DashboardShell({ children }: DashboardShellProps) {
   const { user, logout } = useAuth();
   const pathname = usePathname();
   const [activePanel, setActivePanel] = useState('today');
-  const [showAIChat, setShowAIChat] = useState(true);
   const [mounted, setMounted] = useState(false);
 
   useEffect(() => {
@@ -49,7 +47,6 @@ export function DashboardShell({ children }: DashboardShellProps) {
 
   // Determine if we're on the main dashboard or a module page
   const isMainDashboard = pathname === '/dashboard' || pathname === '/dashboard/';
-  const isAIPage = pathname === '/dashboard/ai' || pathname === '/dashboard/ai/';
 
   // Get current module from pathname
   const getCurrentModule = (): string => {
@@ -63,19 +60,9 @@ export function DashboardShell({ children }: DashboardShellProps) {
 
   const currentModule = getCurrentModule();
 
-  // Modules that should show the AI Chat in collapsed mode
-  const modulesWithCollapsedChat = ['clients', 'documents', 'services', 'email', 'staff', 'hmrc'];
-  const shouldCollapseChat = modulesWithCollapsedChat.includes(currentModule) && !isAIPage;
-
   // Handle panel selection from submenu
   const handlePanelSelect = (panel: string) => {
     setActivePanel(panel);
-  };
-
-  // Handle AI Chat actions
-  const handleAIAction = (action: string, itemId?: string) => {
-    console.log('AI Action:', action, itemId);
-    // TODO: Implement action handling
   };
 
   // Render the appropriate panel based on activePanel state
@@ -125,9 +112,9 @@ export function DashboardShell({ children }: DashboardShellProps) {
           />
 
           {/* Content Area */}
-          <main className="flex-1 flex overflow-hidden">
+          <main className="flex-1 overflow-hidden">
             {/* Main Content - Panel or Module Content */}
-            <div className="flex-1 overflow-y-auto">
+            <div className="flex-1 h-full overflow-y-auto">
               {isMainDashboard ? (
                 <div className="h-full p-4">
                   <div className="bg-white dark:bg-slate-800 rounded-lg shadow-sm h-full overflow-hidden">
@@ -140,24 +127,6 @@ export function DashboardShell({ children }: DashboardShellProps) {
                 </div>
               )}
             </div>
-
-            {/* AI Chat - Right side */}
-            {!isAIPage && (
-              <div
-                className={`
-                  hidden lg:block border-l border-gray-200 dark:border-gray-700 overflow-hidden transition-all
-                  ${isMainDashboard ? 'w-96' : shouldCollapseChat ? 'w-80' : 'w-96'}
-                `}
-              >
-                <div className="h-full p-4">
-                  <AIChat
-                    userName={user?.name || user?.email?.split('@')[0]}
-                    minimized={!isMainDashboard && shouldCollapseChat}
-                    onAction={handleAIAction}
-                  />
-                </div>
-              </div>
-            )}
           </main>
         </div>
       </div>

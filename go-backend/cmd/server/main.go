@@ -27,6 +27,7 @@ import (
 	"github.com/accountant-crm/go-backend/internal/crypto"
 	"github.com/accountant-crm/go-backend/internal/database"
 	"github.com/accountant-crm/go-backend/internal/email"
+	"github.com/accountant-crm/go-backend/internal/graphql"
 	"github.com/accountant-crm/go-backend/internal/handlers"
 	"github.com/accountant-crm/go-backend/internal/middleware"
 	"github.com/accountant-crm/go-backend/internal/oauth"
@@ -75,6 +76,10 @@ type Handlers struct {
 	Reminder     *handlers.ReminderHandler
 	Subscription *handlers.SubscriptionHandler
 	PushToken    *handlers.PushTokenHandler
+	AuditLog     *handlers.AuditLogHandler
+	Export       *handlers.ExportHandler
+	Search       *handlers.SearchHandler
+	Rebalance    *handlers.RebalanceHandler
 }
 
 func main() {
@@ -238,6 +243,10 @@ func main() {
 			Reminder:     handlers.NewReminderHandler(db, auditLogger),
 			Subscription: handlers.NewSubscriptionHandler(db),
 			PushToken:    handlers.NewPushTokenHandler(db),
+			AuditLog:     handlers.NewAuditLogHandler(db),
+			Export:       handlers.NewExportHandler(db),
+			Search:       handlers.NewSearchHandler(db),
+			Rebalance:    handlers.NewRebalanceHandler(db),
 		},
 	}
 
@@ -404,6 +413,9 @@ func setupRouter(app *Application) *gin.Engine {
 		protected.Use(middleware.AuditLog(middleware.AuditLogConfig{
 			Logger: app.Audit,
 		}))
+
+		// Global search route
+		protected.GET("/search", h.Search.Search)
 
 		// Admin routes (super_admin operations)
 		admin := protected.Group("/admin")
@@ -598,6 +610,11 @@ func setupRouter(app *Application) *gin.Engine {
 			aiRoutes.POST("/dashboard/anomalies", h.AI.NotImplementedAI)
 			aiRoutes.POST("/staff/activity", h.AI.NotImplementedAI)
 
+			// Staff Workload Rebalance (admin only)
+			aiRoutes.GET("/staff/workload", middleware.RequireRole("super_admin", "tenant_admin"), h.Rebalance.GetWorkloads)
+			aiRoutes.POST("/staff/rebalance", middleware.RequireRole("super_admin", "tenant_admin"), h.Rebalance.Rebalance)
+			aiRoutes.POST("/staff/rebalance/apply", middleware.RequireRole("super_admin", "tenant_admin"), h.Rebalance.ApplyRebalance)
+
 			// AI Jobs
 			aiRoutes.GET("/jobs/:id", middleware.ValidateUUID("id"), h.AI.GetJobStatus)
 		}
@@ -620,6 +637,8 @@ func setupRouter(app *Application) *gin.Engine {
 			emails.POST("/send-template", middleware.RequireRole("super_admin", "tenant_admin", "staff"), h.Email.SendFromTemplate)
 			emails.GET("/:id", middleware.ValidateUUID("id"), h.Email.Get)
 			emails.PATCH("/:id/read", middleware.ValidateUUID("id"), h.Email.MarkRead)
+			emails.PATCH("/:id/claim", middleware.ValidateUUID("id"), h.Email.Claim)
+			emails.PATCH("/:id/unclaim", middleware.ValidateUUID("id"), h.Email.Unclaim)
 		}
 
 		// Email Template routes
@@ -677,6 +696,26 @@ func setupRouter(app *Application) *gin.Engine {
 			settings.PATCH("", middleware.RequireRole("super_admin", "tenant_admin"), h.Settings.Update)
 			settings.GET("/branding", h.Settings.GetBranding)
 			settings.PATCH("/branding", middleware.RequireRole("super_admin", "tenant_admin"), h.Settings.UpdateBranding)
+		}
+
+		// Audit Log routes (admin only)
+		auditLogs := protected.Group("/audit-logs")
+		auditLogs.Use(middleware.RequireRole("super_admin", "tenant_admin"))
+		{
+			auditLogs.GET("", h.AuditLog.List)
+			auditLogs.GET("/stats", h.AuditLog.GetStats)
+			auditLogs.GET("/actions", h.AuditLog.GetActions)
+			auditLogs.GET("/entity-types", h.AuditLog.GetEntityTypes)
+			auditLogs.GET("/:id", middleware.ValidateUUID("id"), h.AuditLog.Get)
+		}
+
+		// Export routes (admin only)
+		export := protected.Group("/export")
+		export.Use(middleware.RequireRole("super_admin", "tenant_admin"))
+		{
+			export.GET("/clients", h.Export.ExportClients)
+			export.GET("/services", h.Export.ExportServices)
+			export.GET("/chase", h.Export.ExportChase)
 		}
 
 		// E-Sign routes
@@ -738,6 +777,25 @@ func setupRouter(app *Application) *gin.Engine {
 		{
 			wsRoutes.GET("", h.WebSocket.ConnectAuthenticated)
 			wsRoutes.GET("/stats", middleware.RequireRole("super_admin", "tenant_admin"), h.WebSocket.Stats)
+		}
+
+		// GraphQL endpoint
+		const graphqlPath = "/api/v1/graphql"
+		gqlConfig := graphql.HandlerConfig{
+			DB:                  app.DB,
+			Redis:               app.Redis.Client,
+			AIClient:            app.AIClient,
+			EnablePlayground:    cfg.App.Env == "development",
+			EnableIntrospection: cfg.App.Env == "development",
+			PlaygroundEndpoint:  graphqlPath,
+		}
+		gqlRoutes := protected.Group("/graphql")
+		{
+			gqlRoutes.POST("", graphql.GinHandler(gqlConfig))
+			gqlRoutes.GET("", graphql.GinHandler(gqlConfig)) // Support GET for simple queries
+			if gqlConfig.EnablePlayground {
+				gqlRoutes.GET("/playground", graphql.PlaygroundHandler(gqlConfig.PlaygroundEndpoint))
+			}
 		}
 	}
 

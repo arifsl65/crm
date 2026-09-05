@@ -2,6 +2,8 @@
 package middleware
 
 import (
+	"context"
+
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
@@ -162,4 +164,79 @@ func GetTenantDB(c *gin.Context) (*TenantDB, bool) {
 	}
 	db, ok := val.(*TenantDB)
 	return db, ok
+}
+
+// =============================================================================
+// Context-based methods for GraphQL resolvers
+// =============================================================================
+
+// ctxKey is a private type for context keys to avoid collisions.
+type ctxKey string
+
+const (
+	// CtxTenantDBKey is the context.Context key for TenantDB (used by GraphQL).
+	CtxTenantDBKey ctxKey = "tenant_db"
+)
+
+// WithTenantDB adds TenantDB to a context.Context (for GraphQL handlers).
+func WithTenantDB(ctx context.Context, tdb *TenantDB) context.Context {
+	return context.WithValue(ctx, CtxTenantDBKey, tdb)
+}
+
+// TenantDBFromContext retrieves TenantDB from context.Context (for GraphQL resolvers).
+func TenantDBFromContext(ctx context.Context) *TenantDB {
+	val := ctx.Value(CtxTenantDBKey)
+	if val == nil {
+		return nil
+	}
+	tdb, ok := val.(*TenantDB)
+	if !ok {
+		return nil
+	}
+	return tdb
+}
+
+// TransactionCtx executes a function within a transaction with RLS context set.
+// This is the context.Context version for use in GraphQL resolvers.
+func (t *TenantDB) TransactionCtx(ctx context.Context, fn func(tx pgx.Tx) error) error {
+	return t.pool.TenantTransaction(ctx, t.tenantID, t.role, fn)
+}
+
+// QueryCtx executes a query with RLS context and returns rows via a callback.
+// This is the context.Context version for use in GraphQL resolvers.
+func (t *TenantDB) QueryCtx(ctx context.Context, sql string, args []interface{}, scanFn func(pgx.Rows) error) error {
+	return t.pool.TenantTransaction(ctx, t.tenantID, t.role, func(tx pgx.Tx) error {
+		rows, err := tx.Query(ctx, sql, args...)
+		if err != nil {
+			return err
+		}
+		defer rows.Close()
+
+		for rows.Next() {
+			if err := scanFn(rows); err != nil {
+				return err
+			}
+		}
+		return rows.Err()
+	})
+}
+
+// QueryRowCtx executes a query that returns a single row.
+// This is the context.Context version for use in GraphQL resolvers.
+func (t *TenantDB) QueryRowCtx(ctx context.Context, dest []interface{}, sql string, args ...interface{}) error {
+	return t.pool.TenantTransaction(ctx, t.tenantID, t.role, func(tx pgx.Tx) error {
+		return tx.QueryRow(ctx, sql, args...).Scan(dest...)
+	})
+}
+
+// ExecCtx executes a statement with RLS context set.
+// This is the context.Context version for use in GraphQL resolvers.
+func (t *TenantDB) ExecCtx(ctx context.Context, sql string, args ...interface{}) (pgconn.CommandTag, error) {
+	var tag pgconn.CommandTag
+	err := t.pool.TenantTransaction(ctx, t.tenantID, t.role, func(tx pgx.Tx) error {
+		var err error
+		tag, err = tx.Exec(ctx, sql, args...)
+		return err
+	})
+	return tag, err
 }

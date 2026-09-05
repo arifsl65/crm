@@ -20,7 +20,6 @@ export function AlertsPanel({ onClose }: AlertsPanelProps) {
   const [error, setError] = useState<string | null>(null);
   const [atRisk, setAtRisk] = useState<AlertItem[]>([]);
   const [quiet, setQuiet] = useState<AlertItem[]>([]);
-  const [anomalies, setAnomalies] = useState<AlertItem[]>([]);
 
   useEffect(() => {
     async function fetchAlerts() {
@@ -38,7 +37,6 @@ export function AlertsPanel({ onClose }: AlertsPanelProps) {
 
         const atRiskItems: AlertItem[] = [];
         const quietItems: AlertItem[] = [];
-        const anomalyItems: AlertItem[] = [];
 
         // Group services by client
         const servicesByClient: Record<string, Service[]> = {};
@@ -102,9 +100,6 @@ export function AlertsPanel({ onClose }: AlertsPanelProps) {
           }
         });
 
-        // Anomalies: Placeholder - would check for staff workload imbalance
-        // Currently no assigned_staff_id in client data, so we skip this check
-
         // Sort quiet clients by days (most days first)
         quietItems.sort((a, b) => {
           const daysA = parseInt(a.text.match(/(\d+) days/)?.[1] || '0');
@@ -114,7 +109,6 @@ export function AlertsPanel({ onClose }: AlertsPanelProps) {
 
         setAtRisk(atRiskItems.slice(0, 10));
         setQuiet(quietItems.slice(0, 10));
-        setAnomalies(anomalyItems.slice(0, 5));
         setError(null);
       } catch (err) {
         setError('Failed to load alerts');
@@ -220,31 +214,6 @@ export function AlertsPanel({ onClose }: AlertsPanelProps) {
           )}
         </div>
 
-        {/* 🔍 ANOMALIES Section */}
-        <div>
-          <h3 className="text-sm font-semibold text-purple-600 dark:text-purple-400 mb-3">
-            🔍 ANOMALIES ({anomalies.length})
-          </h3>
-          {anomalies.length > 0 ? (
-            <div className="space-y-1">
-              {anomalies.map((item) => (
-                <div key={item.id} className="flex items-center justify-between py-1.5">
-                  <span className="text-sm text-gray-700 dark:text-gray-300">
-                    {item.text}
-                  </span>
-                  <Link
-                    href={item.actionHref}
-                    className="text-sm text-blue-600 dark:text-blue-400 hover:underline"
-                  >
-                    {item.actionLabel}
-                  </Link>
-                </div>
-              ))}
-            </div>
-          ) : (
-            <p className="text-sm text-gray-500 dark:text-gray-400 italic">None</p>
-          )}
-        </div>
       </div>
     </div>
   );

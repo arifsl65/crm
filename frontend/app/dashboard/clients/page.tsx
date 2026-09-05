@@ -1,8 +1,21 @@
 'use client';
 
 import { useEffect, useState, useCallback } from 'react';
-import Link from 'next/link';
-import { Client, getClients, getServices, Service } from '@/lib/api';
+import {
+  Client,
+  getClients,
+  getServices,
+  Service,
+  ClientNote,
+  getClientNotes,
+  createClientNote,
+  updateClientNote,
+  deleteClientNote,
+  searchCompaniesHouse,
+  getCompanyFromCH,
+  CHCompanySearchResult,
+  CHCompanyProfile,
+} from '@/lib/api';
 import { usePanelContext } from '../components/DashboardShell';
 import { AddClientPanel } from './components/AddClientPanel';
 import { ByStaffView } from './components/ByStaffView';
@@ -138,8 +151,10 @@ export default function ClientsPage() {
         return (
           <div className="w-full bg-white dark:bg-slate-800 h-full">
             <CompaniesHouseLookup
-              onImport={(company) => {
-                // Pre-fill add client form with CH data
+              onImport={(company: CHCompanySearchResult) => {
+                // TODO: Pre-fill add client form with CH data
+                // company.company_name, company.company_number, company.address_snippet
+                console.log('Import company:', company);
                 setActivePanel('add');
               }}
             />
@@ -216,11 +231,6 @@ export default function ClientsPage() {
                             <p className="text-xs text-gray-500 dark:text-gray-400 mt-1">
                               {client.contact_name} • {client.email}
                             </p>
-                            {client.company_number && (
-                              <p className="text-xs text-gray-400 dark:text-gray-500 mt-0.5">
-                                Co. No: {client.company_number}
-                              </p>
-                            )}
                           </div>
                         </div>
 
@@ -338,13 +348,81 @@ export default function ClientsPage() {
 }
 
 function ClientDetailPanel({ client, onClose }: { client: ClientWithRisk; onClose: () => void }) {
-  const [activeTab, setActiveTab] = useState<'details' | 'services' | 'documents' | 'activity'>('details');
+  // Tabs: Info, Notes (Officers, Filings, PSC need backend endpoints)
+  const [activeTab, setActiveTab] = useState<'info' | 'notes'>('info');
+  const [notes, setNotes] = useState<ClientNote[]>([]);
+  const [notesLoading, setNotesLoading] = useState(false);
+  const [newNote, setNewNote] = useState('');
+  const [editingNote, setEditingNote] = useState<{ id: string; text: string } | null>(null);
+  const [showAddNote, setShowAddNote] = useState(false);
 
-  const getStatusIcon = (client: ClientWithRisk) => {
-    if (client.riskLevel === 'high') return '🔴';
-    if (client.isQuiet) return '😶';
-    if (client.status === 'pending') return '🟡';
+  const getStatusIcon = (c: ClientWithRisk) => {
+    if (c.riskLevel === 'high') return '🔴';
+    if (c.isQuiet) return '😶';
+    if (c.status === 'pending') return '🟡';
     return '🟢';
+  };
+
+  const fetchNotes = useCallback(async () => {
+    setNotesLoading(true);
+    try {
+      const data = await getClientNotes(client.id);
+      setNotes(data.notes || []);
+    } catch (err) {
+      console.error('Failed to fetch notes:', err);
+    } finally {
+      setNotesLoading(false);
+    }
+  }, [client.id]);
+
+  useEffect(() => {
+    if (activeTab === 'notes') {
+      fetchNotes();
+    }
+  }, [activeTab, fetchNotes]);
+
+  const handleAddNote = async () => {
+    if (!newNote.trim()) return;
+    try {
+      await createClientNote(client.id, newNote.trim());
+      setNewNote('');
+      setShowAddNote(false);
+      fetchNotes();
+    } catch (err) {
+      console.error('Failed to add note:', err);
+    }
+  };
+
+  const handleUpdateNote = async () => {
+    if (!editingNote || !editingNote.text.trim()) return;
+    try {
+      await updateClientNote(client.id, editingNote.id, editingNote.text.trim());
+      setEditingNote(null);
+      fetchNotes();
+    } catch (err) {
+      console.error('Failed to update note:', err);
+    }
+  };
+
+  const handleDeleteNote = async (noteId: string) => {
+    if (!confirm('Delete this note?')) return;
+    try {
+      await deleteClientNote(client.id, noteId);
+      fetchNotes();
+    } catch (err) {
+      console.error('Failed to delete note:', err);
+    }
+  };
+
+  const formatDate = (dateStr: string) => {
+    const date = new Date(dateStr);
+    const now = new Date();
+    const diffMs = now.getTime() - date.getTime();
+    const diffDays = Math.floor(diffMs / (1000 * 60 * 60 * 24));
+
+    if (diffDays === 0) return 'Today ' + date.toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit' });
+    if (diffDays === 1) return 'Yesterday ' + date.toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit' });
+    return date.toLocaleDateString('en-GB', { day: 'numeric', month: 'short', year: 'numeric' });
   };
 
   return (
@@ -358,26 +436,18 @@ function ClientDetailPanel({ client, onClose }: { client: ClientWithRisk; onClos
             <p className="text-sm text-gray-500 dark:text-gray-400">{client.contact_name}</p>
           </div>
         </div>
-        <div className="flex items-center gap-2">
-          <Link
-            href={`/dashboard/clients/${client.id}`}
-            className="px-3 py-1.5 text-sm font-medium text-blue-600 dark:text-blue-400 hover:bg-blue-100 dark:hover:bg-blue-900/30 rounded"
-          >
-            Full View →
-          </Link>
-          <button
-            onClick={onClose}
-            className="text-gray-400 hover:text-gray-600 dark:hover:text-gray-200"
-          >
-            ✕
-          </button>
-        </div>
+        <button
+          onClick={onClose}
+          className="text-gray-400 hover:text-gray-600 dark:hover:text-gray-200"
+        >
+          ✕
+        </button>
       </div>
 
-      {/* Tabs */}
+      {/* Tabs - Info, Notes (Officers/Filings/PSC need backend) */}
       <div className="border-b border-gray-200 dark:border-gray-700 px-4">
         <div className="flex gap-4">
-          {(['details', 'services', 'documents', 'activity'] as const).map((tab) => (
+          {(['info', 'notes'] as const).map((tab) => (
             <button
               key={tab}
               onClick={() => setActiveTab(tab)}
@@ -387,7 +457,7 @@ function ClientDetailPanel({ client, onClose }: { client: ClientWithRisk; onClos
                   : 'border-transparent text-gray-500 dark:text-gray-400'
               }`}
             >
-              {tab.charAt(0).toUpperCase() + tab.slice(1)}
+              {tab === 'notes' ? '📝 Notes' : 'Info'}
             </button>
           ))}
         </div>
@@ -395,7 +465,7 @@ function ClientDetailPanel({ client, onClose }: { client: ClientWithRisk; onClos
 
       {/* Tab Content */}
       <div className="flex-1 overflow-y-auto p-4">
-        {activeTab === 'details' && (
+        {activeTab === 'info' && (
           <div className="space-y-4">
             {/* Risk Alert */}
             {client.riskLevel && client.riskLevel !== 'none' && (
@@ -461,33 +531,125 @@ function ClientDetailPanel({ client, onClose }: { client: ClientWithRisk; onClos
                 📋 Add Service
               </button>
               <button className="p-3 text-sm font-medium text-gray-700 dark:text-gray-300 bg-gray-100 dark:bg-slate-700 rounded-lg hover:bg-gray-200 dark:hover:bg-slate-600">
-                🔔 Set Reminder
+                🔔 Chase
               </button>
             </div>
           </div>
         )}
 
-        {activeTab === 'services' && (
-          <div className="text-center py-8 text-gray-500 dark:text-gray-400">
-            <Link href={`/dashboard/clients/${client.id}`} className="text-blue-600 dark:text-blue-400 hover:underline">
-              View services in full page →
-            </Link>
-          </div>
-        )}
+        {activeTab === 'notes' && (
+          <div className="space-y-4">
+            {/* Add Note Header */}
+            <div className="flex items-center justify-between">
+              <h3 className="text-sm font-semibold text-gray-700 dark:text-gray-300">📝 Client Notes</h3>
+              <button
+                onClick={() => setShowAddNote(true)}
+                className="px-3 py-1.5 text-xs font-medium text-blue-600 dark:text-blue-400 bg-blue-50 dark:bg-blue-900/30 rounded hover:bg-blue-100 dark:hover:bg-blue-900/50"
+              >
+                + Add Note
+              </button>
+            </div>
 
-        {activeTab === 'documents' && (
-          <div className="text-center py-8 text-gray-500 dark:text-gray-400">
-            <Link href={`/dashboard/clients/${client.id}`} className="text-blue-600 dark:text-blue-400 hover:underline">
-              View documents in full page →
-            </Link>
-          </div>
-        )}
+            {/* Add Note Form */}
+            {showAddNote && (
+              <div className="p-3 bg-gray-50 dark:bg-slate-700 rounded-lg border border-gray-200 dark:border-gray-600">
+                <textarea
+                  value={newNote}
+                  onChange={(e) => setNewNote(e.target.value)}
+                  placeholder="Write a note..."
+                  rows={3}
+                  className="w-full px-3 py-2 text-sm border border-gray-300 dark:border-gray-600 rounded-lg bg-white dark:bg-slate-800 text-gray-900 dark:text-white resize-none"
+                />
+                <div className="flex justify-end gap-2 mt-2">
+                  <button
+                    onClick={() => { setShowAddNote(false); setNewNote(''); }}
+                    className="px-3 py-1.5 text-xs font-medium text-gray-600 dark:text-gray-400 hover:text-gray-800 dark:hover:text-gray-200"
+                  >
+                    Cancel
+                  </button>
+                  <button
+                    onClick={handleAddNote}
+                    disabled={!newNote.trim()}
+                    className="px-3 py-1.5 text-xs font-medium text-white bg-blue-600 rounded hover:bg-blue-700 disabled:opacity-50"
+                  >
+                    Save Note
+                  </button>
+                </div>
+              </div>
+            )}
 
-        {activeTab === 'activity' && (
-          <div className="text-center py-8 text-gray-500 dark:text-gray-400">
-            <Link href={`/dashboard/clients/${client.id}`} className="text-blue-600 dark:text-blue-400 hover:underline">
-              View activity in full page →
-            </Link>
+            {/* Notes List */}
+            {notesLoading ? (
+              <div className="text-center py-8">
+                <div className="animate-spin rounded-full h-6 w-6 border-b-2 border-blue-600 mx-auto"></div>
+              </div>
+            ) : notes.length === 0 ? (
+              <div className="text-center py-8 text-gray-500 dark:text-gray-400">
+                <p>No notes yet</p>
+                <p className="text-xs mt-1">Add a note to track important information</p>
+              </div>
+            ) : (
+              <div className="space-y-3">
+                {notes.map((note) => (
+                  <div
+                    key={note.id}
+                    className="p-3 bg-gray-50 dark:bg-slate-700 rounded-lg border border-gray-200 dark:border-gray-600"
+                  >
+                    {editingNote?.id === note.id ? (
+                      <div>
+                        <textarea
+                          value={editingNote.text}
+                          onChange={(e) => setEditingNote({ ...editingNote, text: e.target.value })}
+                          rows={3}
+                          className="w-full px-3 py-2 text-sm border border-gray-300 dark:border-gray-600 rounded-lg bg-white dark:bg-slate-800 text-gray-900 dark:text-white resize-none"
+                        />
+                        <div className="flex justify-end gap-2 mt-2">
+                          <button
+                            onClick={() => setEditingNote(null)}
+                            className="px-3 py-1.5 text-xs font-medium text-gray-600 dark:text-gray-400"
+                          >
+                            Cancel
+                          </button>
+                          <button
+                            onClick={handleUpdateNote}
+                            className="px-3 py-1.5 text-xs font-medium text-white bg-blue-600 rounded hover:bg-blue-700"
+                          >
+                            Save
+                          </button>
+                        </div>
+                      </div>
+                    ) : (
+                      <>
+                        <div className="flex items-start justify-between mb-2">
+                          <div className="text-xs text-gray-500 dark:text-gray-400">
+                            <span className="font-medium text-gray-700 dark:text-gray-300">{note.staff_name || 'Unknown'}</span>
+                            <span className="mx-1">•</span>
+                            <span>{formatDate(note.created_at)}</span>
+                          </div>
+                          <div className="flex gap-1">
+                            <button
+                              onClick={() => setEditingNote({ id: note.id, text: note.note })}
+                              className="p-1 text-gray-400 hover:text-gray-600 dark:hover:text-gray-200"
+                              title="Edit"
+                            >
+                              ✏️
+                            </button>
+                            <button
+                              onClick={() => handleDeleteNote(note.id)}
+                              className="p-1 text-gray-400 hover:text-red-500"
+                              title="Delete"
+                            >
+                              🗑️
+                            </button>
+                          </div>
+                        </div>
+                        <p className="text-sm text-gray-700 dark:text-gray-300 whitespace-pre-wrap">{note.note}</p>
+                      </>
+                    )}
+                  </div>
+                ))}
+              </div>
+            )}
           </div>
         )}
       </div>
@@ -495,34 +657,47 @@ function ClientDetailPanel({ client, onClose }: { client: ClientWithRisk; onClos
   );
 }
 
-function CompaniesHouseLookup({ onImport }: { onImport: (company: any) => void }) {
+function CompaniesHouseLookup({ onImport }: { onImport: (company: CHCompanySearchResult) => void }) {
   const [searchQuery, setSearchQuery] = useState('');
   const [searching, setSearching] = useState(false);
-  const [results, setResults] = useState<any[]>([]);
+  const [results, setResults] = useState<CHCompanySearchResult[]>([]);
+  const [error, setError] = useState<string | null>(null);
+  const [totalResults, setTotalResults] = useState(0);
+  const [selectedCompany, setSelectedCompany] = useState<CHCompanyProfile | null>(null);
+  const [loadingDetails, setLoadingDetails] = useState(false);
+  const [detailsError, setDetailsError] = useState<string | null>(null);
+
+  const handleViewDetails = async (companyNumber: string) => {
+    console.log('handleViewDetails called with:', companyNumber);
+    setLoadingDetails(true);
+    setDetailsError(null);
+    try {
+      console.log('Fetching company details...');
+      const details = await getCompanyFromCH(companyNumber);
+      console.log('Got company details:', details);
+      setSelectedCompany(details);
+    } catch (err) {
+      console.error('Error fetching company details:', err);
+      setDetailsError(err instanceof Error ? err.message : 'Failed to load company details');
+    } finally {
+      setLoadingDetails(false);
+    }
+  };
 
   const handleSearch = async () => {
     if (!searchQuery.trim()) return;
     setSearching(true);
-    // Simulate search - in production, this would call the Companies House API
-    setTimeout(() => {
-      setResults([
-        {
-          company_number: '12345678',
-          title: 'EXAMPLE COMPANY LTD',
-          company_status: 'active',
-          address_snippet: '123 Business Street, London, SW1A 1AA',
-          date_of_creation: '2020-01-15',
-        },
-        {
-          company_number: '87654321',
-          title: 'EXAMPLE TRADING LTD',
-          company_status: 'active',
-          address_snippet: '456 Commerce Road, Manchester, M1 2AB',
-          date_of_creation: '2019-06-20',
-        },
-      ]);
+    setError(null);
+    try {
+      const data = await searchCompaniesHouse(searchQuery.trim());
+      setResults(data.items || []);
+      setTotalResults(data.total_results || 0);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Search failed');
+      setResults([]);
+    } finally {
       setSearching(false);
-    }, 1000);
+    }
   };
 
   return (
@@ -560,56 +735,278 @@ function CompaniesHouseLookup({ onImport }: { onImport: (company: any) => void }
 
       {/* Results */}
       <div className="flex-1 overflow-y-auto p-4">
-        {results.length === 0 ? (
+        {error && (
+          <div className="mb-4 p-3 bg-red-50 dark:bg-red-900/30 rounded-lg text-red-700 dark:text-red-300 text-sm">
+            {error}
+          </div>
+        )}
+
+        {results.length === 0 && !error ? (
           <div className="text-center py-8">
             <span className="text-4xl">🏢</span>
             <p className="mt-2 text-gray-600 dark:text-gray-400">
-              Search for a company to see results
+              {searching ? 'Searching Companies House...' : 'Search for a company to see results'}
             </p>
           </div>
-        ) : (
-          <div className="space-y-3">
-            {results.map((company) => (
-              <div
-                key={company.company_number}
-                className="p-4 bg-gray-50 dark:bg-slate-700 rounded-lg border border-gray-200 dark:border-gray-600"
-              >
-                <div className="flex items-start justify-between">
-                  <div>
-                    <p className="text-sm font-medium text-gray-900 dark:text-white">
-                      {company.title}
-                    </p>
-                    <p className="text-xs text-gray-500 dark:text-gray-400 mt-1">
-                      {company.company_number} • Est. {company.date_of_creation}
-                    </p>
-                    <p className="text-xs text-gray-400 dark:text-gray-500 mt-1">
-                      {company.address_snippet}
-                    </p>
+        ) : results.length > 0 && (
+          <>
+            <p className="text-xs text-gray-500 dark:text-gray-400 mb-3">
+              Found {totalResults} result{totalResults !== 1 ? 's' : ''} • Showing {results.length}
+            </p>
+            <div className="space-y-3">
+              {results.map((company) => (
+                <div
+                  key={company.company_number}
+                  className="p-4 bg-gray-50 dark:bg-slate-700 rounded-lg border border-gray-200 dark:border-gray-600"
+                >
+                  <div className="flex items-start justify-between">
+                    <div>
+                      <p className="text-sm font-medium text-gray-900 dark:text-white">
+                        {company.company_name}
+                      </p>
+                      <p className="text-xs text-gray-500 dark:text-gray-400 mt-1">
+                        {company.company_number} • {company.company_type}{company.date_of_creation && ` • Est. ${company.date_of_creation}`}
+                      </p>
+                      {company.address_snippet && (
+                        <p className="text-xs text-gray-400 dark:text-gray-500 mt-1">
+                          {company.address_snippet}
+                        </p>
+                      )}
+                    </div>
+                    <span className={`px-2 py-0.5 text-xs font-medium rounded-full ${
+                      company.company_status === 'active'
+                        ? 'bg-green-100 dark:bg-green-900/30 text-green-700 dark:text-green-300'
+                        : company.company_status === 'dissolved'
+                        ? 'bg-red-100 dark:bg-red-900/30 text-red-700 dark:text-red-300'
+                        : 'bg-gray-100 dark:bg-gray-700 text-gray-700 dark:text-gray-300'
+                    }`}>
+                      {company.company_status}
+                    </span>
                   </div>
-                  <span className={`px-2 py-0.5 text-xs font-medium rounded-full ${
-                    company.company_status === 'active'
-                      ? 'bg-green-100 dark:bg-green-900/30 text-green-700 dark:text-green-300'
-                      : 'bg-gray-100 dark:bg-gray-700 text-gray-700 dark:text-gray-300'
-                  }`}>
-                    {company.company_status}
-                  </span>
+                  <div className="mt-3 flex gap-2">
+                    <button
+                      onClick={() => onImport(company)}
+                      className="px-3 py-1 text-xs font-medium text-blue-600 dark:text-blue-400 bg-blue-100 dark:bg-blue-900/30 rounded hover:bg-blue-200 dark:hover:bg-blue-900/50"
+                    >
+                      Import as Client
+                    </button>
+                    <button
+                      onClick={() => handleViewDetails(company.company_number)}
+                      disabled={loadingDetails}
+                      className="px-3 py-1 text-xs font-medium text-gray-600 dark:text-gray-400 bg-gray-100 dark:bg-slate-600 rounded hover:bg-gray-200 dark:hover:bg-slate-500 disabled:opacity-50"
+                    >
+                      {loadingDetails ? 'Loading...' : 'View Details'}
+                    </button>
+                  </div>
                 </div>
-                <div className="mt-3 flex gap-2">
-                  <button
-                    onClick={() => onImport(company)}
-                    className="px-3 py-1 text-xs font-medium text-blue-600 dark:text-blue-400 bg-blue-100 dark:bg-blue-900/30 rounded hover:bg-blue-200 dark:hover:bg-blue-900/50"
-                  >
-                    Import as Client
-                  </button>
-                  <button className="px-3 py-1 text-xs font-medium text-gray-600 dark:text-gray-400 bg-gray-100 dark:bg-slate-600 rounded hover:bg-gray-200 dark:hover:bg-slate-500">
-                    View Details
-                  </button>
-                </div>
-              </div>
-            ))}
-          </div>
+              ))}
+            </div>
+          </>
         )}
       </div>
+
+      {/* Company Details Modal */}
+      {(selectedCompany || loadingDetails || detailsError) && (
+        <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50">
+          <div className="bg-white dark:bg-slate-800 rounded-lg shadow-xl max-w-2xl w-full mx-4 max-h-[80vh] overflow-hidden flex flex-col">
+            {/* Modal Header */}
+            <div className="p-4 border-b border-gray-200 dark:border-gray-700 flex items-center justify-between">
+              <h3 className="text-lg font-semibold text-gray-900 dark:text-white flex items-center gap-2">
+                <span>🏢</span> Company Details
+              </h3>
+              <button
+                onClick={() => {
+                  setSelectedCompany(null);
+                  setDetailsError(null);
+                }}
+                className="text-gray-400 hover:text-gray-600 dark:hover:text-gray-200 text-xl"
+              >
+                ✕
+              </button>
+            </div>
+
+            {/* Modal Body */}
+            <div className="flex-1 overflow-y-auto p-4">
+              {loadingDetails && (
+                <div className="flex items-center justify-center py-12">
+                  <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-blue-600"></div>
+                </div>
+              )}
+
+              {detailsError && (
+                <div className="p-4 bg-red-50 dark:bg-red-900/30 rounded-lg text-red-700 dark:text-red-300">
+                  {detailsError}
+                </div>
+              )}
+
+              {selectedCompany && !loadingDetails && (
+                <div className="space-y-6">
+                  {/* Company Header */}
+                  <div className="flex items-start justify-between">
+                    <div>
+                      <h4 className="text-xl font-bold text-gray-900 dark:text-white">
+                        {selectedCompany.company_name}
+                      </h4>
+                      <p className="text-sm text-gray-500 dark:text-gray-400 mt-1">
+                        {selectedCompany.company_number} • {selectedCompany.company_type}
+                      </p>
+                    </div>
+                    <span className={`px-3 py-1 text-sm font-medium rounded-full ${
+                      selectedCompany.company_status === 'active'
+                        ? 'bg-green-100 dark:bg-green-900/30 text-green-700 dark:text-green-300'
+                        : selectedCompany.company_status === 'dissolved'
+                        ? 'bg-red-100 dark:bg-red-900/30 text-red-700 dark:text-red-300'
+                        : 'bg-gray-100 dark:bg-gray-700 text-gray-700 dark:text-gray-300'
+                    }`}>
+                      {selectedCompany.company_status}
+                    </span>
+                  </div>
+
+                  {/* Basic Info */}
+                  <div className="bg-gray-50 dark:bg-slate-700 rounded-lg p-4">
+                    <h5 className="text-sm font-semibold text-gray-700 dark:text-gray-300 mb-3">Basic Information</h5>
+                    <div className="grid grid-cols-2 gap-4 text-sm">
+                      <div>
+                        <span className="text-gray-500 dark:text-gray-400">Incorporated:</span>
+                        <p className="font-medium text-gray-900 dark:text-white">{selectedCompany.date_of_creation || '-'}</p>
+                      </div>
+                      <div>
+                        <span className="text-gray-500 dark:text-gray-400">Company Type:</span>
+                        <p className="font-medium text-gray-900 dark:text-white">{selectedCompany.company_type || '-'}</p>
+                      </div>
+                    </div>
+                  </div>
+
+                  {/* Registered Address */}
+                  {selectedCompany.registered_office_address && (
+                    <div className="bg-gray-50 dark:bg-slate-700 rounded-lg p-4">
+                      <h5 className="text-sm font-semibold text-gray-700 dark:text-gray-300 mb-3">Registered Office Address</h5>
+                      <p className="text-sm text-gray-900 dark:text-white">
+                        {[
+                          selectedCompany.registered_office_address.address_line_1,
+                          selectedCompany.registered_office_address.address_line_2,
+                          selectedCompany.registered_office_address.locality,
+                          selectedCompany.registered_office_address.region,
+                          selectedCompany.registered_office_address.postal_code,
+                          selectedCompany.registered_office_address.country,
+                        ].filter(Boolean).join(', ')}
+                      </p>
+                    </div>
+                  )}
+
+                  {/* SIC Codes */}
+                  {selectedCompany.sic_codes && selectedCompany.sic_codes.length > 0 && (
+                    <div className="bg-gray-50 dark:bg-slate-700 rounded-lg p-4">
+                      <h5 className="text-sm font-semibold text-gray-700 dark:text-gray-300 mb-3">SIC Codes (Nature of Business)</h5>
+                      <div className="flex flex-wrap gap-2">
+                        {selectedCompany.sic_codes.map((code) => (
+                          <span key={code} className="px-2 py-1 bg-blue-100 dark:bg-blue-900/30 text-blue-700 dark:text-blue-300 text-xs rounded">
+                            {code}
+                          </span>
+                        ))}
+                      </div>
+                    </div>
+                  )}
+
+                  {/* Accounts Information */}
+                  {selectedCompany.accounts && (
+                    <div className="bg-gray-50 dark:bg-slate-700 rounded-lg p-4">
+                      <h5 className="text-sm font-semibold text-gray-700 dark:text-gray-300 mb-3">Accounts</h5>
+                      <div className="grid grid-cols-2 gap-4 text-sm">
+                        {selectedCompany.accounts.accounting_reference_date && (
+                          <div>
+                            <span className="text-gray-500 dark:text-gray-400">Year End:</span>
+                            <p className="font-medium text-gray-900 dark:text-white">
+                              {selectedCompany.accounts.accounting_reference_date.day}/{selectedCompany.accounts.accounting_reference_date.month}
+                            </p>
+                          </div>
+                        )}
+                        {selectedCompany.accounts.last_accounts?.made_up_to && (
+                          <div>
+                            <span className="text-gray-500 dark:text-gray-400">Last Accounts:</span>
+                            <p className="font-medium text-gray-900 dark:text-white">{selectedCompany.accounts.last_accounts.made_up_to}</p>
+                          </div>
+                        )}
+                        {selectedCompany.accounts.next_due && (
+                          <div>
+                            <span className="text-gray-500 dark:text-gray-400">Next Due:</span>
+                            <p className="font-medium text-gray-900 dark:text-white">{selectedCompany.accounts.next_due}</p>
+                          </div>
+                        )}
+                        {selectedCompany.accounts.last_accounts?.type && (
+                          <div>
+                            <span className="text-gray-500 dark:text-gray-400">Account Type:</span>
+                            <p className="font-medium text-gray-900 dark:text-white">{selectedCompany.accounts.last_accounts.type}</p>
+                          </div>
+                        )}
+                      </div>
+                    </div>
+                  )}
+
+                  {/* Confirmation Statement */}
+                  {selectedCompany.confirmation_statement && (
+                    <div className="bg-gray-50 dark:bg-slate-700 rounded-lg p-4">
+                      <h5 className="text-sm font-semibold text-gray-700 dark:text-gray-300 mb-3">Confirmation Statement</h5>
+                      <div className="grid grid-cols-2 gap-4 text-sm">
+                        {selectedCompany.confirmation_statement.last_made_up_to && (
+                          <div>
+                            <span className="text-gray-500 dark:text-gray-400">Last Filed:</span>
+                            <p className="font-medium text-gray-900 dark:text-white">{selectedCompany.confirmation_statement.last_made_up_to}</p>
+                          </div>
+                        )}
+                        {selectedCompany.confirmation_statement.next_due && (
+                          <div>
+                            <span className="text-gray-500 dark:text-gray-400">Next Due:</span>
+                            <p className="font-medium text-gray-900 dark:text-white">{selectedCompany.confirmation_statement.next_due}</p>
+                          </div>
+                        )}
+                      </div>
+                    </div>
+                  )}
+                </div>
+              )}
+            </div>
+
+            {/* Modal Footer */}
+            {selectedCompany && (
+              <div className="p-4 border-t border-gray-200 dark:border-gray-700 flex justify-end gap-2">
+                <button
+                  onClick={() => {
+                    setSelectedCompany(null);
+                    setDetailsError(null);
+                  }}
+                  className="px-4 py-2 text-sm font-medium text-gray-600 dark:text-gray-400 hover:text-gray-800 dark:hover:text-gray-200"
+                >
+                  Close
+                </button>
+                <button
+                  onClick={() => {
+                    onImport({
+                      company_number: selectedCompany.company_number,
+                      company_name: selectedCompany.company_name,
+                      company_status: selectedCompany.company_status,
+                      company_type: selectedCompany.company_type,
+                      date_of_creation: selectedCompany.date_of_creation,
+                      registered_office_address: selectedCompany.registered_office_address,
+                      address_snippet: selectedCompany.registered_office_address
+                        ? [
+                            selectedCompany.registered_office_address.address_line_1,
+                            selectedCompany.registered_office_address.locality,
+                            selectedCompany.registered_office_address.postal_code,
+                          ].filter(Boolean).join(', ')
+                        : undefined,
+                    });
+                    setSelectedCompany(null);
+                  }}
+                  className="px-4 py-2 text-sm font-medium text-white bg-blue-600 rounded-lg hover:bg-blue-700"
+                >
+                  Import as Client
+                </button>
+              </div>
+            )}
+          </div>
+        </div>
+      )}
     </div>
   );
 }
