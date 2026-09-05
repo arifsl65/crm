@@ -10,3 +10,6 @@ export { ThemeProvider, useTheme } from './theme-provider';
 export { QRModal } from './qr-modal';
 export { NotificationBell } from './notification-bell';
 export { TodayPanel } from './TodayPanel';
+export { PendingReviewPanel } from './pending-review-panel';
+export { DocumentPreviewModal } from './document-preview-modal';
+export { RejectDocumentModal } from './reject-document-modal';

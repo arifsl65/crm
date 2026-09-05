@@ -1,8 +1,9 @@
 'use client';
 
-import { useEffect, useState } from 'react';
+import { useEffect, useState, useCallback } from 'react';
 import Link from 'next/link';
 import { getDashboardStats, getServices, DashboardStats, Service } from '@/lib/api';
+import { PendingReviewPanel } from '@/components/pending-review-panel';
 
 interface TodayPanelProps {
   onClose?: () => void;
@@ -25,6 +26,8 @@ export function TodayPanel({ onClose }: TodayPanelProps) {
   const [doFirstItems, setDoFirstItems] = useState<TaskItem[]>([]);
   const [laterTodayItems, setLaterTodayItems] = useState<TaskItem[]>([]);
   const [aiSuggestion, setAiSuggestion] = useState<string | null>(null);
+  const [showReviewPanel, setShowReviewPanel] = useState(false);
+  const [pendingDocsCount, setPendingDocsCount] = useState(0);
 
   useEffect(() => {
     async function fetchData() {
@@ -83,6 +86,7 @@ export function TodayPanel({ onClose }: TodayPanelProps) {
         });
 
         // Add pending documents to DO FIRST
+        setPendingDocsCount(dashboardData.documents_pending);
         if (dashboardData.documents_pending > 0) {
           doFirst.unshift({
             id: 'pending-docs',
@@ -90,7 +94,7 @@ export function TodayPanel({ onClose }: TodayPanelProps) {
             title: `Review ${dashboardData.documents_pending} pending document${dashboardData.documents_pending > 1 ? 's' : ''}`,
             subtitle: 'Awaiting your review',
             actionLabel: 'Review →',
-            actionHref: '/dashboard/documents?status=pending',
+            onAction: () => setShowReviewPanel(true),
           });
         }
 
@@ -120,10 +124,36 @@ export function TodayPanel({ onClose }: TodayPanelProps) {
   const handleAiAction = () => {
     if (stats?.services_overdue && stats.services_overdue > 0) {
       window.location.href = '/dashboard/services?status=overdue';
-    } else if (stats?.documents_pending && stats.documents_pending > 0) {
-      window.location.href = '/dashboard/documents?status=pending';
+    } else if (pendingDocsCount > 0) {
+      setShowReviewPanel(true);
     }
   };
+
+  // Update pending docs count and UI when documents are reviewed
+  const handlePendingCountChange = useCallback((count: number) => {
+    setPendingDocsCount(count);
+    // Update the doFirst items to reflect new count
+    setDoFirstItems(prev => {
+      const filtered = prev.filter(item => item.id !== 'pending-docs');
+      if (count > 0) {
+        return [{
+          id: 'pending-docs',
+          icon: '📄',
+          title: `Review ${count} pending document${count > 1 ? 's' : ''}`,
+          subtitle: 'Awaiting your review',
+          actionLabel: 'Review →',
+          onAction: () => setShowReviewPanel(true),
+        }, ...filtered];
+      }
+      return filtered;
+    });
+    // Update AI suggestion if needed
+    if (count > 0 && (!stats?.services_overdue || stats.services_overdue === 0)) {
+      setAiSuggestion(`Review ${count} pending documents`);
+    } else if (count === 0 && (!stats?.services_overdue || stats.services_overdue === 0)) {
+      setAiSuggestion(null);
+    }
+  }, [stats?.services_overdue]);
 
   if (loading) {
     return (
@@ -190,7 +220,14 @@ export function TodayPanel({ onClose }: TodayPanelProps) {
                       </p>
                     </div>
                   </div>
-                  {item.actionHref && (
+                  {item.onAction ? (
+                    <button
+                      onClick={item.onAction}
+                      className="px-3 py-1.5 text-xs font-medium text-blue-600 dark:text-blue-400 hover:bg-blue-100 dark:hover:bg-blue-900/30 rounded whitespace-nowrap"
+                    >
+                      {item.actionLabel}
+                    </button>
+                  ) : item.actionHref && (
                     <Link
                       href={item.actionHref}
                       className="px-3 py-1.5 text-xs font-medium text-blue-600 dark:text-blue-400 hover:bg-blue-100 dark:hover:bg-blue-900/30 rounded whitespace-nowrap"
@@ -256,6 +293,13 @@ export function TodayPanel({ onClose }: TodayPanelProps) {
           )}
         </div>
       </div>
+
+      {/* Pending Review Panel */}
+      <PendingReviewPanel
+        isOpen={showReviewPanel}
+        onClose={() => setShowReviewPanel(false)}
+        onCountChange={handlePendingCountChange}
+      />
     </div>
   );
 }
