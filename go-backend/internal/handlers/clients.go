@@ -1,6 +1,7 @@
 package handlers
 
 import (
+	"encoding/json"
 	"errors"
 	"net/http"
 	"strconv"
@@ -1368,4 +1369,219 @@ func (h *ClientHandler) BulkReassign(c *gin.Context) {
 	}
 
 	c.JSON(http.StatusOK, response)
+}
+
+// ============================================================================
+// Directors & PSC Endpoints
+// ============================================================================
+
+// Director represents a company director/officer
+type Director struct {
+	ID            uuid.UUID  `json:"id"`
+	TenantID      uuid.UUID  `json:"tenant_id"`
+	ClientID      uuid.UUID  `json:"client_id"`
+	Name          string     `json:"name"`
+	Role          string     `json:"role"`
+	AppointedDate *string    `json:"appointed_date,omitempty"`
+	ResignedDate  *string    `json:"resigned_date,omitempty"`
+	Nationality   *string    `json:"nationality,omitempty"`
+	DobMonth      *int       `json:"dob_month,omitempty"`
+	DobYear       *int       `json:"dob_year,omitempty"`
+	IsActive      bool       `json:"is_active"`
+	CreatedAt     time.Time  `json:"created_at"`
+}
+
+// GetDirectors returns directors for a client
+// GET /api/v1/clients/:id/directors
+func (h *ClientHandler) GetDirectors(c *gin.Context) {
+	clientID, err := uuid.Parse(c.Param("id"))
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid_client_id"})
+		return
+	}
+
+	tenantID, _ := middleware.GetTenantID(c)
+
+	tenantDB, ok := middleware.GetTenantDB(c)
+	if !ok {
+		log.Error().Msg("TenantDB not found in context")
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "internal_error"})
+		return
+	}
+
+	// Filter by active status (default: all)
+	activeOnly := c.Query("active") == "true"
+
+	var directors []Director
+	query := `
+		SELECT id, tenant_id, client_id, name, role, appointed_date, resigned_date,
+		       nationality, dob_month, dob_year, is_active, created_at
+		FROM directors
+		WHERE client_id = $1 AND tenant_id = $2
+	`
+	args := []interface{}{clientID, tenantID}
+
+	if activeOnly {
+		query += " AND is_active = true"
+	}
+
+	query += " ORDER BY is_active DESC, appointed_date DESC NULLS LAST"
+
+	err = tenantDB.Query(c, query, args, func(rows pgx.Rows) error {
+		var d Director
+		var appointedDate, resignedDate *time.Time
+		if err := rows.Scan(&d.ID, &d.TenantID, &d.ClientID, &d.Name, &d.Role,
+			&appointedDate, &resignedDate, &d.Nationality, &d.DobMonth, &d.DobYear,
+			&d.IsActive, &d.CreatedAt); err != nil {
+			return err
+		}
+		// Format dates as ISO strings
+		if appointedDate != nil {
+			formatted := appointedDate.Format("2006-01-02")
+			d.AppointedDate = &formatted
+		}
+		if resignedDate != nil {
+			formatted := resignedDate.Format("2006-01-02")
+			d.ResignedDate = &formatted
+		}
+		directors = append(directors, d)
+		return nil
+	})
+
+	if err != nil {
+		log.Error().Err(err).Str("client_id", clientID.String()).Msg("Failed to get directors")
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "internal_error"})
+		return
+	}
+
+	if directors == nil {
+		directors = []Director{}
+	}
+
+	// Count active vs resigned
+	activeCount := 0
+	resignedCount := 0
+	for _, d := range directors {
+		if d.IsActive {
+			activeCount++
+		} else {
+			resignedCount++
+		}
+	}
+
+	c.JSON(http.StatusOK, gin.H{
+		"directors":      directors,
+		"total":          len(directors),
+		"active_count":   activeCount,
+		"resigned_count": resignedCount,
+	})
+}
+
+// PSC represents a Person with Significant Control
+type PSC struct {
+	ID                  uuid.UUID `json:"id"`
+	TenantID            uuid.UUID `json:"tenant_id"`
+	ClientID            uuid.UUID `json:"client_id"`
+	Name                string    `json:"name"`
+	OwnershipPercentage *string   `json:"ownership_percentage,omitempty"`
+	VotingRights        *string   `json:"voting_rights,omitempty"`
+	NotifiedDate        *string   `json:"notified_date,omitempty"`
+	CeasedDate          *string   `json:"ceased_date,omitempty"`
+	NatureOfControl     []string  `json:"nature_of_control,omitempty"`
+	IsActive            bool      `json:"is_active"`
+	CreatedAt           time.Time `json:"created_at"`
+}
+
+// GetPSC returns Persons with Significant Control for a client
+// GET /api/v1/clients/:id/psc
+func (h *ClientHandler) GetPSC(c *gin.Context) {
+	clientID, err := uuid.Parse(c.Param("id"))
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid_client_id"})
+		return
+	}
+
+	tenantID, _ := middleware.GetTenantID(c)
+
+	tenantDB, ok := middleware.GetTenantDB(c)
+	if !ok {
+		log.Error().Msg("TenantDB not found in context")
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "internal_error"})
+		return
+	}
+
+	// Filter by active status (default: all)
+	activeOnly := c.Query("active") == "true"
+
+	var pscList []PSC
+	query := `
+		SELECT id, tenant_id, client_id, name, ownership_percentage, voting_rights,
+		       notified_date, ceased_date, nature_of_control, is_active, created_at
+		FROM psc
+		WHERE client_id = $1 AND tenant_id = $2
+	`
+	args := []interface{}{clientID, tenantID}
+
+	if activeOnly {
+		query += " AND is_active = true"
+	}
+
+	query += " ORDER BY is_active DESC, notified_date DESC NULLS LAST"
+
+	err = tenantDB.Query(c, query, args, func(rows pgx.Rows) error {
+		var p PSC
+		var notifiedDate, ceasedDate *time.Time
+		var natureOfControlJSON []byte
+		if err := rows.Scan(&p.ID, &p.TenantID, &p.ClientID, &p.Name,
+			&p.OwnershipPercentage, &p.VotingRights, &notifiedDate, &ceasedDate,
+			&natureOfControlJSON, &p.IsActive, &p.CreatedAt); err != nil {
+			return err
+		}
+		// Format dates as ISO strings
+		if notifiedDate != nil {
+			formatted := notifiedDate.Format("2006-01-02")
+			p.NotifiedDate = &formatted
+		}
+		if ceasedDate != nil {
+			formatted := ceasedDate.Format("2006-01-02")
+			p.CeasedDate = &formatted
+		}
+		// Parse JSONB nature_of_control
+		if len(natureOfControlJSON) > 0 {
+			var natures []string
+			if err := json.Unmarshal(natureOfControlJSON, &natures); err == nil {
+				p.NatureOfControl = natures
+			}
+		}
+		pscList = append(pscList, p)
+		return nil
+	})
+
+	if err != nil {
+		log.Error().Err(err).Str("client_id", clientID.String()).Msg("Failed to get PSC")
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "internal_error"})
+		return
+	}
+
+	if pscList == nil {
+		pscList = []PSC{}
+	}
+
+	// Count active vs ceased
+	activeCount := 0
+	ceasedCount := 0
+	for _, p := range pscList {
+		if p.IsActive {
+			activeCount++
+		} else {
+			ceasedCount++
+		}
+	}
+
+	c.JSON(http.StatusOK, gin.H{
+		"psc":           pscList,
+		"total":         len(pscList),
+		"active_count":  activeCount,
+		"ceased_count":  ceasedCount,
+	})
 }

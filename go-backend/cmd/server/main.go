@@ -457,6 +457,8 @@ func setupRouter(app *Application) *gin.Engine {
 			clients.GET("/:id/documents", middleware.ValidateUUID("id"), h.Client.GetDocuments)
 			clients.GET("/:id/services", middleware.ValidateUUID("id"), h.Client.GetServices)
 			clients.GET("/:id/emails", middleware.ValidateUUID("id"), h.Client.GetEmails)
+			clients.GET("/:id/directors", middleware.ValidateUUID("id"), h.Client.GetDirectors)
+			clients.GET("/:id/psc", middleware.ValidateUUID("id"), h.Client.GetPSC)
 			clients.POST("/:id/assign", middleware.ValidateUUID("id"), middleware.RequireRole("super_admin", "tenant_admin"), h.Client.AssignStaff)
 			// Client Notes
 			clients.GET("/:id/notes", middleware.ValidateUUID("id"), h.Client.ListNotes)
@@ -624,6 +626,9 @@ func setupRouter(app *Application) *gin.Engine {
 		{
 			chRoutes.GET("/search", h.CompaniesHouse.Search)
 			chRoutes.GET("/company/:number", h.CompaniesHouse.GetCompany)
+			chRoutes.GET("/company/:number/filings", h.CompaniesHouse.GetFilings)
+			chRoutes.GET("/company/:number/officers", h.CompaniesHouse.GetOfficers)
+			chRoutes.GET("/company/:number/psc", h.CompaniesHouse.GetPSC)
 			chRoutes.POST("/sync/:clientId", middleware.ValidateUUID("clientId"), h.CompaniesHouse.SyncClient)
 			chRoutes.GET("/status", h.CompaniesHouse.Status)
 		}

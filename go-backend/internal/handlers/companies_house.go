@@ -7,6 +7,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -955,4 +956,336 @@ func (h *CompaniesHouseHandler) Status(c *gin.Context) {
 		"circuit_breaker": stateStr,
 		"api_configured":  h.cfg.APIKey != "",
 	})
+}
+
+// ============================================================================
+// Companies House Filing History API Types
+// ============================================================================
+
+// CHFilingsResponse represents the Companies House filing history API response.
+type CHFilingsResponse struct {
+	Items            []CHFiling `json:"items"`
+	TotalCount       int        `json:"total_count"`
+	StartIndex       int        `json:"start_index"`
+	ItemsPerPage     int        `json:"items_per_page"`
+	FilingHistoryStatus string  `json:"filing_history_status,omitempty"`
+}
+
+// CHFiling represents a single filing from Companies House.
+type CHFiling struct {
+	TransactionID   string            `json:"transaction_id"`
+	Type            string            `json:"type"`
+	Description     string            `json:"description"`
+	Date            string            `json:"date"`
+	Category        string            `json:"category"`
+	Subcategory     string            `json:"subcategory,omitempty"`
+	ActionDate      string            `json:"action_date,omitempty"`
+	Pages           int               `json:"pages,omitempty"`
+	DescriptionValues map[string]interface{} `json:"description_values,omitempty"`
+	Links           *CHFilingLinks    `json:"links,omitempty"`
+}
+
+// CHFilingLinks contains links for a filing document.
+type CHFilingLinks struct {
+	Self         string `json:"self,omitempty"`
+	DocumentMeta string `json:"document_metadata,omitempty"`
+}
+
+// GetFilings retrieves filing history for a company from Companies House.
+// GET /api/v1/ch/company/:number/filings
+func (h *CompaniesHouseHandler) GetFilings(c *gin.Context) {
+	companyNumber := c.Param("number")
+	if companyNumber == "" {
+		c.JSON(http.StatusBadRequest, gin.H{
+			"error":   "missing_company_number",
+			"message": "Company number is required",
+		})
+		return
+	}
+
+	// Check circuit breaker
+	if !h.circuit.Allow() {
+		log.Warn().Msg("Companies House circuit breaker is open")
+		c.JSON(http.StatusServiceUnavailable, gin.H{
+			"error":   "service_unavailable",
+			"message": "Companies House API is temporarily unavailable",
+		})
+		return
+	}
+
+	// Parse pagination parameters
+	startIndex := 0
+	if s := c.Query("start_index"); s != "" {
+		if i, err := strconv.Atoi(s); err == nil && i >= 0 {
+			startIndex = i
+		}
+	}
+	itemsPerPage := 25 // CH default
+	if s := c.Query("items_per_page"); s != "" {
+		if i, err := strconv.Atoi(s); err == nil && i > 0 && i <= 100 {
+			itemsPerPage = i
+		}
+	}
+
+	// Category filter (optional)
+	category := c.Query("category")
+
+	// Check cache first
+	cacheKey := fmt.Sprintf("ch:filings:%s:%d:%d:%s", companyNumber, startIndex, itemsPerPage, category)
+	cached, err := h.redis.CacheGet(c.Request.Context(), cacheKey)
+	if err == nil && cached != "" {
+		var response CHFilingsResponse
+		if json.Unmarshal([]byte(cached), &response) == nil {
+			log.Debug().Str("company_number", companyNumber).Msg("Companies House filings cache hit")
+			c.JSON(http.StatusOK, response)
+			return
+		}
+	}
+
+	// Build API URL with query params
+	apiURL := fmt.Sprintf("%s/company/%s/filing-history?start_index=%d&items_per_page=%d",
+		h.cfg.BaseURL, companyNumber, startIndex, itemsPerPage)
+	if category != "" {
+		apiURL += "&category=" + url.QueryEscape(category)
+	}
+
+	// Make API request
+	results, err := h.makeRequest(c.Request.Context(), apiURL)
+	if err != nil {
+		h.circuit.RecordFailure()
+		log.Error().Err(err).Str("company_number", companyNumber).Msg("Companies House get filings failed")
+
+		// Handle 404 specifically
+		if err.Error() == "not_found" {
+			c.JSON(http.StatusNotFound, gin.H{
+				"error":   "not_found",
+				"message": "Company not found or no filing history available",
+			})
+			return
+		}
+
+		c.JSON(http.StatusBadGateway, gin.H{
+			"error":   "api_error",
+			"message": "Failed to fetch filing history",
+		})
+		return
+	}
+
+	h.circuit.RecordSuccess()
+
+	var response CHFilingsResponse
+	if err := json.Unmarshal(results, &response); err != nil {
+		log.Error().Err(err).Msg("Failed to parse Companies House filings response")
+		c.JSON(http.StatusInternalServerError, gin.H{
+			"error":   "parse_error",
+			"message": "Failed to parse filing history",
+		})
+		return
+	}
+
+	// Cache the results (shorter TTL for filings - 5 minutes)
+	if data, err := json.Marshal(response); err == nil {
+		cacheTTL := 5 * time.Minute
+		if err := h.redis.CacheSet(c.Request.Context(), cacheKey, string(data), cacheTTL); err != nil {
+			log.Warn().Err(err).Msg("Failed to cache Companies House filings")
+		}
+	}
+
+	log.Info().
+		Str("company_number", companyNumber).
+		Int("total", response.TotalCount).
+		Int("returned", len(response.Items)).
+		Msg("Companies House filings lookup completed")
+
+	c.JSON(http.StatusOK, response)
+}
+
+// GetOfficers retrieves officers for a company directly from Companies House.
+// GET /api/v1/ch/company/:number/officers
+func (h *CompaniesHouseHandler) GetOfficers(c *gin.Context) {
+	companyNumber := c.Param("number")
+	if companyNumber == "" {
+		c.JSON(http.StatusBadRequest, gin.H{
+			"error":   "missing_company_number",
+			"message": "Company number is required",
+		})
+		return
+	}
+
+	// Check circuit breaker
+	if !h.circuit.Allow() {
+		log.Warn().Msg("Companies House circuit breaker is open")
+		c.JSON(http.StatusServiceUnavailable, gin.H{
+			"error":   "service_unavailable",
+			"message": "Companies House API is temporarily unavailable",
+		})
+		return
+	}
+
+	// Parse pagination parameters
+	startIndex := 0
+	if s := c.Query("start_index"); s != "" {
+		if i, err := strconv.Atoi(s); err == nil && i >= 0 {
+			startIndex = i
+		}
+	}
+
+	// Check cache first
+	cacheKey := fmt.Sprintf("ch:officers:%s:%d", companyNumber, startIndex)
+	cached, err := h.redis.CacheGet(c.Request.Context(), cacheKey)
+	if err == nil && cached != "" {
+		var response CHOfficersResponse
+		if json.Unmarshal([]byte(cached), &response) == nil {
+			log.Debug().Str("company_number", companyNumber).Msg("Companies House officers cache hit")
+			c.JSON(http.StatusOK, response)
+			return
+		}
+	}
+
+	// Build API URL
+	apiURL := fmt.Sprintf("%s/company/%s/officers?start_index=%d", h.cfg.BaseURL, companyNumber, startIndex)
+
+	// Make API request
+	results, err := h.makeRequest(c.Request.Context(), apiURL)
+	if err != nil {
+		h.circuit.RecordFailure()
+		log.Error().Err(err).Str("company_number", companyNumber).Msg("Companies House get officers failed")
+
+		if err.Error() == "not_found" {
+			c.JSON(http.StatusNotFound, gin.H{
+				"error":   "not_found",
+				"message": "Company not found",
+			})
+			return
+		}
+
+		c.JSON(http.StatusBadGateway, gin.H{
+			"error":   "api_error",
+			"message": "Failed to fetch officers",
+		})
+		return
+	}
+
+	h.circuit.RecordSuccess()
+
+	var response CHOfficersResponse
+	if err := json.Unmarshal(results, &response); err != nil {
+		log.Error().Err(err).Msg("Failed to parse Companies House officers response")
+		c.JSON(http.StatusInternalServerError, gin.H{
+			"error":   "parse_error",
+			"message": "Failed to parse officers data",
+		})
+		return
+	}
+
+	// Cache the results
+	if data, err := json.Marshal(response); err == nil {
+		if err := h.redis.CacheSet(c.Request.Context(), cacheKey, string(data), h.cfg.CacheTTL); err != nil {
+			log.Warn().Err(err).Msg("Failed to cache Companies House officers")
+		}
+	}
+
+	log.Info().
+		Str("company_number", companyNumber).
+		Int("total", response.TotalResults).
+		Int("active", response.ActiveCount).
+		Msg("Companies House officers lookup completed")
+
+	c.JSON(http.StatusOK, response)
+}
+
+// GetPSC retrieves Persons with Significant Control for a company directly from Companies House.
+// GET /api/v1/ch/company/:number/psc
+func (h *CompaniesHouseHandler) GetPSC(c *gin.Context) {
+	companyNumber := c.Param("number")
+	if companyNumber == "" {
+		c.JSON(http.StatusBadRequest, gin.H{
+			"error":   "missing_company_number",
+			"message": "Company number is required",
+		})
+		return
+	}
+
+	// Check circuit breaker
+	if !h.circuit.Allow() {
+		log.Warn().Msg("Companies House circuit breaker is open")
+		c.JSON(http.StatusServiceUnavailable, gin.H{
+			"error":   "service_unavailable",
+			"message": "Companies House API is temporarily unavailable",
+		})
+		return
+	}
+
+	// Parse pagination parameters
+	startIndex := 0
+	if s := c.Query("start_index"); s != "" {
+		if i, err := strconv.Atoi(s); err == nil && i >= 0 {
+			startIndex = i
+		}
+	}
+
+	// Check cache first
+	cacheKey := fmt.Sprintf("ch:psc:%s:%d", companyNumber, startIndex)
+	cached, err := h.redis.CacheGet(c.Request.Context(), cacheKey)
+	if err == nil && cached != "" {
+		var response CHPSCResponse
+		if json.Unmarshal([]byte(cached), &response) == nil {
+			log.Debug().Str("company_number", companyNumber).Msg("Companies House PSC cache hit")
+			c.JSON(http.StatusOK, response)
+			return
+		}
+	}
+
+	// Build API URL
+	apiURL := fmt.Sprintf("%s/company/%s/persons-with-significant-control?start_index=%d",
+		h.cfg.BaseURL, companyNumber, startIndex)
+
+	// Make API request
+	results, err := h.makeRequest(c.Request.Context(), apiURL)
+	if err != nil {
+		h.circuit.RecordFailure()
+		log.Error().Err(err).Str("company_number", companyNumber).Msg("Companies House get PSC failed")
+
+		if err.Error() == "not_found" {
+			// PSC endpoint may return 404 for companies without PSC
+			c.JSON(http.StatusOK, CHPSCResponse{
+				Items:        []CHPSC{},
+				TotalResults: 0,
+			})
+			return
+		}
+
+		c.JSON(http.StatusBadGateway, gin.H{
+			"error":   "api_error",
+			"message": "Failed to fetch PSC data",
+		})
+		return
+	}
+
+	h.circuit.RecordSuccess()
+
+	var response CHPSCResponse
+	if err := json.Unmarshal(results, &response); err != nil {
+		log.Error().Err(err).Msg("Failed to parse Companies House PSC response")
+		c.JSON(http.StatusInternalServerError, gin.H{
+			"error":   "parse_error",
+			"message": "Failed to parse PSC data",
+		})
+		return
+	}
+
+	// Cache the results
+	if data, err := json.Marshal(response); err == nil {
+		if err := h.redis.CacheSet(c.Request.Context(), cacheKey, string(data), h.cfg.CacheTTL); err != nil {
+			log.Warn().Err(err).Msg("Failed to cache Companies House PSC")
+		}
+	}
+
+	log.Info().
+		Str("company_number", companyNumber).
+		Int("total", response.TotalResults).
+		Int("active", response.ActiveCount).
+		Msg("Companies House PSC lookup completed")
+
+	c.JSON(http.StatusOK, response)
 }
