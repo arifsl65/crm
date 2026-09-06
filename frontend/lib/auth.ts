@@ -192,8 +192,10 @@ export async function validateToken(): Promise<User | null> {
  * This helps pre-fill tenant_domain on multi-tenant deployments.
  *
  * Examples:
- * - acme.crm.example.com → acme.crm.example.com
- * - crm.example.com → null (main app, no tenant subdomain)
+ * - acme.crm.irislondonshoes.com → acme.irislondonshoes.com (tenant subdomain)
+ * - crm.irislondonshoes.com → null (main SaaS app, not tenant-specific)
+ * - portal.clientcompany.com → clientcompany.com (custom domain with prefix)
+ * - clientcompany.com → clientcompany.com (true custom domain)
  * - localhost:3000 → null (development)
  */
 export function detectTenantDomain(): string | null {
@@ -208,8 +210,24 @@ export function detectTenantDomain(): string | null {
     return null;
   }
 
-  // Return the full hostname as the tenant domain
-  // The backend will match against tenants.domain or tenants.custom_domain
+  // Skip main SaaS app domains - these are not tenant-specific custom domains.
+  // This allows the backend to fall back to global email resolution.
+  const mainAppDomains = ['irislondonshoes.com', 'crm.irislondonshoes.com'];
+  if (mainAppDomains.includes(hostname)) {
+    return null;
+  }
+
+  // Common app prefixes that should be stripped to get the tenant domain
+  // (e.g., acme.crm.irislondonshoes.com -> acme.irislondonshoes.com)
+  const appPrefixes = ['crm.', 'app.', 'www.', 'portal.', 'dashboard.'];
+
+  for (const prefix of appPrefixes) {
+    if (hostname.startsWith(prefix)) {
+      return hostname.slice(prefix.length);
+    }
+  }
+
+  // Return the full hostname if no known prefix found (true custom domain)
   return hostname;
 }
 

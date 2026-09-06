@@ -452,6 +452,84 @@ export async function getCHStatus(): Promise<{ status: string; circuit_state: st
   return res.json();
 }
 
+// Directors (synced from Companies House)
+export interface Director {
+  id: string;
+  tenant_id: string;
+  client_id: string;
+  name: string;
+  role: string;
+  appointed_date?: string;
+  resigned_date?: string;
+  nationality?: string;
+  dob_month?: number;
+  dob_year?: number;
+  is_active: boolean;
+  created_at: string;
+}
+
+export async function getClientDirectors(clientId: string): Promise<{ directors: Director[] }> {
+  const res = await authFetch(`/api/v1/clients/${clientId}/directors`);
+  if (!res.ok) {
+    const error = await res.json();
+    throw new Error(error.message || 'Failed to fetch directors');
+  }
+  return res.json();
+}
+
+// PSC - Persons with Significant Control (synced from Companies House)
+export interface PSC {
+  id: string;
+  tenant_id: string;
+  client_id: string;
+  name: string;
+  ownership_percentage?: string;
+  notified_date?: string;
+  ceased_date?: string;
+  nature_of_control?: string[];
+  is_active: boolean;
+  created_at: string;
+}
+
+export async function getClientPSC(clientId: string): Promise<{ psc: PSC[] }> {
+  const res = await authFetch(`/api/v1/clients/${clientId}/psc`);
+  if (!res.ok) {
+    const error = await res.json();
+    throw new Error(error.message || 'Failed to fetch PSC');
+  }
+  return res.json();
+}
+
+// CH Filings (direct from Companies House API)
+export interface CHFiling {
+  transaction_id: string;
+  type: string;
+  description: string;
+  date: string;
+  category: string;
+  subcategory?: string;
+  action_date?: string;
+  pages?: number;
+}
+
+export async function getCHFilings(companyNumber: string, params?: {
+  start_index?: number;
+  items_per_page?: number;
+  category?: string;
+}): Promise<{ items: CHFiling[]; total_count: number; start_index: number; items_per_page: number }> {
+  const searchParams = new URLSearchParams();
+  if (params?.start_index) searchParams.set('start_index', String(params.start_index));
+  if (params?.items_per_page) searchParams.set('items_per_page', String(params.items_per_page));
+  if (params?.category) searchParams.set('category', params.category);
+
+  const res = await authFetch(`/api/v1/ch/company/${companyNumber}/filings?${searchParams}`);
+  if (!res.ok) {
+    const error = await res.json();
+    throw new Error(error.message || 'Failed to fetch filings');
+  }
+  return res.json();
+}
+
 // Services API
 export async function getServices(params?: {
   limit?: number;
@@ -1578,6 +1656,55 @@ export async function restoreUser(id: string): Promise<void> {
     method: 'POST',
   });
   if (!res.ok) throw new Error('Failed to restore user');
+}
+
+export async function reset2FA(id: string): Promise<void> {
+  const res = await authFetch(`/api/v1/users/${id}/2fa`, {
+    method: 'DELETE',
+  });
+  if (!res.ok) {
+    const error = await res.json();
+    throw new Error(error.message || 'Failed to reset 2FA');
+  }
+}
+
+export async function resendInvite(id: string): Promise<void> {
+  const res = await authFetch(`/api/v1/users/${id}/resend-invite`, {
+    method: 'POST',
+  });
+  if (!res.ok) {
+    const error = await res.json();
+    throw new Error(error.message || 'Failed to resend invite');
+  }
+}
+
+export async function getUserClients(id: string): Promise<{
+  clients: Array<{
+    id: string;
+    company_name: string;
+    contact_name?: string;
+    is_primary: boolean;
+    assigned_at: string;
+  }>;
+  count: number;
+}> {
+  const res = await authFetch(`/api/v1/users/${id}/clients`);
+  if (!res.ok) throw new Error('Failed to fetch user clients');
+  return res.json();
+}
+
+export async function getStaffWorkload(): Promise<{
+  workload: Array<{
+    user_id: string;
+    user_name: string;
+    client_count: number;
+    primary_count: number;
+  }>;
+  count: number;
+}> {
+  const res = await authFetch('/api/v1/users/workload');
+  if (!res.ok) throw new Error('Failed to fetch staff workload');
+  return res.json();
 }
 
 // E-Sign API
