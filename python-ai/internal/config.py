@@ -173,12 +173,17 @@ class Settings(BaseSettings):
     openai_api_key: str = ""
     openai_model: str = "gpt-4-turbo-preview"
 
-    # Groq AI (primary AI provider)
+    # Groq AI (primary AI provider - text only, no vision)
     groq_api_key: str = ""
-    groq_model: str = "openai/gpt-oss-120b"  # General-purpose large model for document analysis
-    groq_vision_model: str = "meta-llama/llama-4-scout-17b-16e-instruct"  # Vision model for OCR/image analysis
+    groq_model: str = "llama-3.3-70b-versatile"  # General-purpose large model for document analysis
     groq_max_tokens: int = 4096
     groq_temperature: float = 0.1  # Low for consistent document analysis
+
+    # OpenRouter AI (vision model provider - Groq deprecated vision models)
+    openrouter_api_key: str = ""
+    openrouter_base_url: str = "https://openrouter.ai/api/v1"
+    openrouter_vision_model: str = "minimax/minimax-m3:free"  # Free vision model for OCR
+    openrouter_max_tokens: int = 4096
 
     # Anthropic Claude (fallback AI provider)
     anthropic_api_key: str = ""

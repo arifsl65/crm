@@ -2,12 +2,14 @@
 AI Client for document processing.
 
 Provides AI-powered document analysis using Groq (primary) and Claude (fallback).
+OpenRouter is used for vision tasks (Groq deprecated vision models).
 """
 
 import base64
 import json
 from typing import Any, Dict, List, Optional
 
+import httpx
 import structlog
 from groq import Groq, AsyncGroq
 
@@ -23,13 +25,35 @@ logger = structlog.get_logger(__name__)
 
 
 class GroqClient:
-    """AI client for document processing tasks with Groq primary and Claude fallback."""
+    """AI client for document processing tasks with Groq primary and Claude fallback.
+
+    OpenRouter is used for vision tasks since Groq deprecated vision models.
+    """
 
     def __init__(self):
         """Initialize AI clients with settings."""
         self._client: Optional[AsyncGroq] = None
         self._sync_client: Optional[Groq] = None
         self._anthropic_client: Optional[anthropic.AsyncAnthropic] = None
+        self._openrouter_client: Optional[httpx.AsyncClient] = None
+
+    @property
+    def openrouter_client(self) -> httpx.AsyncClient:
+        """Get or create async OpenRouter client for vision tasks."""
+        if self._openrouter_client is None:
+            settings = get_settings()
+            if not settings.openrouter_api_key:
+                raise ValueError("OPENROUTER_API_KEY not configured")
+            self._openrouter_client = httpx.AsyncClient(
+                base_url=settings.openrouter_base_url,
+                headers={
+                    "Authorization": f"Bearer {settings.openrouter_api_key}",
+                    "HTTP-Referer": "https://crm.irislondonshoes.com",
+                    "X-Title": "Accountant CRM AI",
+                },
+                timeout=60.0,
+            )
+        return self._openrouter_client
 
     @property
     def client(self) -> AsyncGroq:
@@ -446,17 +470,22 @@ Output JSON format:
         ]
 
         try:
-            response = await self.client.chat.completions.create(
-                model=settings.groq_vision_model,
-                messages=[
-                    {"role": "system", "content": system_prompt},
-                    {"role": "user", "content": user_content},
-                ],
-                max_tokens=settings.groq_max_tokens,
-                temperature=0.1,  # Low temperature for accurate OCR
+            # Use OpenRouter for vision tasks (Groq deprecated vision models)
+            response = await self.openrouter_client.post(
+                "/chat/completions",
+                json={
+                    "model": settings.openrouter_vision_model,
+                    "messages": [
+                        {"role": "system", "content": system_prompt},
+                        {"role": "user", "content": user_content},
+                    ],
+                    "max_tokens": settings.openrouter_max_tokens,
+                    "temperature": 0.1,  # Low temperature for accurate OCR
+                },
             )
-
-            result_text = response.choices[0].message.content
+            response.raise_for_status()
+            response_data = response.json()
+            result_text = response_data["choices"][0]["message"]["content"]
 
             # Try to parse as JSON, fall back to plain text
             try:

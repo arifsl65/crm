@@ -55,9 +55,11 @@ FROM python:3.11-slim AS production
 WORKDIR /app
 
 # Install runtime dependencies only
+# poppler-utils required for PDF processing (pdf2image uses pdfinfo/pdftoppm)
 RUN apt-get update && apt-get install -y --no-install-recommends \
     curl \
     ca-certificates \
+    poppler-utils \
     && rm -rf /var/lib/apt/lists/* \
     && apt-get clean
 

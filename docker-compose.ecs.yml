@@ -106,8 +106,12 @@ services:
       - AI_CHAT_ENABLED=true
       - AI_FORMS_ENABLED=true
       - AI_CLASSIFICATION_ENABLED=true
-      # Groq AI
+      # Groq AI (text only - vision models deprecated)
       - GROQ_API_KEY=${GROQ_API_KEY}
+      - GROQ_MODEL=${GROQ_MODEL:-llama-3.3-70b-versatile}
+      # OpenRouter AI (vision model provider)
+      - OPENROUTER_API_KEY=${OPENROUTER_API_KEY}
+      - OPENROUTER_VISION_MODEL=${OPENROUTER_VISION_MODEL:-minimax/minimax-m3:free}
       # Alibaba Cloud OSS Storage
       - OSS_ENABLED=${OSS_ENABLED:-true}
       - ALIBABA_ACCESS_KEY_ID=${ALIBABA_ACCESS_KEY_ID}
