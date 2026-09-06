@@ -1,7 +1,7 @@
 'use client';
 
 import { useEffect, useState } from 'react';
-import { useParams } from 'next/navigation';
+import { useParams, usePathname } from 'next/navigation';
 import Link from 'next/link';
 import { useAuth } from '@/components/auth-guard';
 import {
@@ -28,7 +28,11 @@ type CHTab = 'info' | 'officers' | 'filings' | 'psc';
 export default function ClientDetail() {
   const { user } = useAuth();
   const params = useParams();
-  const clientId = params.id as string;
+  const pathname = usePathname();
+
+  // Extract client ID from pathname for static export compatibility
+  // useParams() returns 'placeholder' during static export, so we parse the URL instead
+  const clientId = pathname?.split('/').pop() || (params.id as string);
 
   const [client, setClient] = useState<Client | null>(null);
   const [services, setServices] = useState<Service[]>([]);
@@ -46,6 +50,9 @@ export default function ClientDetail() {
   const [chLoading, setChLoading] = useState(false);
 
   useEffect(() => {
+    // Skip fetch if clientId is the static placeholder (happens during hydration)
+    if (!clientId || clientId === 'placeholder') return;
+
     async function fetchData() {
       try {
         setLoading(true);
@@ -70,6 +77,8 @@ export default function ClientDetail() {
   // Load CH data when Companies House tab is selected
   useEffect(() => {
     async function fetchCHData() {
+      // Skip if placeholder or missing prerequisites
+      if (!clientId || clientId === 'placeholder') return;
       if (activeTab !== 'companies-house' || !client?.company_number) return;
 
       setChLoading(true);
