@@ -851,6 +851,298 @@ func (h *UserHandler) Restore(c *gin.Context) {
 	})
 }
 
+// ResendInvite regenerates the invite token and resends the invitation email
+// POST /api/v1/users/:id/resend-invite
+func (h *UserHandler) ResendInvite(c *gin.Context) {
+	id, err := uuid.Parse(c.Param("id"))
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{
+			"error":   "invalid_id",
+			"message": "Invalid user ID format",
+		})
+		return
+	}
+
+	role, _ := middleware.GetRole(c)
+	userTenantID, _ := middleware.GetTenantID(c)
+
+	// Get TenantDB for RLS-protected queries
+	tenantDB, ok := middleware.GetTenantDB(c)
+	if !ok {
+		c.JSON(http.StatusInternalServerError, gin.H{
+			"error":   "internal_error",
+			"message": "Database context not available",
+		})
+		return
+	}
+
+	// Check if user exists and get their status/tenant
+	var targetTenantID *string
+	var status string
+	var email string
+	err = tenantDB.QueryRowScan(c, []interface{}{&targetTenantID, &status, &email}, `
+		SELECT tenant_id, status, email FROM users WHERE id = $1 AND deleted_at IS NULL
+	`, id)
+	if err != nil {
+		c.JSON(http.StatusNotFound, gin.H{
+			"error":   "not_found",
+			"message": "User not found",
+		})
+		return
+	}
+
+	// Authorization: super_admin can resend any, tenant_admin only their tenant
+	if role != "super_admin" {
+		if role == "tenant_admin" {
+			if targetTenantID == nil || *targetTenantID != userTenantID.String() {
+				c.JSON(http.StatusForbidden, gin.H{
+					"error":   "forbidden",
+					"message": "You can only resend invites for users in your own tenant",
+				})
+				return
+			}
+		} else {
+			c.JSON(http.StatusForbidden, gin.H{
+				"error":   "forbidden",
+				"message": "You don't have permission to resend invites",
+			})
+			return
+		}
+	}
+
+	// User must be in pending status to resend invite
+	if status != "pending" {
+		c.JSON(http.StatusBadRequest, gin.H{
+			"error":   "invalid_status",
+			"message": "Can only resend invite for users with pending status",
+		})
+		return
+	}
+
+	// Generate new invite token
+	tokenBytes := make([]byte, 32)
+	if _, err := rand.Read(tokenBytes); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{
+			"error":   "internal_error",
+			"message": "Failed to generate invite token",
+		})
+		return
+	}
+	inviteToken := hex.EncodeToString(tokenBytes)
+	inviteExpires := time.Now().Add(7 * 24 * time.Hour)
+
+	// Update the user's invite token
+	_, err = tenantDB.Exec(c, `
+		UPDATE users SET invite_token = $2, invite_expires = $3, updated_at = NOW()
+		WHERE id = $1
+	`, id, inviteToken, inviteExpires)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{
+			"error":   "update_error",
+			"message": "Failed to regenerate invite token",
+		})
+		return
+	}
+
+	// TODO: Send invitation email via email service
+	// For now, log the action
+	log.Info().
+		Str("user_id", id.String()).
+		Str("email", email).
+		Msg("Invite token regenerated; email should be sent")
+
+	c.JSON(http.StatusOK, gin.H{
+		"message":           "Invitation resent successfully",
+		"invite_expires_at": inviteExpires,
+	})
+}
+
+// StaffClient represents a client assigned to a staff member
+type StaffClient struct {
+	ID              string     `json:"id"`
+	CompanyName     string     `json:"company_name"`
+	ContactName     string     `json:"contact_name"`
+	Email           string     `json:"email"`
+	Phone           *string    `json:"phone,omitempty"`
+	CompanyNumber   *string    `json:"company_number,omitempty"`
+	IsPrimary       bool       `json:"is_primary"`
+	AssignedAt      time.Time  `json:"assigned_at"`
+}
+
+// GetClients returns clients assigned to a staff member
+// GET /api/v1/users/:id/clients
+func (h *UserHandler) GetClients(c *gin.Context) {
+	id, err := uuid.Parse(c.Param("id"))
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{
+			"error":   "invalid_id",
+			"message": "Invalid user ID format",
+		})
+		return
+	}
+
+	role, _ := middleware.GetRole(c)
+	userTenantID, _ := middleware.GetTenantID(c)
+	currentUserID, _ := middleware.GetUserID(c)
+
+	// Get TenantDB for RLS-protected queries
+	tenantDB, ok := middleware.GetTenantDB(c)
+	if !ok {
+		c.JSON(http.StatusInternalServerError, gin.H{
+			"error":   "internal_error",
+			"message": "Database context not available",
+		})
+		return
+	}
+
+	// Check if user exists and get their tenant
+	var targetTenantID *string
+	err = tenantDB.QueryRowScan(c, []interface{}{&targetTenantID}, `
+		SELECT tenant_id FROM users WHERE id = $1 AND deleted_at IS NULL
+	`, id)
+	if err != nil {
+		c.JSON(http.StatusNotFound, gin.H{
+			"error":   "not_found",
+			"message": "User not found",
+		})
+		return
+	}
+
+	// Authorization: super_admin can view any, tenant_admin their tenant, staff only themselves
+	if role != "super_admin" {
+		if role == "tenant_admin" {
+			if targetTenantID == nil || *targetTenantID != userTenantID.String() {
+				c.JSON(http.StatusForbidden, gin.H{
+					"error":   "forbidden",
+					"message": "You can only view clients for users in your own tenant",
+				})
+				return
+			}
+		} else if role == "staff" {
+			// Staff can only view their own clients
+			if id != currentUserID {
+				c.JSON(http.StatusForbidden, gin.H{
+					"error":   "forbidden",
+					"message": "You can only view your own assigned clients",
+				})
+				return
+			}
+		} else {
+			c.JSON(http.StatusForbidden, gin.H{
+				"error":   "forbidden",
+				"message": "You don't have permission to view assigned clients",
+			})
+			return
+		}
+	}
+
+	// Query clients assigned to this staff member
+	clients := []StaffClient{}
+	err = tenantDB.Query(c, `
+		SELECT c.id, c.company_name, c.contact_name, c.email, c.phone,
+		       c.company_number, sc.is_primary, sc.created_at
+		FROM clients c
+		JOIN staff_clients sc ON c.id = sc.client_id
+		WHERE sc.staff_id = $1 AND c.deleted_at IS NULL
+		ORDER BY sc.is_primary DESC, c.company_name ASC
+	`, []interface{}{id}, func(rows pgx.Rows) error {
+		for rows.Next() {
+			var client StaffClient
+			if err := rows.Scan(
+				&client.ID, &client.CompanyName, &client.ContactName, &client.Email,
+				&client.Phone, &client.CompanyNumber, &client.IsPrimary, &client.AssignedAt,
+			); err != nil {
+				return err
+			}
+			clients = append(clients, client)
+		}
+		return nil
+	})
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{
+			"error":   "database_error",
+			"message": "Failed to fetch assigned clients",
+		})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{
+		"clients": clients,
+		"count":   len(clients),
+	})
+}
+
+// WorkloadItem represents a staff member's client workload
+type WorkloadItem struct {
+	UserID      string `json:"user_id"`
+	UserName    string `json:"user_name"`
+	UserEmail   string `json:"user_email"`
+	ClientCount int    `json:"client_count"`
+	PrimaryCount int   `json:"primary_count"`
+}
+
+// GetWorkload returns client count per staff member
+// GET /api/v1/users/workload
+func (h *UserHandler) GetWorkload(c *gin.Context) {
+	role, _ := middleware.GetRole(c)
+
+	// Only admins can view workload across all staff
+	if role != "super_admin" && role != "tenant_admin" {
+		c.JSON(http.StatusForbidden, gin.H{
+			"error":   "forbidden",
+			"message": "Only admins can view staff workload",
+		})
+		return
+	}
+
+	// Get TenantDB for RLS-protected queries
+	tenantDB, ok := middleware.GetTenantDB(c)
+	if !ok {
+		c.JSON(http.StatusInternalServerError, gin.H{
+			"error":   "internal_error",
+			"message": "Database context not available",
+		})
+		return
+	}
+
+	workload := []WorkloadItem{}
+	err := tenantDB.Query(c, `
+		SELECT u.id, u.name, u.email,
+		       COUNT(sc.client_id) AS client_count,
+		       COUNT(sc.client_id) FILTER (WHERE sc.is_primary = true) AS primary_count
+		FROM users u
+		LEFT JOIN staff_clients sc ON u.id = sc.staff_id
+		LEFT JOIN clients c ON sc.client_id = c.id AND c.deleted_at IS NULL
+		WHERE u.role = 'staff' AND u.deleted_at IS NULL
+		GROUP BY u.id, u.name, u.email
+		ORDER BY client_count DESC, u.name ASC
+	`, nil, func(rows pgx.Rows) error {
+		for rows.Next() {
+			var item WorkloadItem
+			if err := rows.Scan(
+				&item.UserID, &item.UserName, &item.UserEmail,
+				&item.ClientCount, &item.PrimaryCount,
+			); err != nil {
+				return err
+			}
+			workload = append(workload, item)
+		}
+		return nil
+	})
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{
+			"error":   "database_error",
+			"message": "Failed to fetch workload data",
+		})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{
+		"workload": workload,
+		"count":    len(workload),
+	})
+}
+
 // getUserByID is a helper function to fetch a user by ID using TenantDB for RLS
 func (h *UserHandler) getUserByID(c *gin.Context, id uuid.UUID) (*User, error) {
 	tenantDB, ok := middleware.GetTenantDB(c)

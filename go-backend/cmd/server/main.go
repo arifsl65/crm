@@ -436,11 +436,15 @@ func setupRouter(app *Application) *gin.Engine {
 		{
 			users.GET("", h.User.List)
 			users.POST("", middleware.RequireRole("super_admin", "tenant_admin"), h.User.Create)
+			// Workload must be before /:id to avoid route conflict
+			users.GET("/workload", middleware.RequireRole("super_admin", "tenant_admin"), h.User.GetWorkload)
 			users.GET("/:id", middleware.ValidateUUID("id"), h.User.Get)
 			users.PATCH("/:id", middleware.ValidateUUID("id"), h.User.Update)
 			users.DELETE("/:id", middleware.ValidateUUID("id"), middleware.RequireRole("super_admin", "tenant_admin"), h.User.Delete)
 			users.POST("/:id/restore", middleware.ValidateUUID("id"), middleware.RequireRole("super_admin", "tenant_admin"), h.User.Restore)
 			users.DELETE("/:id/2fa", middleware.ValidateUUID("id"), middleware.RequireRole("super_admin", "tenant_admin"), h.User.Reset2FA)
+			users.POST("/:id/resend-invite", middleware.ValidateUUID("id"), middleware.RequireRole("super_admin", "tenant_admin"), h.User.ResendInvite)
+			users.GET("/:id/clients", middleware.ValidateUUID("id"), h.User.GetClients)
 		}
 
 		// Client routes
