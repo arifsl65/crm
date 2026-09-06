@@ -90,8 +90,7 @@ export async function deleteAIChat(id: string): Promise<void> {
 // ============================================================================
 
 export async function aiExtractDocument(data: {
-  document_id: string;
-  document_url?: string;
+  file_key: string;
 }): Promise<{ job_id: string } | AIDocumentExtraction> {
   const res = await authFetch('/api/v1/ai/documents/extract', {
     method: 'POST',
@@ -105,9 +104,7 @@ export async function aiExtractDocument(data: {
 }
 
 export async function aiClassifyDocument(data: {
-  document_id: string;
-  document_url?: string;
-  filename?: string;
+  file_key: string;
 }): Promise<{
   document_type_id?: string;
   document_type_name: string;
@@ -126,8 +123,7 @@ export async function aiClassifyDocument(data: {
 }
 
 export async function aiSummarizeDocument(data: {
-  document_id: string;
-  document_url?: string;
+  file_key: string;
 }): Promise<{ summary: string }> {
   const res = await authFetch('/api/v1/ai/documents/summarize', {
     method: 'POST',
@@ -141,10 +137,11 @@ export async function aiSummarizeDocument(data: {
 }
 
 export async function aiRenameDocument(data: {
-  document_id: string;
-  original_name: string;
+  text: string;
+  original_filename?: string;
   document_type?: string;
   client_name?: string;
+  file_key?: string;
 }): Promise<{ suggested_name: string; alternatives?: string[] }> {
   const res = await authFetch('/api/v1/ai/documents/rename', {
     method: 'POST',
@@ -302,8 +299,8 @@ export async function aiFindAlternateEmail(data: {
 // ============================================================================
 
 export async function aiExtractFormData(data: {
-  document_id: string;
-  form_type: string;
+  file_key: string;
+  form_type?: string;
 }): Promise<{ extracted_data: Record<string, unknown>; confidence: number }> {
   const res = await authFetch('/api/v1/ai/forms/extract', {
     method: 'POST',

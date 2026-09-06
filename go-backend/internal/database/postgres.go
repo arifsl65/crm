@@ -34,6 +34,10 @@ func NewPool(ctx context.Context, cfg config.PostgresConfig) (*Pool, error) {
 	poolConfig.MaxConnIdleTime = 30 * time.Minute
 	poolConfig.HealthCheckPeriod = 1 * time.Minute
 
+	// Use simple query mode for Neon's pgbouncer-based connection pooler.
+	// This avoids "prepared statement name is already in use" errors.
+	poolConfig.ConnConfig.DefaultQueryExecMode = pgx.QueryExecModeExec
+
 	// Create the pool
 	pool, err := pgxpool.NewWithConfig(ctx, poolConfig)
 	if err != nil {

@@ -1167,17 +1167,18 @@ func (h *DocumentHandler) BulkApprove(c *gin.Context) {
 		return
 	}
 
-	var documentIDs []uuid.UUID
+	// Validate UUIDs and keep as strings for simple query mode compatibility
+	var documentIDs []string
 	for _, id := range req.DocumentIDs {
-		if uid, err := uuid.Parse(id); err == nil {
-			documentIDs = append(documentIDs, uid)
+		if _, err := uuid.Parse(id); err == nil {
+			documentIDs = append(documentIDs, id)
 		}
 	}
 
 	result, err := tenantDB.Exec(c, `
 		UPDATE documents SET status = 'approved',
 		       reviewed_by = $1, reviewed_at = NOW(), updated_at = NOW()
-		WHERE id = ANY($2) AND tenant_id = $3 AND status = 'pending_review'
+		WHERE id = ANY($2::uuid[]) AND tenant_id = $3 AND status = 'pending_review'
 	`, userID, documentIDs, tenantID)
 
 	if err != nil {
@@ -1364,9 +1365,11 @@ func (h *DocumentHandler) GenerateUploadURL(c *gin.Context) {
 		"status": "pending_upload",
 	})
 
+	// Return flat structure matching frontend expectations
 	c.JSON(http.StatusCreated, gin.H{
-		"document":   doc,
-		"upload_url": fmt.Sprintf("/api/v1/documents/%s/upload", doc.ID.String()),
+		"document_id": doc.ID.String(),
+		"upload_url":  fmt.Sprintf("/api/v1/documents/%s/upload", doc.ID.String()),
+		"expires_at":  time.Now().Add(24 * time.Hour).Format(time.RFC3339),
 	})
 }
 

@@ -196,10 +196,12 @@ export async function uploadDocument(id: string, file: File): Promise<Document> 
 }
 
 export async function getDocumentUploadUrl(data: {
-  filename: string;
-  content_type: string;
+  name: string;
   client_id?: string;
   service_id?: string;
+  type_id?: string;
+  expiry_date?: string;
+  request_note?: string;
 }): Promise<{
   upload_url: string;
   document_id: string;

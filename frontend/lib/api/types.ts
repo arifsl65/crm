@@ -66,6 +66,7 @@ export interface Document {
   type_id?: string;
   name: string;
   original_name: string;
+  /** OSS storage path - use this as file_key for AI operations */
   file_path?: string;
   file_size?: number;
   mime_type?: string;

@@ -1032,16 +1032,16 @@ func (h *ServiceHandler) BulkUpdate(c *gin.Context) {
 	setClauses = append(setClauses, "version = version + 1")
 	setClauses = append(setClauses, "updated_at = NOW()")
 
-	// Convert string IDs to UUIDs
-	var serviceIDs []uuid.UUID
+	// Validate UUIDs and keep as strings for simple query mode compatibility
+	var serviceIDs []string
 	for _, id := range req.ServiceIDs {
-		if uid, err := uuid.Parse(id); err == nil {
-			serviceIDs = append(serviceIDs, uid)
+		if _, err := uuid.Parse(id); err == nil {
+			serviceIDs = append(serviceIDs, id)
 		}
 	}
 
 	query := "UPDATE services SET " + strings.Join(setClauses, ", ") +
-		" WHERE id = ANY($" + strconv.Itoa(argNum) + ") AND tenant_id = $" + strconv.Itoa(argNum+1)
+		" WHERE id = ANY($" + strconv.Itoa(argNum) + "::uuid[]) AND tenant_id = $" + strconv.Itoa(argNum+1)
 	args = append(args, serviceIDs, tenantID)
 
 	result, err := tenantDB.Exec(c, query, args...)

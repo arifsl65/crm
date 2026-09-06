@@ -104,8 +104,7 @@ export default function DocumentUploadPage() {
       for (const file of files) {
         // Get signed upload URL
         const { upload_url, document_id } = await getDocumentUploadUrl({
-          filename: file.name,
-          content_type: file.type || 'application/octet-stream',
+          name: documentName || file.name.replace(/\.[^/.]+$/, ''),
           client_id: selectedClient || undefined,
         });
 
