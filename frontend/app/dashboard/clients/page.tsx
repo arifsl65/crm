@@ -1,6 +1,7 @@
 'use client';
 
 import { useEffect, useState, useCallback } from 'react';
+import Link from 'next/link';
 import {
   Client,
   getClients,
@@ -436,12 +437,20 @@ function ClientDetailPanel({ client, onClose }: { client: ClientWithRisk; onClos
             <p className="text-sm text-gray-500 dark:text-gray-400">{client.contact_name}</p>
           </div>
         </div>
-        <button
-          onClick={onClose}
-          className="text-gray-400 hover:text-gray-600 dark:hover:text-gray-200"
-        >
-          ✕
-        </button>
+        <div className="flex items-center gap-2">
+          <Link
+            href={`/dashboard/clients/${client.id}`}
+            className="text-sm text-blue-600 hover:text-blue-800 dark:text-blue-400 dark:hover:text-blue-300 flex items-center gap-1"
+          >
+            View Details →
+          </Link>
+          <button
+            onClick={onClose}
+            className="text-gray-400 hover:text-gray-600 dark:hover:text-gray-200 ml-2"
+          >
+            ✕
+          </button>
+        </div>
       </div>
 
       {/* Tabs - Info, Notes (Officers/Filings/PSC need backend) */}

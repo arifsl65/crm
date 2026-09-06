@@ -3,7 +3,7 @@
 import { useEffect, useState, useCallback } from 'react';
 import Link from 'next/link';
 import { useAuth } from '@/components/auth-guard';
-import { User, getUsers, createUser, updateUser, deleteUser } from '@/lib/api';
+import { User, getUsers, createUser, updateUser, deleteUser, reset2FA, resendInvite } from '@/lib/api';
 import { useToast } from '@/components';
 
 const roleColors: Record<string, string> = {
@@ -28,8 +28,10 @@ export default function StaffPage() {
   const [error, setError] = useState<string | null>(null);
   const [search, setSearch] = useState('');
   const [roleFilter, setRoleFilter] = useState('');
+  const [statusFilter, setStatusFilter] = useState<'all' | 'active' | 'inactive'>('active');
   const [showModal, setShowModal] = useState(false);
   const [editingUser, setEditingUser] = useState<User | null>(null);
+  const [actionLoading, setActionLoading] = useState<string | null>(null);
 
   // Form state
   const [formName, setFormName] = useState('');
@@ -49,14 +51,21 @@ export default function StaffPage() {
         limit: 100,
       });
       // Filter out client role users - this page is for staff management
-      setUsers((data.users || []).filter(u => u.role !== 'client'));
+      let filtered = (data.users || []).filter(u => u.role !== 'client');
+      // Apply status filter
+      if (statusFilter === 'active') {
+        filtered = filtered.filter(u => u.is_active);
+      } else if (statusFilter === 'inactive') {
+        filtered = filtered.filter(u => !u.is_active);
+      }
+      setUsers(filtered);
       setError(null);
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Failed to load users');
     } finally {
       setLoading(false);
     }
-  }, [search, roleFilter]);
+  }, [search, roleFilter, statusFilter]);
 
   useEffect(() => {
     fetchUsers();
@@ -132,6 +141,33 @@ export default function StaffPage() {
     }
   };
 
+  const handleReset2FA = async (user: User) => {
+    if (!confirm(`Are you sure you want to reset 2FA for ${user.name}? They will need to set up 2FA again.`)) return;
+
+    setActionLoading(user.id);
+    try {
+      await reset2FA(user.id);
+      toast.success('2FA reset successfully. User will need to set up 2FA again.');
+      fetchUsers();
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : 'Failed to reset 2FA');
+    } finally {
+      setActionLoading(null);
+    }
+  };
+
+  const handleResendInvite = async (user: User) => {
+    setActionLoading(user.id);
+    try {
+      await resendInvite(user.id);
+      toast.success('Invitation resent successfully');
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : 'Failed to resend invite');
+    } finally {
+      setActionLoading(null);
+    }
+  };
+
   return (
     <div className="min-h-screen bg-gray-50 dark:bg-slate-900">
       {/* Header */}
@@ -183,6 +219,15 @@ export default function StaffPage() {
             <option value="">All roles</option>
             <option value="tenant_admin">Admin</option>
             <option value="staff">Staff</option>
+          </select>
+          <select
+            value={statusFilter}
+            onChange={(e) => setStatusFilter(e.target.value as 'all' | 'active' | 'inactive')}
+            className="px-4 py-2 border border-gray-300 dark:border-gray-600 rounded-md bg-white dark:bg-slate-700 text-gray-900 dark:text-white"
+          >
+            <option value="active">Active</option>
+            <option value="inactive">Inactive</option>
+            <option value="all">All</option>
           </select>
         </div>
 
@@ -242,11 +287,13 @@ export default function StaffPage() {
                     </td>
                     <td className="px-6 py-4 whitespace-nowrap">
                       <span className={`inline-flex px-2 py-1 text-xs font-medium rounded-full ${
-                        user.is_active
+                        user.status === 'pending'
+                          ? 'bg-amber-100 text-amber-800 dark:bg-amber-900 dark:text-amber-300'
+                          : user.is_active
                           ? 'bg-green-100 text-green-800 dark:bg-green-900 dark:text-green-300'
                           : 'bg-red-100 text-red-800 dark:bg-red-900 dark:text-red-300'
                       }`}>
-                        {user.is_active ? 'Active' : 'Inactive'}
+                        {user.status === 'pending' ? 'Pending' : user.is_active ? 'Active' : 'Inactive'}
                       </span>
                     </td>
                     <td className="px-6 py-4 whitespace-nowrap">
@@ -264,22 +311,48 @@ export default function StaffPage() {
                       {user.last_login_at ? new Date(user.last_login_at).toLocaleDateString() : 'Never'}
                     </td>
                     <td className="px-6 py-4 whitespace-nowrap text-right text-sm font-medium">
-                      {isAdmin && user.id !== currentUser?.id && (
-                        <div className="flex justify-end space-x-2">
-                          <button
-                            onClick={() => openEditModal(user)}
-                            className="text-blue-600 hover:text-blue-900 dark:text-blue-400 dark:hover:text-blue-300"
-                          >
-                            Edit
-                          </button>
-                          <button
-                            onClick={() => handleToggleActive(user)}
-                            className={user.is_active ? 'text-red-600 hover:text-red-900' : 'text-green-600 hover:text-green-900'}
-                          >
-                            {user.is_active ? 'Deactivate' : 'Activate'}
-                          </button>
-                        </div>
-                      )}
+                      <div className="flex justify-end space-x-2">
+                        <Link
+                          href={`/dashboard/staff/${user.id}`}
+                          className="text-gray-600 hover:text-gray-900 dark:text-gray-400 dark:hover:text-gray-200"
+                        >
+                          View
+                        </Link>
+                        {isAdmin && user.id !== currentUser?.id && (
+                          <>
+                            <button
+                              onClick={() => openEditModal(user)}
+                              className="text-blue-600 hover:text-blue-900 dark:text-blue-400 dark:hover:text-blue-300"
+                            >
+                              Edit
+                            </button>
+                            {user.two_factor_enabled && (
+                              <button
+                                onClick={() => handleReset2FA(user)}
+                                disabled={actionLoading === user.id}
+                                className="text-amber-600 hover:text-amber-900 dark:text-amber-400 dark:hover:text-amber-300 disabled:opacity-50"
+                              >
+                                {actionLoading === user.id ? '...' : 'Reset 2FA'}
+                              </button>
+                            )}
+                            {user.status === 'pending' && (
+                              <button
+                                onClick={() => handleResendInvite(user)}
+                                disabled={actionLoading === user.id}
+                                className="text-purple-600 hover:text-purple-900 dark:text-purple-400 dark:hover:text-purple-300 disabled:opacity-50"
+                              >
+                                {actionLoading === user.id ? '...' : 'Resend'}
+                              </button>
+                            )}
+                            <button
+                              onClick={() => handleToggleActive(user)}
+                              className={user.is_active ? 'text-red-600 hover:text-red-900' : 'text-green-600 hover:text-green-900'}
+                            >
+                              {user.is_active ? 'Deactivate' : 'Activate'}
+                            </button>
+                          </>
+                        )}
+                      </div>
                     </td>
                   </tr>
                 ))}
