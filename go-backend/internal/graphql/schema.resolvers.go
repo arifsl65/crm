@@ -986,7 +986,7 @@ func (r *mutationResolver) UpdateServiceStatus(ctx context.Context, id uuid.UUID
 		return tx.QueryRow(ctx, `
 			UPDATE services
 			SET status = $1, completed_at = $2, updated_at = $3
-			WHERE id = $4 AND deleted_at IS NULL
+			WHERE id = $4
 			RETURNING id, tenant_id, client_id, type_id, name,
 			          status, priority, deadline::text, completed_at, docs_required, docs_received,
 			          staff_id, created_at, updated_at

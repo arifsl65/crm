@@ -2120,3 +2120,1691 @@ export async function logout(): Promise<void> {
     window.dispatchEvent(new CustomEvent(AUTH_EXPIRED_EVENT));
   }
 }
+
+// ============================================================================
+// AUTH API - Authentication & Authorization Endpoints
+// ============================================================================
+// These endpoints handle user authentication, 2FA, password management,
+// session management, and token operations. Most are used by the login page
+// or settings pages rather than the main app.
+// ============================================================================
+
+/**
+ * Auth response containing JWT tokens and user info.
+ * Tokens are also set as httpOnly cookies by the backend.
+ */
+export interface AuthResponse {
+  access_token: string;
+  refresh_token: string;
+  expires_at: string;
+  user: AuthUser;
+}
+
+export interface AuthUser {
+  id: string;
+  email: string;
+  name: string;
+  role: 'super_admin' | 'tenant_admin' | 'staff' | 'client';
+  tenant_id: string;
+}
+
+/**
+ * Active session information for the current user.
+ * Used in security settings to manage logged-in devices.
+ */
+export interface Session {
+  id: string;
+  user_id: string;
+  ip_address: string;
+  user_agent: string;
+  is_current: boolean;
+  last_active_at: string;
+  created_at: string;
+  expires_at: string;
+}
+
+/**
+ * 2FA setup response with TOTP secret and QR code.
+ * QR code can be scanned with authenticator apps like Google Authenticator.
+ */
+export interface TwoFactorSetupResponse {
+  secret: string;
+  qr_code?: string;
+  recovery_codes?: string[];
+}
+
+/**
+ * Login with email and password.
+ *
+ * WHY: Primary authentication method. Returns JWT tokens and sets httpOnly cookies.
+ * Rate limited: 5 attempts per IP+email, 15min lockout on failure.
+ *
+ * @param email - User's email address
+ * @param password - User's password (min 8 chars)
+ * @param tenantDomain - Optional: specify tenant if email exists in multiple tenants
+ */
+export async function login(
+  email: string,
+  password: string,
+  tenantDomain?: string
+): Promise<AuthResponse> {
+  const res = await fetch(`${API_URL}/api/v1/auth/login`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    credentials: 'include', // Receive httpOnly cookies
+    body: JSON.stringify({ email, password, tenant_domain: tenantDomain }),
+  });
+  if (!res.ok) {
+    const error = await res.json();
+    throw new Error(error.message || 'Login failed');
+  }
+  return res.json();
+}
+
+/**
+ * Register a new user account.
+ *
+ * WHY: Self-registration for new users. Creates account and returns tokens.
+ * New users are created with 'staff' role by default.
+ *
+ * @param email - User's email address
+ * @param password - Password (min 8 chars)
+ * @param name - User's display name
+ * @param tenantId - UUID of the tenant to register under
+ */
+export async function register(
+  email: string,
+  password: string,
+  name: string,
+  tenantId: string
+): Promise<AuthResponse> {
+  const res = await fetch(`${API_URL}/api/v1/auth/register`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    credentials: 'include',
+    body: JSON.stringify({ email, password, name, tenant_id: tenantId }),
+  });
+  if (!res.ok) {
+    const error = await res.json();
+    throw new Error(error.message || 'Registration failed');
+  }
+  return res.json();
+}
+
+/**
+ * Request a magic link for passwordless login.
+ *
+ * WHY: Allows users to login without remembering their password.
+ * Email contains a one-time link that expires in 15 minutes.
+ * Rate limited: 3 requests per email per hour.
+ *
+ * @param email - User's email address
+ */
+export async function sendMagicLink(email: string): Promise<{ message: string }> {
+  const res = await fetch(`${API_URL}/api/v1/auth/magic-link`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ email }),
+  });
+  if (!res.ok) {
+    const error = await res.json();
+    throw new Error(error.message || 'Failed to send magic link');
+  }
+  return res.json();
+}
+
+/**
+ * Verify a magic link token and login.
+ *
+ * WHY: Completes passwordless login flow. Called when user clicks the magic link.
+ * Returns tokens and sets cookies on success.
+ *
+ * @param token - The magic link token from the email URL
+ */
+export async function verifyMagicLink(token: string): Promise<AuthResponse> {
+  const res = await fetch(`${API_URL}/api/v1/auth/magic-link?token=${encodeURIComponent(token)}`, {
+    method: 'GET',
+    credentials: 'include',
+  });
+  if (!res.ok) {
+    const error = await res.json();
+    throw new Error(error.message || 'Invalid or expired magic link');
+  }
+  return res.json();
+}
+
+/**
+ * Accept a team invitation and set password.
+ *
+ * WHY: Allows invited users to activate their account.
+ * Invitation emails contain a token that expires in 7 days.
+ *
+ * @param token - Invitation token from the email URL
+ * @param password - New password to set (min 8 chars)
+ * @param name - Optional: update display name
+ */
+export async function acceptInvite(
+  token: string,
+  password: string,
+  name?: string
+): Promise<AuthResponse> {
+  const res = await fetch(`${API_URL}/api/v1/auth/invite-accept`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    credentials: 'include',
+    body: JSON.stringify({ token, password, name }),
+  });
+  if (!res.ok) {
+    const error = await res.json();
+    throw new Error(error.message || 'Invalid or expired invitation');
+  }
+  return res.json();
+}
+
+/**
+ * Request a password reset email.
+ *
+ * WHY: Allows users to recover their account when they forget their password.
+ * Email contains a reset link that expires in 1 hour.
+ * Rate limited: 3 requests per email per hour.
+ *
+ * @param email - User's email address
+ */
+export async function forgotPassword(email: string): Promise<{ message: string }> {
+  const res = await fetch(`${API_URL}/api/v1/auth/reset-password`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ email }),
+  });
+  if (!res.ok) {
+    const error = await res.json();
+    throw new Error(error.message || 'Failed to send reset email');
+  }
+  return res.json();
+}
+
+/**
+ * Reset password using a reset token.
+ *
+ * WHY: Completes password recovery flow. Called when user submits new password.
+ * Token is from the password reset email link.
+ *
+ * @param token - Reset token from the email URL
+ * @param newPassword - New password to set (min 8 chars)
+ */
+export async function resetPassword(
+  token: string,
+  newPassword: string
+): Promise<{ message: string }> {
+  const res = await fetch(`${API_URL}/api/v1/auth/reset-password/confirm`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ token, new_password: newPassword }),
+  });
+  if (!res.ok) {
+    const error = await res.json();
+    throw new Error(error.message || 'Failed to reset password');
+  }
+  return res.json();
+}
+
+/**
+ * Change the current user's password.
+ *
+ * WHY: Allows logged-in users to change their password from settings.
+ * Requires current password for security. Logs out all other sessions.
+ *
+ * @param currentPassword - Current password for verification
+ * @param newPassword - New password to set (min 8 chars)
+ */
+export async function changePassword(
+  currentPassword: string,
+  newPassword: string
+): Promise<{ message: string }> {
+  const res = await authFetch('/api/v1/auth/password', {
+    method: 'PATCH',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ current_password: currentPassword, new_password: newPassword }),
+  });
+  if (!res.ok) {
+    const error = await res.json();
+    throw new Error(error.message || 'Failed to change password');
+  }
+  return res.json();
+}
+
+/**
+ * Get current authenticated user's profile.
+ *
+ * WHY: Fetch user details for displaying in header, settings, etc.
+ * Returns full user object including settings and preferences.
+ */
+export async function getMe(): Promise<User> {
+  const res = await authFetch('/api/v1/auth/me');
+  if (!res.ok) throw new Error('Failed to fetch user profile');
+  return res.json();
+}
+
+/**
+ * Update current user's profile.
+ *
+ * WHY: Allows users to update their name, phone, avatar, and preferences.
+ * Cannot change email or role through this endpoint.
+ *
+ * @param updates - Fields to update (name, phone, avatar_url, settings)
+ */
+export async function updateMe(updates: {
+  name?: string;
+  phone?: string;
+  avatar_url?: string;
+  settings?: Record<string, unknown>;
+}): Promise<{ message: string }> {
+  const res = await authFetch('/api/v1/auth/me', {
+    method: 'PATCH',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(updates),
+  });
+  if (!res.ok) {
+    const error = await res.json();
+    throw new Error(error.message || 'Failed to update profile');
+  }
+  return res.json();
+}
+
+/**
+ * Get all active sessions for the current user.
+ *
+ * WHY: Security feature allowing users to see all logged-in devices.
+ * Shows IP, user agent, and last active time for each session.
+ * Users can identify and revoke suspicious sessions.
+ */
+export async function getSessions(): Promise<{ sessions: Session[] }> {
+  const res = await authFetch('/api/v1/auth/sessions');
+  if (!res.ok) throw new Error('Failed to fetch sessions');
+  return res.json();
+}
+
+/**
+ * Initialize 2FA setup by generating a TOTP secret.
+ *
+ * WHY: First step in enabling two-factor authentication.
+ * Returns a secret that user adds to their authenticator app.
+ * QR code is provided for easy scanning with Google Authenticator, Authy, etc.
+ * User must verify with a code before 2FA is fully enabled.
+ */
+export async function setup2FA(): Promise<TwoFactorSetupResponse> {
+  const res = await authFetch('/api/v1/auth/2fa/setup', { method: 'POST' });
+  if (!res.ok) {
+    const error = await res.json();
+    throw new Error(error.message || 'Failed to setup 2FA');
+  }
+  return res.json();
+}
+
+/**
+ * Verify TOTP code to complete 2FA setup.
+ *
+ * WHY: Confirms user has correctly configured their authenticator app.
+ * After verification, 2FA is enabled and required for all future logins.
+ *
+ * @param code - 6-digit TOTP code from authenticator app
+ */
+export async function verify2FA(code: string): Promise<{ message: string; backup_codes?: string[] }> {
+  const res = await authFetch('/api/v1/auth/2fa/verify', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ code }),
+  });
+  if (!res.ok) {
+    const error = await res.json();
+    throw new Error(error.message || 'Invalid verification code');
+  }
+  return res.json();
+}
+
+/**
+ * Disable 2FA for the current user.
+ *
+ * WHY: Allows users to turn off 2FA if they lose their device or want simpler login.
+ * Requires password confirmation for security.
+ *
+ * @param password - Current password for verification
+ */
+export async function disable2FA(password: string): Promise<{ message: string }> {
+  const res = await authFetch('/api/v1/auth/2fa', {
+    method: 'DELETE',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ password }),
+  });
+  if (!res.ok) {
+    const error = await res.json();
+    throw new Error(error.message || 'Failed to disable 2FA');
+  }
+  return res.json();
+}
+
+/**
+ * Generate new backup codes for 2FA recovery.
+ *
+ * WHY: Provides one-time codes for account recovery if user loses their 2FA device.
+ * Generates 10 new codes, invalidating any previously generated codes.
+ * User should store these securely (printed or in password manager).
+ */
+export async function generateBackupCodes(): Promise<{ backup_codes: string[] }> {
+  const res = await authFetch('/api/v1/auth/2fa/backup-codes', { method: 'POST' });
+  if (!res.ok) {
+    const error = await res.json();
+    throw new Error(error.message || 'Failed to generate backup codes');
+  }
+  return res.json();
+}
+
+/**
+ * Login using a backup code instead of TOTP.
+ *
+ * WHY: Emergency access when user has lost their 2FA device.
+ * Each backup code can only be used once. After use, it's invalidated.
+ * Public endpoint (no auth required) - used on login page.
+ *
+ * @param email - User's email address
+ * @param password - User's password
+ * @param backupCode - One-time backup code (format: XXXX-XXXX)
+ */
+export async function verifyBackupCode(
+  email: string,
+  password: string,
+  backupCode: string
+): Promise<AuthResponse> {
+  const res = await fetch(`${API_URL}/api/v1/auth/2fa/backup-codes/verify`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    credentials: 'include',
+    body: JSON.stringify({ email, password, backup_code: backupCode }),
+  });
+  if (!res.ok) {
+    const error = await res.json();
+    throw new Error(error.message || 'Invalid backup code');
+  }
+  return res.json();
+}
+
+/**
+ * Revoke all tokens in a refresh token family.
+ *
+ * WHY: Security measure when token theft is detected.
+ * When a refresh token is reused (indicating theft), the system automatically
+ * revokes the entire token family. This endpoint allows manual revocation.
+ *
+ * @param familyId - UUID of the token family to revoke
+ */
+export async function revokeTokenFamily(familyId: string): Promise<{ message: string }> {
+  const res = await authFetch('/api/v1/auth/refresh/revoke-family', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ family_id: familyId }),
+  });
+  if (!res.ok) {
+    const error = await res.json();
+    throw new Error(error.message || 'Failed to revoke token family');
+  }
+  return res.json();
+}
+
+// ============================================================================
+// GRAPHQL API - Unified Query Interface for Dashboard & Aggregated Data
+// ============================================================================
+//
+// GraphQL is the preferred interface for:
+// - Dashboard data (aggregated stats, deadlines, activity, kanban board)
+// - Complex queries with nested relationships (client with documents/services/emails)
+// - Relay-style pagination for large datasets
+// - AI analysis (troublemaker clients, anomalies)
+// - Unified search across entities
+// - Real-time notification state
+//
+// REST remains preferred for:
+// - CRUD operations on individual entities
+// - File uploads/downloads
+// - Authentication flows
+// - Webhook/integration endpoints
+// ============================================================================
+
+// -----------------------------------------------------------------------------
+// GraphQL Enums
+// -----------------------------------------------------------------------------
+
+export type GQLClientStatus = 'ACTIVE' | 'INACTIVE' | 'ARCHIVED' | 'PROSPECT';
+
+export type GQLDocumentStatus =
+  | 'REQUESTED'
+  | 'UPLOADED'
+  | 'UNDER_REVIEW'
+  | 'APPROVED'
+  | 'REJECTED'
+  | 'EXPIRED';
+
+export type GQLServiceStatus =
+  | 'NOT_STARTED'
+  | 'IN_PROGRESS'
+  | 'AWAITING_INFO'
+  | 'UNDER_REVIEW'
+  | 'COMPLETED'
+  | 'ON_HOLD'
+  | 'CANCELLED';
+
+export type GQLServicePriority = 'LOW' | 'MEDIUM' | 'HIGH' | 'URGENT';
+
+export type GQLEmailDirection = 'INBOUND' | 'OUTBOUND';
+
+export type GQLEmailSentiment = 'POSITIVE' | 'NEUTRAL' | 'NEGATIVE' | 'URGENT';
+
+export type GQLEmailStatus =
+  | 'DRAFT'
+  | 'QUEUED'
+  | 'SENT'
+  | 'DELIVERED'
+  | 'BOUNCED'
+  | 'FAILED';
+
+// -----------------------------------------------------------------------------
+// GraphQL Core Entity Types
+// -----------------------------------------------------------------------------
+
+export interface GQLUser {
+  id: string;
+  tenant_id: string;
+  email: string;
+  name: string;
+  role: string;
+  avatar_url?: string;
+  is_active: boolean;
+  last_login_at?: string;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface GQLClient {
+  id: string;
+  tenant_id: string;
+  user_id?: string;
+  company_name: string;
+  contact_name: string;
+  email: string;
+  phone?: string;
+  address?: string;
+  year_end?: string;
+  utr?: string;
+  company_number?: string;
+  company_type?: string;
+  incorporation_date?: string;
+  vat_number?: string;
+  vat_quarter?: string;
+  status: GQLClientStatus;
+  risk_score?: number;
+  email_status: string;
+  last_contact_at?: string;
+  created_at: string;
+  updated_at: string;
+  // Nested resolvers
+  documents?: GQLDocument[];
+  services?: GQLService[];
+  emails?: GQLEmail[];
+  notes?: GQLClientNote[];
+  assigned_staff?: GQLUser[];
+}
+
+export interface GQLClientNote {
+  id: string;
+  tenant_id: string;
+  client_id: string;
+  staff_id: string;
+  note: string;
+  created_at: string;
+  updated_at: string;
+  staff?: GQLUser;
+}
+
+export interface GQLDocumentType {
+  id: string;
+  tenant_id: string;
+  name: string;
+  description?: string;
+  category?: string;
+  is_active: boolean;
+  created_at: string;
+}
+
+export interface GQLDocument {
+  id: string;
+  tenant_id: string;
+  client_id: string;
+  service_id?: string;
+  name: string;
+  original_name: string;
+  file_key?: string;
+  file_size?: number;
+  mime_type?: string;
+  status: GQLDocumentStatus;
+  ai_summary?: string;
+  ai_extracted?: Record<string, unknown>;
+  requested_by?: string;
+  uploaded_by?: string;
+  reviewed_by?: string;
+  reviewed_at?: string;
+  expires_at?: string;
+  created_at: string;
+  updated_at: string;
+  // Nested resolvers
+  client?: GQLClient;
+  service?: GQLService;
+  document_type?: GQLDocumentType;
+  requested_by_user?: GQLUser;
+  uploaded_by_user?: GQLUser;
+  reviewed_by_user?: GQLUser;
+}
+
+export interface GQLServiceType {
+  id: string;
+  tenant_id: string;
+  name: string;
+  description?: string;
+  category?: string;
+  default_deadline_days?: number;
+  required_documents?: string[];
+  is_active: boolean;
+  created_at: string;
+}
+
+export interface GQLService {
+  id: string;
+  tenant_id: string;
+  client_id: string;
+  service_type_id?: string;
+  name: string;
+  description?: string;
+  status: GQLServiceStatus;
+  priority: GQLServicePriority;
+  deadline?: string;
+  completed_at?: string;
+  docs_required: number;
+  docs_received: number;
+  assigned_to?: string;
+  hmrc_data?: Record<string, unknown>;
+  created_at: string;
+  updated_at: string;
+  // Nested resolvers
+  client?: GQLClient;
+  service_type?: GQLServiceType;
+  assigned_user?: GQLUser;
+  documents?: GQLDocument[];
+}
+
+export interface GQLEmail {
+  id: string;
+  tenant_id: string;
+  client_id?: string;
+  staff_id?: string;
+  thread_id?: string;
+  direction: GQLEmailDirection;
+  from_email: string;
+  to_email: string;
+  subject: string;
+  body_text?: string;
+  body_html?: string;
+  status: GQLEmailStatus;
+  is_read: boolean;
+  sentiment?: GQLEmailSentiment;
+  ai_summary?: string;
+  ai_action_items?: string[];
+  sent_at?: string;
+  received_at?: string;
+  created_at: string;
+  // Nested resolvers
+  client?: GQLClient;
+  staff?: GQLUser;
+  thread?: GQLEmailThread;
+}
+
+export interface GQLEmailThread {
+  id: string;
+  tenant_id: string;
+  client_id?: string;
+  subject: string;
+  last_message_at: string;
+  message_count: number;
+  created_at: string;
+  // Nested resolvers
+  emails?: GQLEmail[];
+  client?: GQLClient;
+}
+
+export interface GQLNotification {
+  id: string;
+  tenant_id: string;
+  user_id: string;
+  type: string;
+  title: string;
+  message: string;
+  entity_type?: string;
+  entity_id?: string;
+  is_read: boolean;
+  read_at?: string;
+  created_at: string;
+}
+
+// -----------------------------------------------------------------------------
+// GraphQL Dashboard Types
+// -----------------------------------------------------------------------------
+
+export interface GQLDashboardStats {
+  total_clients: number;
+  active_clients: number;
+  total_services: number;
+  active_services: number;
+  services_at_risk: number;
+  total_documents: number;
+  pending_documents: number;
+  unread_emails: number;
+  unread_notifications: number;
+}
+
+export interface GQLUrgentItem {
+  type: string;
+  entity_id: string;
+  title: string;
+  description: string;
+  due_at?: string;
+  priority: string;
+  client_name?: string;
+}
+
+export interface GQLDeadlineItem {
+  service_id: string;
+  service_name: string;
+  client_id: string;
+  client_name: string;
+  deadline: string;
+  days_remaining: number;
+  status: GQLServiceStatus;
+  priority: GQLServicePriority;
+  docs_progress: string;
+}
+
+export interface GQLActivityItem {
+  id: string;
+  action: string;
+  entity_type: string;
+  entity_id?: string;
+  description: string;
+  user_name?: string;
+  created_at: string;
+}
+
+export interface GQLKanbanService {
+  id: string;
+  name: string;
+  client_id: string;
+  client_name: string;
+  priority: GQLServicePriority;
+  deadline?: string;
+  docs_progress: string;
+}
+
+export interface GQLKanbanBoard {
+  not_started: GQLKanbanService[];
+  in_progress: GQLKanbanService[];
+  awaiting_info: GQLKanbanService[];
+  under_review: GQLKanbanService[];
+  completed: GQLKanbanService[];
+}
+
+export interface GQLDashboard {
+  stats: GQLDashboardStats;
+  urgent_items: GQLUrgentItem[];
+  deadlines: GQLDeadlineItem[];
+  recent_activity: GQLActivityItem[];
+  kanban: GQLKanbanBoard;
+}
+
+// -----------------------------------------------------------------------------
+// GraphQL AI Types
+// -----------------------------------------------------------------------------
+
+export interface GQLAIMessage {
+  role: string;
+  content: string;
+  timestamp: string;
+  metadata?: Record<string, unknown>;
+}
+
+export interface GQLAIConversation {
+  id: string;
+  conversation_id: string;
+  user_id: string;
+  tenant_id?: string;
+  messages: GQLAIMessage[];
+  created_at: string;
+  updated_at: string;
+}
+
+export interface GQLRiskFactor {
+  factor: string;
+  severity: string;
+  description: string;
+}
+
+export interface GQLTroublemakerClient {
+  client_id: string;
+  client_name: string;
+  company_name: string;
+  risk_score: number;
+  risk_level: string;
+  risk_factors: GQLRiskFactor[];
+  recommended_actions: string[];
+  last_contact_at?: string;
+  overdue_services: number;
+  pending_documents: number;
+}
+
+export interface GQLAnomalyItem {
+  type: string;
+  entity_type: string;
+  entity_id: string;
+  title: string;
+  description: string;
+  severity: string;
+  detected_at: string;
+  client_name?: string;
+}
+
+// -----------------------------------------------------------------------------
+// GraphQL Search Types
+// -----------------------------------------------------------------------------
+
+export interface GQLSearchResult {
+  id: string;
+  type: string;
+  title: string;
+  subtitle?: string;
+  description?: string;
+  highlight?: string;
+  url: string;
+}
+
+export interface GQLSearchResults {
+  clients: GQLSearchResult[];
+  documents: GQLSearchResult[];
+  services: GQLSearchResult[];
+  emails: GQLSearchResult[];
+  total_count: number;
+}
+
+// -----------------------------------------------------------------------------
+// GraphQL Pagination Types (Relay-style)
+// -----------------------------------------------------------------------------
+
+export interface GQLPageInfo {
+  has_next_page: boolean;
+  has_previous_page: boolean;
+  start_cursor?: string;
+  end_cursor?: string;
+}
+
+export interface GQLClientEdge {
+  cursor: string;
+  node: GQLClient;
+}
+
+export interface GQLClientConnection {
+  edges: GQLClientEdge[];
+  page_info: GQLPageInfo;
+  total_count: number;
+}
+
+export interface GQLDocumentEdge {
+  cursor: string;
+  node: GQLDocument;
+}
+
+export interface GQLDocumentConnection {
+  edges: GQLDocumentEdge[];
+  page_info: GQLPageInfo;
+  total_count: number;
+}
+
+export interface GQLServiceEdge {
+  cursor: string;
+  node: GQLService;
+}
+
+export interface GQLServiceConnection {
+  edges: GQLServiceEdge[];
+  page_info: GQLPageInfo;
+  total_count: number;
+}
+
+// -----------------------------------------------------------------------------
+// GraphQL Filter Input Types
+// -----------------------------------------------------------------------------
+
+export interface GQLClientFilter {
+  status?: GQLClientStatus;
+  search?: string;
+  assigned_to?: string;
+  has_overdue_services?: boolean;
+  risk_score_min?: number;
+  risk_score_max?: number;
+}
+
+export interface GQLDocumentFilter {
+  client_id?: string;
+  service_id?: string;
+  status?: GQLDocumentStatus;
+  document_type_id?: string;
+  uploaded_after?: string;
+  uploaded_before?: string;
+}
+
+export interface GQLServiceFilter {
+  client_id?: string;
+  status?: GQLServiceStatus;
+  priority?: GQLServicePriority;
+  service_type_id?: string;
+  assigned_to?: string;
+  deadline_before?: string;
+  deadline_after?: string;
+}
+
+// -----------------------------------------------------------------------------
+// GraphQL Response Types
+// -----------------------------------------------------------------------------
+
+export interface GraphQLResponse<T> {
+  data?: T;
+  errors?: Array<{
+    message: string;
+    path?: string[];
+    extensions?: Record<string, unknown>;
+  }>;
+}
+
+// -----------------------------------------------------------------------------
+// Core GraphQL Query Function
+// -----------------------------------------------------------------------------
+
+/**
+ * Execute a GraphQL query or mutation against the API.
+ *
+ * WHY: GraphQL provides a unified interface for complex queries with nested
+ * relationships, pagination, and aggregated data. It's more efficient than
+ * multiple REST calls when you need related data from different entities.
+ *
+ * @param query - The GraphQL query or mutation string
+ * @param variables - Optional variables to pass to the query
+ * @returns The typed response data
+ * @throws Error if the request fails or returns GraphQL errors
+ */
+export async function graphqlQuery<T>(
+  query: string,
+  variables?: Record<string, unknown>
+): Promise<T> {
+  const res = await authFetch('/api/v1/graphql', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ query, variables }),
+  });
+
+  if (!res.ok) {
+    const error = await res.json().catch(() => ({}));
+    throw new Error(error.message || `GraphQL request failed: ${res.status}`);
+  }
+
+  const response: GraphQLResponse<T> = await res.json();
+
+  if (response.errors && response.errors.length > 0) {
+    throw new Error(response.errors[0].message);
+  }
+
+  if (!response.data) {
+    throw new Error('No data returned from GraphQL query');
+  }
+
+  return response.data;
+}
+
+// -----------------------------------------------------------------------------
+// Dashboard Queries
+// -----------------------------------------------------------------------------
+
+/**
+ * Fetch the complete dashboard data in a single request.
+ *
+ * WHY: The dashboard needs aggregated stats, urgent items, deadlines, activity,
+ * and kanban board data. GraphQL fetches all of this in one round-trip instead
+ * of 5+ REST calls, significantly improving dashboard load time.
+ */
+export async function gqlGetDashboard(deadlineDays = 14, activityLimit = 10): Promise<GQLDashboard> {
+  const query = `
+    query Dashboard($deadlineDays: Int, $activityLimit: Int) {
+      dashboard {
+        stats {
+          total_clients
+          active_clients
+          total_services
+          active_services
+          services_at_risk
+          total_documents
+          pending_documents
+          unread_emails
+          unread_notifications
+        }
+        urgent_items {
+          type
+          entity_id
+          title
+          description
+          due_at
+          priority
+          client_name
+        }
+        deadlines(days: $deadlineDays) {
+          service_id
+          service_name
+          client_id
+          client_name
+          deadline
+          days_remaining
+          status
+          priority
+          docs_progress
+        }
+        recent_activity(limit: $activityLimit) {
+          id
+          action
+          entity_type
+          entity_id
+          description
+          user_name
+          created_at
+        }
+        kanban {
+          not_started { id name client_id client_name priority deadline docs_progress }
+          in_progress { id name client_id client_name priority deadline docs_progress }
+          awaiting_info { id name client_id client_name priority deadline docs_progress }
+          under_review { id name client_id client_name priority deadline docs_progress }
+          completed { id name client_id client_name priority deadline docs_progress }
+        }
+      }
+    }
+  `;
+  const data = await graphqlQuery<{ dashboard: GQLDashboard }>(query, {
+    deadlineDays,
+    activityLimit,
+  });
+  return data.dashboard;
+}
+
+// -----------------------------------------------------------------------------
+// Client Queries
+// -----------------------------------------------------------------------------
+
+/**
+ * Fetch a single client with all related data (documents, services, emails, notes).
+ *
+ * WHY: Client detail pages need the client plus related entities. GraphQL fetches
+ * everything in one request with DataLoader batching for N+1 prevention.
+ */
+export async function gqlGetClient(
+  id: string,
+  options?: { documentsLimit?: number; servicesLimit?: number; emailsLimit?: number; notesLimit?: number }
+): Promise<GQLClient | null> {
+  const query = `
+    query Client($id: UUID!, $documentsLimit: Int, $servicesLimit: Int, $emailsLimit: Int, $notesLimit: Int) {
+      client(id: $id) {
+        id tenant_id user_id company_name contact_name email phone address
+        year_end utr company_number company_type incorporation_date
+        vat_number vat_quarter status risk_score email_status
+        last_contact_at created_at updated_at
+        documents(limit: $documentsLimit) {
+          id name original_name status ai_summary created_at
+          document_type { id name category }
+        }
+        services(limit: $servicesLimit) {
+          id name status priority deadline docs_required docs_received
+          service_type { id name category }
+          assigned_user { id name email }
+        }
+        emails(limit: $emailsLimit) {
+          id subject direction status is_read sentiment created_at
+        }
+        notes(limit: $notesLimit) {
+          id note created_at
+          staff { id name }
+        }
+        assigned_staff { id name email role }
+      }
+    }
+  `;
+  const data = await graphqlQuery<{ client: GQLClient | null }>(query, {
+    id,
+    documentsLimit: options?.documentsLimit ?? 10,
+    servicesLimit: options?.servicesLimit ?? 10,
+    emailsLimit: options?.emailsLimit ?? 10,
+    notesLimit: options?.notesLimit ?? 20,
+  });
+  return data.client;
+}
+
+/**
+ * Fetch paginated clients with optional filters.
+ *
+ * WHY: Client lists need Relay-style pagination for infinite scroll and filtering.
+ * GraphQL provides cursor-based pagination with total count for UI.
+ */
+export async function gqlGetClients(
+  filter?: GQLClientFilter,
+  first = 20,
+  after?: string
+): Promise<GQLClientConnection> {
+  const query = `
+    query Clients($filter: ClientFilter, $first: Int, $after: String) {
+      clients(filter: $filter, first: $first, after: $after) {
+        edges {
+          cursor
+          node {
+            id company_name contact_name email phone status
+            risk_score email_status last_contact_at created_at
+          }
+        }
+        page_info { has_next_page has_previous_page start_cursor end_cursor }
+        total_count
+      }
+    }
+  `;
+  const data = await graphqlQuery<{ clients: GQLClientConnection }>(query, {
+    filter,
+    first,
+    after,
+  });
+  return data.clients;
+}
+
+// -----------------------------------------------------------------------------
+// Document Queries
+// -----------------------------------------------------------------------------
+
+/**
+ * Fetch a single document with related entities.
+ *
+ * WHY: Document detail pages need the document plus client, service, and user
+ * relationships resolved in a single request.
+ */
+export async function gqlGetDocument(id: string): Promise<GQLDocument | null> {
+  const query = `
+    query Document($id: UUID!) {
+      document(id: $id) {
+        id tenant_id client_id service_id name original_name
+        file_key file_size mime_type status ai_summary ai_extracted
+        requested_by uploaded_by reviewed_by reviewed_at expires_at
+        created_at updated_at
+        client { id company_name contact_name email }
+        service { id name status }
+        document_type { id name description category }
+        requested_by_user { id name email }
+        uploaded_by_user { id name email }
+        reviewed_by_user { id name email }
+      }
+    }
+  `;
+  const data = await graphqlQuery<{ document: GQLDocument | null }>(query, { id });
+  return data.document;
+}
+
+/**
+ * Fetch paginated documents with optional filters.
+ *
+ * WHY: Document lists support filtering by client, service, status, type, and
+ * date range. GraphQL provides flexible filtering with cursor pagination.
+ */
+export async function gqlGetDocuments(
+  filter?: GQLDocumentFilter,
+  first = 20,
+  after?: string
+): Promise<GQLDocumentConnection> {
+  const query = `
+    query Documents($filter: DocumentFilter, $first: Int, $after: String) {
+      documents(filter: $filter, first: $first, after: $after) {
+        edges {
+          cursor
+          node {
+            id name original_name status ai_summary created_at
+            client { id company_name }
+            document_type { id name category }
+          }
+        }
+        page_info { has_next_page has_previous_page start_cursor end_cursor }
+        total_count
+      }
+    }
+  `;
+  const data = await graphqlQuery<{ documents: GQLDocumentConnection }>(query, {
+    filter,
+    first,
+    after,
+  });
+  return data.documents;
+}
+
+// -----------------------------------------------------------------------------
+// Service Queries
+// -----------------------------------------------------------------------------
+
+/**
+ * Fetch a single service with related entities.
+ *
+ * WHY: Service detail pages need the service plus client, type, assigned user,
+ * and documents resolved efficiently.
+ */
+export async function gqlGetService(id: string, documentsLimit = 10): Promise<GQLService | null> {
+  const query = `
+    query Service($id: UUID!, $documentsLimit: Int) {
+      service(id: $id) {
+        id tenant_id client_id service_type_id name description
+        status priority deadline completed_at docs_required docs_received
+        assigned_to hmrc_data created_at updated_at
+        client { id company_name contact_name email }
+        service_type { id name description category default_deadline_days required_documents }
+        assigned_user { id name email }
+        documents(limit: $documentsLimit) {
+          id name status created_at
+          document_type { id name }
+        }
+      }
+    }
+  `;
+  const data = await graphqlQuery<{ service: GQLService | null }>(query, { id, documentsLimit });
+  return data.service;
+}
+
+/**
+ * Fetch paginated services with optional filters.
+ *
+ * WHY: Service lists need filtering by client, status, priority, type, assignee,
+ * and deadline range with cursor pagination for large datasets.
+ */
+export async function gqlGetServices(
+  filter?: GQLServiceFilter,
+  first = 20,
+  after?: string
+): Promise<GQLServiceConnection> {
+  const query = `
+    query Services($filter: ServiceFilter, $first: Int, $after: String) {
+      services(filter: $filter, first: $first, after: $after) {
+        edges {
+          cursor
+          node {
+            id name status priority deadline docs_required docs_received created_at
+            client { id company_name }
+            service_type { id name }
+            assigned_user { id name }
+          }
+        }
+        page_info { has_next_page has_previous_page start_cursor end_cursor }
+        total_count
+      }
+    }
+  `;
+  const data = await graphqlQuery<{ services: GQLServiceConnection }>(query, {
+    filter,
+    first,
+    after,
+  });
+  return data.services;
+}
+
+// -----------------------------------------------------------------------------
+// Email Queries
+// -----------------------------------------------------------------------------
+
+/**
+ * Fetch a single email with related entities.
+ *
+ * WHY: Email detail view needs the email plus client, staff, and thread context.
+ */
+export async function gqlGetEmail(id: string): Promise<GQLEmail | null> {
+  const query = `
+    query Email($id: UUID!) {
+      email(id: $id) {
+        id tenant_id client_id staff_id thread_id direction
+        from_email to_email subject body_text body_html status is_read
+        sentiment ai_summary ai_action_items sent_at received_at created_at
+        client { id company_name contact_name email }
+        staff { id name email }
+        thread { id subject message_count last_message_at }
+      }
+    }
+  `;
+  const data = await graphqlQuery<{ email: GQLEmail | null }>(query, { id });
+  return data.email;
+}
+
+/**
+ * Fetch an email thread with all messages.
+ *
+ * WHY: Thread view needs the full conversation history with client context.
+ */
+export async function gqlGetEmailThread(id: string, emailsLimit = 20): Promise<GQLEmailThread | null> {
+  const query = `
+    query EmailThread($id: UUID!, $emailsLimit: Int) {
+      email_thread(id: $id) {
+        id tenant_id client_id subject last_message_at message_count created_at
+        emails(limit: $emailsLimit) {
+          id direction from_email to_email subject body_text status is_read
+          sentiment ai_summary sent_at received_at created_at
+          staff { id name }
+        }
+        client { id company_name contact_name email }
+      }
+    }
+  `;
+  const data = await graphqlQuery<{ email_thread: GQLEmailThread | null }>(query, { id, emailsLimit });
+  return data.email_thread;
+}
+
+// -----------------------------------------------------------------------------
+// Notification Queries
+// -----------------------------------------------------------------------------
+
+/**
+ * Fetch notifications for the current user.
+ *
+ * WHY: Notification lists need filtering by read status with efficient pagination.
+ */
+export async function gqlGetNotifications(
+  unreadOnly = false,
+  limit = 20
+): Promise<GQLNotification[]> {
+  const query = `
+    query Notifications($unreadOnly: Boolean, $limit: Int) {
+      notifications(unread_only: $unreadOnly, limit: $limit) {
+        id tenant_id user_id type title message
+        entity_type entity_id is_read read_at created_at
+      }
+    }
+  `;
+  const data = await graphqlQuery<{ notifications: GQLNotification[] }>(query, {
+    unreadOnly,
+    limit,
+  });
+  return data.notifications;
+}
+
+/**
+ * Get the count of unread notifications.
+ *
+ * WHY: Badge counts need just the number without fetching all notifications.
+ */
+export async function gqlGetUnreadNotificationCount(): Promise<number> {
+  const query = `
+    query UnreadNotificationCount {
+      unread_notification_count
+    }
+  `;
+  const data = await graphqlQuery<{ unread_notification_count: number }>(query);
+  return data.unread_notification_count;
+}
+
+// -----------------------------------------------------------------------------
+// AI Queries
+// -----------------------------------------------------------------------------
+
+/**
+ * Fetch AI chat conversations for the current user.
+ *
+ * WHY: AI chat history is stored in MongoDB and accessed via GraphQL proxy.
+ */
+export async function gqlGetAIConversations(limit = 20): Promise<GQLAIConversation[]> {
+  const query = `
+    query AIConversations($limit: Int) {
+      ai_conversations(limit: $limit) {
+        id conversation_id user_id tenant_id
+        messages { role content timestamp metadata }
+        created_at updated_at
+      }
+    }
+  `;
+  const data = await graphqlQuery<{ ai_conversations: GQLAIConversation[] }>(query, { limit });
+  return data.ai_conversations;
+}
+
+/**
+ * Fetch a single AI conversation by ID.
+ *
+ * WHY: Loading a specific chat thread from MongoDB.
+ */
+export async function gqlGetAIConversation(id: string): Promise<GQLAIConversation | null> {
+  const query = `
+    query AIConversation($id: String!) {
+      ai_conversation(id: $id) {
+        id conversation_id user_id tenant_id
+        messages { role content timestamp metadata }
+        created_at updated_at
+      }
+    }
+  `;
+  const data = await graphqlQuery<{ ai_conversation: GQLAIConversation | null }>(query, { id });
+  return data.ai_conversation;
+}
+
+/**
+ * Fetch clients flagged as high-risk "troublemakers".
+ *
+ * WHY: AI analysis identifies problematic clients based on risk factors like
+ * overdue services, pending documents, and communication patterns.
+ */
+export async function gqlGetTroublemakerClients(limit = 10): Promise<GQLTroublemakerClient[]> {
+  const query = `
+    query TroublemakerClients($limit: Int) {
+      troublemaker_clients(limit: $limit) {
+        client_id client_name company_name risk_score risk_level
+        risk_factors { factor severity description }
+        recommended_actions last_contact_at overdue_services pending_documents
+      }
+    }
+  `;
+  const data = await graphqlQuery<{ troublemaker_clients: GQLTroublemakerClient[] }>(query, { limit });
+  return data.troublemaker_clients;
+}
+
+/**
+ * Fetch detected anomalies across the system.
+ *
+ * WHY: AI analysis detects unusual patterns like sudden activity changes,
+ * document anomalies, or communication irregularities.
+ */
+export async function gqlGetAnomalies(limit = 10): Promise<GQLAnomalyItem[]> {
+  const query = `
+    query Anomalies($limit: Int) {
+      anomalies(limit: $limit) {
+        type entity_type entity_id title description
+        severity detected_at client_name
+      }
+    }
+  `;
+  const data = await graphqlQuery<{ anomalies: GQLAnomalyItem[] }>(query, { limit });
+  return data.anomalies;
+}
+
+// -----------------------------------------------------------------------------
+// Search Queries
+// -----------------------------------------------------------------------------
+
+/**
+ * Unified search across clients, documents, services, and emails.
+ *
+ * WHY: Global search needs to query multiple entity types and return unified
+ * results with highlights and deep links. GraphQL aggregates this efficiently.
+ */
+export async function gqlSearch(query: string, limit = 20): Promise<GQLSearchResults> {
+  const gqlQuery = `
+    query Search($query: String!, $limit: Int) {
+      search(query: $query, limit: $limit) {
+        clients { id type title subtitle description highlight url }
+        documents { id type title subtitle description highlight url }
+        services { id type title subtitle description highlight url }
+        emails { id type title subtitle description highlight url }
+        total_count
+      }
+    }
+  `;
+  const data = await graphqlQuery<{ search: GQLSearchResults }>(gqlQuery, { query, limit });
+  return data.search;
+}
+
+/**
+ * Get recent searches for the current user.
+ *
+ * WHY: Search history improves UX by showing recently accessed items.
+ */
+export async function gqlGetRecentSearches(limit = 5): Promise<GQLSearchResult[]> {
+  const query = `
+    query RecentSearches($limit: Int) {
+      recent_searches(limit: $limit) {
+        id type title subtitle description url
+      }
+    }
+  `;
+  const data = await graphqlQuery<{ recent_searches: GQLSearchResult[] }>(query, { limit });
+  return data.recent_searches;
+}
+
+// -----------------------------------------------------------------------------
+// Lookup Type Queries
+// -----------------------------------------------------------------------------
+
+/**
+ * Fetch all document types for the tenant.
+ *
+ * WHY: Document type dropdowns and filters need the full list of available types.
+ */
+export async function gqlGetDocumentTypes(): Promise<GQLDocumentType[]> {
+  const query = `
+    query DocumentTypes {
+      document_types {
+        id tenant_id name description category is_active created_at
+      }
+    }
+  `;
+  const data = await graphqlQuery<{ document_types: GQLDocumentType[] }>(query);
+  return data.document_types;
+}
+
+/**
+ * Fetch all service types for the tenant.
+ *
+ * WHY: Service type dropdowns and filters need the full list of available types.
+ */
+export async function gqlGetServiceTypes(): Promise<GQLServiceType[]> {
+  const query = `
+    query ServiceTypes {
+      service_types {
+        id tenant_id name description category default_deadline_days
+        required_documents is_active created_at
+      }
+    }
+  `;
+  const data = await graphqlQuery<{ service_types: GQLServiceType[] }>(query);
+  return data.service_types;
+}
+
+/**
+ * Fetch the current authenticated user.
+ *
+ * WHY: User context is needed throughout the app for permissions and display.
+ */
+export async function gqlGetMe(): Promise<GQLUser> {
+  const query = `
+    query Me {
+      me {
+        id tenant_id email name role avatar_url
+        is_active last_login_at created_at updated_at
+      }
+    }
+  `;
+  const data = await graphqlQuery<{ me: GQLUser }>(query);
+  return data.me;
+}
+
+// -----------------------------------------------------------------------------
+// Mutations
+// -----------------------------------------------------------------------------
+
+/**
+ * Mark a notification as read.
+ *
+ * WHY: Clicking a notification should mark it read without a full page reload.
+ */
+export async function gqlMarkNotificationRead(id: string): Promise<GQLNotification> {
+  const mutation = `
+    mutation MarkNotificationRead($id: UUID!) {
+      mark_notification_read(id: $id) {
+        id is_read read_at
+      }
+    }
+  `;
+  const data = await graphqlQuery<{ mark_notification_read: GQLNotification }>(mutation, { id });
+  return data.mark_notification_read;
+}
+
+/**
+ * Mark all notifications as read.
+ *
+ * WHY: "Mark all read" button clears the notification backlog in one action.
+ */
+export async function gqlMarkAllNotificationsRead(): Promise<number> {
+  const mutation = `
+    mutation MarkAllNotificationsRead {
+      mark_all_notifications_read
+    }
+  `;
+  const data = await graphqlQuery<{ mark_all_notifications_read: number }>(mutation);
+  return data.mark_all_notifications_read;
+}
+
+/**
+ * Dismiss (delete) a notification.
+ *
+ * WHY: Users can remove notifications they don't want to see anymore.
+ */
+export async function gqlDismissNotification(id: string): Promise<boolean> {
+  const mutation = `
+    mutation DismissNotification($id: UUID!) {
+      dismiss_notification(id: $id)
+    }
+  `;
+  const data = await graphqlQuery<{ dismiss_notification: boolean }>(mutation, { id });
+  return data.dismiss_notification;
+}
+
+/**
+ * Approve a document with an optional note.
+ *
+ * WHY: Quick document approval action from lists or detail views without
+ * navigating to a separate approval form.
+ */
+export async function gqlApproveDocument(id: string, note?: string): Promise<GQLDocument> {
+  const mutation = `
+    mutation ApproveDocument($id: UUID!, $note: String) {
+      approve_document(id: $id, note: $note) {
+        id status reviewed_by reviewed_at updated_at
+      }
+    }
+  `;
+  const data = await graphqlQuery<{ approve_document: GQLDocument }>(mutation, { id, note });
+  return data.approve_document;
+}
+
+/**
+ * Reject a document with a required note explaining why.
+ *
+ * WHY: Document rejection requires a reason for audit trail and client communication.
+ */
+export async function gqlRejectDocument(id: string, note: string): Promise<GQLDocument> {
+  const mutation = `
+    mutation RejectDocument($id: UUID!, $note: String!) {
+      reject_document(id: $id, note: $note) {
+        id status reviewed_by reviewed_at updated_at
+      }
+    }
+  `;
+  const data = await graphqlQuery<{ reject_document: GQLDocument }>(mutation, { id, note });
+  return data.reject_document;
+}
+
+/**
+ * Update a service's status.
+ *
+ * WHY: Quick status updates from kanban board drag-drop or list actions.
+ * Status changes also trigger completed_at timestamp when set to COMPLETED.
+ */
+export async function gqlUpdateServiceStatus(
+  id: string,
+  status: GQLServiceStatus
+): Promise<GQLService> {
+  const mutation = `
+    mutation UpdateServiceStatus($id: UUID!, $status: ServiceStatus!) {
+      update_service_status(id: $id, status: $status) {
+        id status completed_at updated_at
+      }
+    }
+  `;
+  const data = await graphqlQuery<{ update_service_status: GQLService }>(mutation, { id, status });
+  return data.update_service_status;
+}
+
+/**
+ * Claim an email (assign to current user).
+ *
+ * WHY: Staff can claim unassigned inbound emails to handle them.
+ */
+export async function gqlClaimEmail(id: string): Promise<GQLEmail> {
+  const mutation = `
+    mutation ClaimEmail($id: UUID!) {
+      claim_email(id: $id) {
+        id staff_id
+        staff { id name email }
+      }
+    }
+  `;
+  const data = await graphqlQuery<{ claim_email: GQLEmail }>(mutation, { id });
+  return data.claim_email;
+}
+
+/**
+ * Unclaim an email (remove assignment from current user).
+ *
+ * WHY: Staff can release an email back to the pool if they can't handle it.
+ */
+export async function gqlUnclaimEmail(id: string): Promise<GQLEmail> {
+  const mutation = `
+    mutation UnclaimEmail($id: UUID!) {
+      unclaim_email(id: $id) {
+        id staff_id
+      }
+    }
+  `;
+  const data = await graphqlQuery<{ unclaim_email: GQLEmail }>(mutation, { id });
+  return data.unclaim_email;
+}
+
+/**
+ * Mark an email as read.
+ *
+ * WHY: Opening an email should mark it as read for unread counts.
+ */
+export async function gqlMarkEmailRead(id: string): Promise<GQLEmail> {
+  const mutation = `
+    mutation MarkEmailRead($id: UUID!) {
+      mark_email_read(id: $id) {
+        id is_read
+      }
+    }
+  `;
+  const data = await graphqlQuery<{ mark_email_read: GQLEmail }>(mutation, { id });
+  return data.mark_email_read;
+}
+
+/**
+ * Delete an AI conversation.
+ *
+ * WHY: Users can clear chat history they no longer need.
+ */
+export async function gqlDeleteAIConversation(id: string): Promise<boolean> {
+  const mutation = `
+    mutation DeleteAIConversation($id: String!) {
+      delete_ai_conversation(id: $id)
+    }
+  `;
+  const data = await graphqlQuery<{ delete_ai_conversation: boolean }>(mutation, { id });
+  return data.delete_ai_conversation;
+}
