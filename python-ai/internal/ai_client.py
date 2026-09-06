@@ -1,17 +1,30 @@
 """
 AI Client for document processing.
 
-Provides AI-powered document analysis using Groq (primary) and Claude (fallback).
-OpenRouter is used for vision tasks (Groq deprecated vision models).
+Provides AI-powered document analysis using OpenRouter (primary) and Claude (fallback).
+OpenRouter replaces Groq which deprecated its models.
 """
 
 import base64
 import json
+import re
 from typing import Any, Dict, List, Optional
 
 import httpx
 import structlog
 from groq import Groq, AsyncGroq
+
+
+def strip_markdown_code_blocks(text: str) -> str:
+    """Strip markdown code blocks from AI response."""
+    if not text:
+        return text
+    # Remove ```json ... ``` or ``` ... ```
+    pattern = r'^```(?:json)?\s*\n?(.*?)\n?```$'
+    match = re.match(pattern, text.strip(), re.DOTALL)
+    if match:
+        return match.group(1).strip()
+    return text
 
 try:
     import anthropic
@@ -91,7 +104,7 @@ class GroqClient:
     def is_configured(self) -> bool:
         """Check if at least one AI provider is configured."""
         settings = get_settings()
-        return bool(settings.groq_api_key) or bool(settings.anthropic_api_key)
+        return bool(settings.openrouter_api_key) or bool(settings.anthropic_api_key)
 
     def has_fallback(self) -> bool:
         """Check if Claude fallback is available."""
@@ -107,7 +120,7 @@ class GroqClient:
         json_response: bool = True,
     ) -> str:
         """
-        Call AI with Groq primary and Claude Haiku fallback.
+        Call AI with OpenRouter primary and Claude Haiku fallback.
 
         Args:
             system_prompt: System message for context.
@@ -125,28 +138,53 @@ class GroqClient:
         settings = get_settings()
         last_error = None
 
-        # Try Groq first
-        if settings.groq_api_key:
+        # Try OpenRouter first (replaces Groq which deprecated models)
+        if settings.openrouter_api_key:
             try:
-                kwargs = {
-                    "model": settings.groq_model,
-                    "messages": [
-                        {"role": "system", "content": system_prompt},
-                        {"role": "user", "content": user_prompt},
-                    ],
-                    "max_tokens": max_tokens,
-                    "temperature": temperature,
-                }
-                if json_response:
-                    kwargs["response_format"] = {"type": "json_object"}
+                # Add JSON instruction to system prompt if needed
+                effective_system = system_prompt
+                if json_response and "JSON" not in system_prompt:
+                    effective_system += "\n\nIMPORTANT: Respond with valid JSON only."
 
-                response = await self.client.chat.completions.create(**kwargs)
-                return response.choices[0].message.content
+                logger.debug(
+                    "Calling OpenRouter",
+                    model=settings.openrouter_model,
+                    prompt_length=len(user_prompt),
+                )
+                response = await self.openrouter_client.post(
+                    "/chat/completions",
+                    json={
+                        "model": settings.openrouter_model,
+                        "messages": [
+                            {"role": "system", "content": effective_system},
+                            {"role": "user", "content": user_prompt},
+                        ],
+                        "max_tokens": max_tokens,
+                        "temperature": temperature,
+                    },
+                )
+                response.raise_for_status()
+                response_data = response.json()
+                logger.debug(
+                    "OpenRouter response received",
+                    status=response.status_code,
+                    has_choices=bool(response_data.get("choices")),
+                )
+                content = response_data["choices"][0]["message"]["content"]
+                logger.debug(
+                    "OpenRouter content",
+                    content_length=len(content) if content else 0,
+                    content_preview=content[:100] if content else "None",
+                )
+                # Strip markdown code blocks if expecting JSON
+                if json_response and content:
+                    content = strip_markdown_code_blocks(content)
+                return content
 
             except Exception as e:
                 last_error = e
                 logger.warning(
-                    "Groq request failed, trying Claude fallback",
+                    "OpenRouter request failed, trying Claude fallback",
                     error=str(e),
                 )
 

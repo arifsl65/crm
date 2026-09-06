@@ -179,9 +179,10 @@ class Settings(BaseSettings):
     groq_max_tokens: int = 4096
     groq_temperature: float = 0.1  # Low for consistent document analysis
 
-    # OpenRouter AI (vision model provider - Groq deprecated vision models)
+    # OpenRouter AI (primary provider - replaces Groq which deprecated models)
     openrouter_api_key: str = ""
     openrouter_base_url: str = "https://openrouter.ai/api/v1"
+    openrouter_model: str = "minimax/minimax-m3:free"  # Free multimodal model for text tasks
     openrouter_vision_model: str = "minimax/minimax-m3:free"  # Free vision model for OCR
     openrouter_max_tokens: int = 4096
 
