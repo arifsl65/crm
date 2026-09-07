@@ -151,28 +151,31 @@ export function clearAuth(): void {
 }
 
 export function isAuthenticated(): boolean {
-  return !!getAccessToken();
+  // Fix #7 update: Check user in localStorage since access_token is in httpOnly cookie
+  // The actual token validation happens via validateToken() API call
+  return getUser() !== null;
 }
 
 /**
  * Validates the current access token with the server.
  * Fix #30: Prevents stale/expired tokens from passing as authenticated.
+ * Fix #7 update: Token is in httpOnly cookie, sent automatically with credentials: 'include'
  * Returns the user if valid, null if invalid (triggers refresh or logout).
  */
 export async function validateToken(): Promise<User | null> {
-  const token = getAccessToken();
-  if (!token) {
+  // Quick check: if no user in localStorage, likely not logged in
+  if (!getUser()) {
     return null;
   }
 
   try {
+    // Token is sent automatically via httpOnly cookie with credentials: 'include'
     const res = await fetch(`${API_URL}/api/v1/auth/me`, {
       method: 'GET',
       headers: {
-        'Authorization': `Bearer ${token}`,
         'Content-Type': 'application/json',
       },
-      credentials: 'include', // Required for cross-subdomain requests
+      credentials: 'include', // Required for cross-subdomain cookie handling
     });
 
     if (!res.ok) {
