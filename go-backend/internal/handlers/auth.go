@@ -1036,7 +1036,7 @@ func (h *AuthHandler) GetMe(c *gin.Context) {
 	}
 
 	query := `
-		SELECT id, tenant_id, email, COALESCE(name, '') as name, role, phone, avatar_url, settings,
+		SELECT id, tenant_id, email, COALESCE(name, '') as name, role, phone, avatar_url, preferences,
 		       last_login_at, created_at
 		FROM users WHERE id = $1 AND deleted_at IS NULL
 	`
