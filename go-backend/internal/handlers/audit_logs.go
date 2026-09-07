@@ -77,7 +77,7 @@ func (h *AuditLogHandler) List(c *gin.Context) {
 	argNum := 1
 
 	query.WriteString(`
-		SELECT al.id, al.tenant_id, al.user_id, COALESCE(u.first_name || ' ' || u.last_name, u.first_name, u.last_name, '') as user_name,
+		SELECT al.id, al.tenant_id, al.user_id, COALESCE(u.name, '') as user_name,
 		       al.action, al.entity_type, al.entity_id,
 		       al.old_value, al.new_value, al.metadata,
 		       al.ip_address, al.severity, al.created_at
@@ -132,7 +132,7 @@ func (h *AuditLogHandler) List(c *gin.Context) {
 		query.WriteString(strconv.Itoa(argNum))
 		query.WriteString(` OR al.entity_type ILIKE $`)
 		query.WriteString(strconv.Itoa(argNum))
-		query.WriteString(` OR COALESCE(u.first_name || ' ' || u.last_name, u.first_name, u.last_name, '') ILIKE $`)
+		query.WriteString(` OR COALESCE(u.name, '') ILIKE $`)
 		query.WriteString(strconv.Itoa(argNum))
 		query.WriteString(`)`)
 		args = append(args, "%"+search+"%")
@@ -242,7 +242,7 @@ func (h *AuditLogHandler) Get(c *gin.Context) {
 	}
 
 	query := `
-		SELECT al.id, al.tenant_id, al.user_id, COALESCE(u.first_name || ' ' || u.last_name, u.first_name, u.last_name, '') as user_name,
+		SELECT al.id, al.tenant_id, al.user_id, COALESCE(u.name, '') as user_name,
 		       al.action, al.entity_type, al.entity_id,
 		       al.old_value, al.new_value, al.metadata,
 		       al.ip_address, al.severity, al.created_at

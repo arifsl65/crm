@@ -278,6 +278,25 @@ func (h *AuthHandler) Login(c *gin.Context) {
 func (h *AuthHandler) Register(c *gin.Context) {
 	ctx := c.Request.Context()
 
+	// Fix #4: Disable open registration - require invite-only flow
+	// This prevents unauthorized users from joining any tenant
+	log.Warn().
+		Str("ip", c.ClientIP()).
+		Msg("Registration attempt blocked - open registration disabled")
+	
+	c.JSON(http.StatusForbidden, gin.H{
+		"error":   "registration_disabled",
+		"message": "Open registration is disabled. Please contact your administrator for an invitation.",
+	})
+	return
+
+	// NOTE: The code below is kept for reference but is unreachable due to the security fix above.
+	// To re-enable open registration in the future, add proper tenant validation:
+	// 1. Verify tenant exists and is active
+	// 2. Check tenant settings for allow_open_registration flag
+	// 3. Validate tenant is not deleted
+	// 4. Add rate limiting per tenant (not just per IP)
+
 	// SECURITY: Rate limit registration by IP to prevent mass account creation
 	if h.rateLimiter != nil {
 		allowed, count, ttl, err := h.rateLimiter.CheckRegisterRate(ctx, c.ClientIP())
@@ -300,6 +319,52 @@ func (h *AuthHandler) Register(c *gin.Context) {
 	}
 
 	tenantID, _ := uuid.Parse(req.TenantID)
+
+	// Fix #4: Validate tenant exists, is active, and not deleted
+	var tenantExists bool
+	var tenantActive bool
+	var tenantDeleted bool
+	err := h.db.QueryRow(ctx, `
+		SELECT EXISTS(SELECT 1 FROM tenants WHERE id = $1),
+		       COALESCE((SELECT is_active FROM tenants WHERE id = $1), false),
+		       COALESCE((SELECT deleted_at IS NOT NULL FROM tenants WHERE id = $1), true)
+	`, tenantID).Scan(&tenantExists, &tenantActive, &tenantDeleted)
+	
+	if err != nil || !tenantExists {
+		log.Warn().
+			Str("tenant_id", tenantID.String()).
+			Str("ip", c.ClientIP()).
+			Msg("Registration attempt for non-existent tenant")
+		c.JSON(http.StatusBadRequest, gin.H{
+			"error":   "invalid_tenant",
+			"message": "Invalid tenant ID",
+		})
+		return
+	}
+	
+	if tenantDeleted {
+		log.Warn().
+			Str("tenant_id", tenantID.String()).
+			Str("ip", c.ClientIP()).
+			Msg("Registration attempt for deleted tenant")
+		c.JSON(http.StatusBadRequest, gin.H{
+			"error":   "tenant_deleted",
+			"message": "This tenant has been deleted",
+		})
+		return
+	}
+	
+	if !tenantActive {
+		log.Warn().
+			Str("tenant_id", tenantID.String()).
+			Str("ip", c.ClientIP()).
+			Msg("Registration attempt for inactive tenant")
+		c.JSON(http.StatusForbidden, gin.H{
+			"error":   "tenant_inactive",
+			"message": "This tenant is not active",
+		})
+		return
+	}
 
 	exists, err := h.emailExists(ctx, req.Email)
 	if err != nil {
@@ -613,7 +678,7 @@ func (h *AuthHandler) getUserByEmail(ctx context.Context, email string, tenantID
 			// Tenant-scoped lookup
 			query := `
 				SELECT id, tenant_id, email, password_hash,
-				       COALESCE(first_name || ' ' || last_name, first_name, last_name, '') as name,
+				       COALESCE(name, '') as name,
 				       role, status, failed_login_attempts, locked_until
 				FROM users
 				WHERE email = $1 AND tenant_id = $2 AND deleted_at IS NULL
@@ -646,7 +711,7 @@ func (h *AuthHandler) getUserByEmail(ctx context.Context, email string, tenantID
 		// Single tenant or super_admin - proceed with lookup
 		query := `
 			SELECT id, tenant_id, email, password_hash,
-			       COALESCE(first_name || ' ' || last_name, first_name, last_name, '') as name,
+			       COALESCE(name, '') as name,
 			       role, status, failed_login_attempts, locked_until
 			FROM users
 			WHERE email = $1 AND deleted_at IS NULL
@@ -897,7 +962,7 @@ type userRecordForReset struct {
 }
 
 func (h *AuthHandler) getUserByEmailForReset(ctx context.Context, email string) (*userRecordForReset, error) {
-	query := `SELECT id, email, COALESCE(first_name || ' ' || last_name, first_name, last_name, '') as name FROM users WHERE email = $1 AND deleted_at IS NULL`
+	query := `SELECT id, email, COALESCE(name, '') as name FROM users WHERE email = $1 AND deleted_at IS NULL`
 	var user userRecordForReset
 	var qErr error
 	if err := h.db.SuperAdminTransaction(ctx, func(tx pgx.Tx) error {
@@ -971,7 +1036,7 @@ func (h *AuthHandler) GetMe(c *gin.Context) {
 	}
 
 	query := `
-		SELECT id, tenant_id, email, COALESCE(first_name || ' ' || last_name, first_name, last_name, '') as name, role, phone, avatar_url, settings,
+		SELECT id, tenant_id, email, COALESCE(name, '') as name, role, phone, avatar_url, settings,
 		       last_login_at, created_at
 		FROM users WHERE id = $1 AND deleted_at IS NULL
 	`
@@ -1347,7 +1412,7 @@ func (h *AuthHandler) VerifyMagicLink(c *gin.Context) {
 	var user userRecord
 	err = h.db.SuperAdminTransaction(ctx, func(tx pgx.Tx) error {
 		return tx.QueryRow(ctx, `
-			SELECT id, tenant_id, email, COALESCE(first_name || ' ' || last_name, first_name, last_name, '') as name, role FROM users WHERE id = $1 AND deleted_at IS NULL
+			SELECT id, tenant_id, email, COALESCE(name, '') as name, role FROM users WHERE id = $1 AND deleted_at IS NULL
 		`, userID).Scan(&user.ID, &user.TenantID, &user.Email, &user.Name, &user.Role)
 	})
 	if err != nil {

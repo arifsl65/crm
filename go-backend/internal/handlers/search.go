@@ -87,7 +87,9 @@ func (h *SearchHandler) Search(c *gin.Context) {
 		limitPerType = 3
 	}
 
-	searchPattern := "%" + query + "%"
+	// Fix #2: Escape LIKE wildcards to prevent pattern abuse
+	escapedQuery := escapeLikePattern(query)
+	searchPattern := "%" + escapedQuery + "%"
 	isStaff := role == "staff"
 
 	var results []SearchResult

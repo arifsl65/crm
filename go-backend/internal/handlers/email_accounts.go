@@ -108,7 +108,7 @@ func (h *EmailAccountHandler) List(c *gin.Context) {
 		SELECT ea.id, ea.tenant_id, ea.user_id, ea.email, ea.type, ea.auth_method,
 		       ea.provider, ea.imap_host, ea.imap_port, ea.status, ea.last_sync_at,
 		       ea.error_message, ea.oauth_expires_at, ea.created_at, ea.updated_at,
-		       COALESCE(u.first_name || ' ' || u.last_name, u.first_name, u.last_name, '') as user_name
+		       COALESCE(u.name, '') as user_name
 		FROM email_accounts ea
 		LEFT JOIN users u ON ea.user_id = u.id
 		WHERE ea.tenant_id = $1
@@ -201,7 +201,7 @@ func (h *EmailAccountHandler) Get(c *gin.Context) {
 		SELECT ea.id, ea.tenant_id, ea.user_id, ea.email, ea.type, ea.auth_method,
 		       ea.provider, ea.imap_host, ea.imap_port, ea.status, ea.last_sync_at,
 		       ea.error_message, ea.oauth_expires_at, ea.created_at, ea.updated_at,
-		       COALESCE(u.first_name || ' ' || u.last_name, u.first_name, u.last_name, '') as user_name
+		       COALESCE(u.name, '') as user_name
 		FROM email_accounts ea
 		LEFT JOIN users u ON ea.user_id = u.id
 		WHERE ea.id = $1 AND ea.tenant_id = $2
