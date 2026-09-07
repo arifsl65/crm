@@ -54,6 +54,7 @@ services:
       # Python AI service (internal)
       - PYTHON_AI_URL=http://python-ai:8000
       - PYTHON_AI_TIMEOUT=30s
+      - PYTHON_AI_API_SECRET=${INTERNAL_API_SECRET}
       # Alibaba Cloud OSS Storage
       - OSS_ENABLED=${OSS_ENABLED:-true}
       - ALIBABA_ACCESS_KEY_ID=${ALIBABA_ACCESS_KEY_ID}
