@@ -555,6 +555,59 @@ func (h *AuthHandler) getUserByEmail(ctx context.Context, email string, tenantID
 
 	var result *userRecord
 	var qErr error
+	
+	// Bypass transaction for login - use direct query to avoid Neon pooler issues
+	// SuperAdminTransaction sets app.role='super_admin' which bypasses RLS anyway
+	if tenantID != nil {
+		// Tenant-scoped lookup - direct query without transaction
+		query := `
+			SELECT id, tenant_id, email, password, name,
+			       role, status, failed_login_attempts, locked_until
+			FROM users
+			WHERE email = $1 AND tenant_id = $2 AND deleted_at IS NULL
+		`
+		var user userRecord
+		qErr = h.db.QueryRow(ctx, query, email, *tenantID).Scan(
+			&user.ID, &user.TenantID, &user.Email, &user.Password,
+			&user.Name, &user.Role, &user.Status,
+			&user.FailedLoginAttempts, &user.LockedUntil,
+		)
+		if qErr == nil {
+			result = &user
+		}
+	} else {
+		// No tenant specified - check how many tenants have this email
+		countQuery := `SELECT COUNT(DISTINCT tenant_id) FROM users WHERE email = $1 AND deleted_at IS NULL`
+		var count int
+		qErr = h.db.QueryRow(ctx, countQuery, email).Scan(&count)
+		if qErr != nil {
+			return nil, qErr
+		}
+
+		if count > 1 {
+			return nil, errors.New("multiple_tenants")
+		}
+
+		// Single tenant or super_admin - proceed with lookup
+		query := `
+			SELECT id, tenant_id, email, password, name,
+			       role, status, failed_login_attempts, locked_until
+			FROM users
+			WHERE email = $1 AND deleted_at IS NULL
+		`
+		var user userRecord
+		qErr = h.db.QueryRow(ctx, query, email).Scan(
+			&user.ID, &user.TenantID, &user.Email, &user.Password,
+			&user.Name, &user.Role, &user.Status,
+			&user.FailedLoginAttempts, &user.LockedUntil,
+		)
+		if qErr == nil {
+			result = &user
+		}
+	}
+	
+	// Keep the old transaction-based code commented out for reference
+	/*
 	if err := h.db.SuperAdminTransaction(ctx, func(tx pgx.Tx) error {
 		if tenantID != nil {
 			// Tenant-scoped lookup
@@ -607,11 +660,8 @@ func (h *AuthHandler) getUserByEmail(ctx context.Context, email string, tenantID
 		if qErr == nil {
 			result = &user
 		}
-		return nil
-	}); err != nil {
-		return nil, err
-	}
-
+	*/
+	
 	return result, qErr
 }
 

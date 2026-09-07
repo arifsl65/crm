@@ -36,7 +36,7 @@ func NewPool(ctx context.Context, cfg config.PostgresConfig) (*Pool, error) {
 
 	// Use simple query mode for Neon's pgbouncer-based connection pooler.
 	// This avoids "prepared statement name is already in use" errors.
-	poolConfig.ConnConfig.DefaultQueryExecMode = pgx.QueryExecModeExec
+	poolConfig.ConnConfig.DefaultQueryExecMode = pgx.QueryExecModeSimpleProtocol
 
 	// Create the pool
 	pool, err := pgxpool.NewWithConfig(ctx, poolConfig)
@@ -180,9 +180,9 @@ func (p *Pool) TenantTransaction(ctx context.Context, tenantID, role string, fn 
 
 	// Set RLS context variables using set_config() which supports parameterized queries.
 	// Fix #29: Use set_config() instead of SET LOCAL to enable proper parameterization.
-	// The third parameter (true) makes it LOCAL to the transaction, equivalent to SET LOCAL.
+	// Using false (session-local) instead of true (transaction-local) for Neon compatibility.
 	if tenantID != "" {
-		_, err = tx.Exec(ctx, "SELECT set_config('app.tenant_id', $1, true)", tenantID)
+		_, err = tx.Exec(ctx, "SELECT set_config('app.tenant_id', $1, false)", tenantID)
 		if err != nil {
 			_ = tx.Rollback(ctx)
 			return fmt.Errorf("failed to set tenant_id: %w", err)
@@ -190,7 +190,7 @@ func (p *Pool) TenantTransaction(ctx context.Context, tenantID, role string, fn 
 	}
 
 	if role != "" {
-		_, err = tx.Exec(ctx, "SELECT set_config('app.role', $1, true)", role)
+		_, err = tx.Exec(ctx, "SELECT set_config('app.role', $1, false)", role)
 		if err != nil {
 			_ = tx.Rollback(ctx)
 			return fmt.Errorf("failed to set role: %w", err)
