@@ -66,8 +66,8 @@ END $$;
 -- =============================================================================
 -- 1. TENANT
 -- =============================================================================
-INSERT INTO tenants (id, name, domain, plan, timezone, is_active) VALUES
-('a0eebc99-9c0b-4ef8-bb6d-6bb9bd380a11', 'Demo Accounting Firm', 'demo', 'enterprise', 'Europe/London', true);
+INSERT INTO tenants (id, name, domain, custom_domain, plan, timezone, is_active) VALUES
+('a0eebc99-9c0b-4ef8-bb6d-6bb9bd380a11', 'Demo Accounting Firm', 'irislondonshoes.com', 'crm.irislondonshoes.com', 'enterprise', 'Europe/London', true);
 
 -- =============================================================================
 -- 2. USERS (1 Admin + 7 Staff + 4 Client Portal Users = 12 total)
