@@ -32,7 +32,7 @@ const subMenuItems: ModuleSubMenu = {
   clients: [
     { id: 'all', label: 'All', icon: '📋', panel: 'list', route: '/dashboard/clients' },
     { id: 'add', label: 'Add', icon: '➕', panel: 'add', route: '/dashboard/clients/add' },
-    { id: 'ch-lookup', label: 'CH Lookup', icon: '🔍', panel: 'ch-lookup', route: '/dashboard/clients/ch-lookup' },
+    { id: 'ch-lookup', label: 'Companies House', icon: '🏛️', panel: 'ch-lookup', route: '/dashboard/clients/companies-house' },
     { id: 'by-staff', label: 'By Staff', icon: '👤', panel: 'by-staff', route: '/dashboard/clients/by-staff' },
   ],
   // UI_MODULES.md: Documents (5 items) - Uses routing

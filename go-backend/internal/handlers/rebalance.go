@@ -290,7 +290,7 @@ func (h *RebalanceHandler) calculateWorkloads(c *gin.Context, tenantDB *middlewa
 	query := `
 		SELECT
 			u.id,
-			u.name,
+			COALESCE(u.first_name || ' ' || u.last_name, u.first_name, u.last_name, ''),
 			u.email,
 			u.specialism,
 			COALESCE(client_counts.cnt, 0) as client_count,
@@ -321,7 +321,7 @@ func (h *RebalanceHandler) calculateWorkloads(c *gin.Context, tenantDB *middlewa
 		AND u.role = 'staff'
 		AND u.status = 'active'
 		AND u.deleted_at IS NULL
-		ORDER BY u.name
+		ORDER BY COALESCE(u.first_name || ' ' || u.last_name, u.first_name, u.last_name, '')
 	`
 
 	var workloads []StaffWorkload
@@ -387,7 +387,7 @@ func (h *RebalanceHandler) getClientsWithWorkload(c *gin.Context, tenantDB *midd
 			c.id,
 			c.company_name,
 			u.id as staff_id,
-			u.name as staff_name,
+			COALESCE(u.first_name || ' ' || u.last_name, u.first_name, u.last_name, '') as staff_name,
 			COALESCE(svc.total, 0) as service_count,
 			COALESCE(svc.pending, 0) as pending_services,
 			COALESCE(svc.overdue, 0) as overdue_services

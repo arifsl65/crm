@@ -11,6 +11,7 @@ import {
   Director,
   PSC,
   CHFiling,
+  ClientNote,
   getClient,
   getClientDocuments,
   getClientServices,
@@ -18,11 +19,15 @@ import {
   getClientPSC,
   getCHFilings,
   syncClientWithCH,
+  getClientNotes,
+  createClientNote,
+  updateClientNote,
+  deleteClientNote,
 } from '@/lib/api';
 import { getStatusBadgeClass, formatStatus } from '@/lib/status';
 import { SkeletonCard } from '@/components';
 
-type MainTab = 'overview' | 'services' | 'documents' | 'companies-house';
+type MainTab = 'overview' | 'services' | 'documents' | 'notes' | 'companies-house';
 type CHTab = 'info' | 'officers' | 'filings' | 'psc';
 
 export default function ClientDetail() {
@@ -41,6 +46,7 @@ export default function ClientDetail() {
   const [pscList, setPscList] = useState<PSC[]>([]);
   const [filings, setFilings] = useState<CHFiling[]>([]);
   const [filingsTotal, setFilingsTotal] = useState(0);
+  const [notes, setNotes] = useState<ClientNote[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [activeTab, setActiveTab] = useState<MainTab>('overview');
@@ -48,6 +54,12 @@ export default function ClientDetail() {
   const [syncing, setSyncing] = useState(false);
   const [lastSynced, setLastSynced] = useState<string | null>(null);
   const [chLoading, setChLoading] = useState(false);
+  // Notes state
+  const [notesLoading, setNotesLoading] = useState(false);
+  const [showNoteForm, setShowNoteForm] = useState(false);
+  const [editingNote, setEditingNote] = useState<ClientNote | null>(null);
+  const [noteText, setNoteText] = useState('');
+  const [savingNote, setSavingNote] = useState(false);
 
   useEffect(() => {
     // Skip fetch if clientId is the static placeholder (happens during hydration)
@@ -73,6 +85,25 @@ export default function ClientDetail() {
     }
     fetchData();
   }, [clientId]);
+
+  // Load Notes when Notes tab is selected
+  useEffect(() => {
+    async function fetchNotes() {
+      if (!clientId || clientId === 'placeholder') return;
+      if (activeTab !== 'notes') return;
+
+      setNotesLoading(true);
+      try {
+        const notesData = await getClientNotes(clientId);
+        setNotes(notesData.notes || []);
+      } catch (err) {
+        console.error('Failed to load notes:', err);
+      } finally {
+        setNotesLoading(false);
+      }
+    }
+    fetchNotes();
+  }, [activeTab, clientId]);
 
   // Load CH data when Companies House tab is selected
   useEffect(() => {
@@ -124,6 +155,51 @@ export default function ClientDetail() {
     } finally {
       setSyncing(false);
     }
+  };
+
+  // Note handlers
+  const handleSaveNote = async () => {
+    if (!noteText.trim()) return;
+    setSavingNote(true);
+    try {
+      if (editingNote) {
+        await updateClientNote(clientId, editingNote.id, noteText);
+      } else {
+        await createClientNote(clientId, noteText);
+      }
+      // Refresh notes
+      const notesData = await getClientNotes(clientId);
+      setNotes(notesData.notes || []);
+      setNoteText('');
+      setShowNoteForm(false);
+      setEditingNote(null);
+    } catch (err) {
+      console.error('Failed to save note:', err);
+    } finally {
+      setSavingNote(false);
+    }
+  };
+
+  const handleEditNote = (note: ClientNote) => {
+    setEditingNote(note);
+    setNoteText(note.note);
+    setShowNoteForm(true);
+  };
+
+  const handleDeleteNote = async (noteId: string) => {
+    if (!confirm('Are you sure you want to delete this note?')) return;
+    try {
+      await deleteClientNote(clientId, noteId);
+      setNotes(notes.filter(n => n.id !== noteId));
+    } catch (err) {
+      console.error('Failed to delete note:', err);
+    }
+  };
+
+  const handleCancelNote = () => {
+    setNoteText('');
+    setShowNoteForm(false);
+    setEditingNote(null);
   };
 
   const formatDate = (dateStr?: string) => {
@@ -212,6 +288,7 @@ export default function ClientDetail() {
               { key: 'overview', label: 'Overview', icon: undefined, count: undefined },
               { key: 'services', label: 'Services', icon: undefined, count: services.length },
               { key: 'documents', label: 'Documents', icon: undefined, count: documents.length },
+              { key: 'notes', label: 'Notes', icon: '📝', count: notes.length },
               { key: 'companies-house', label: 'Companies House', icon: '🏛️', count: undefined },
             ] as const).map((tab) => (
               <button
@@ -388,6 +465,128 @@ export default function ClientDetail() {
                 </tbody>
               </table>
             )}
+          </div>
+        )}
+
+        {activeTab === 'notes' && (
+          <div className="bg-white dark:bg-slate-800 rounded-lg shadow">
+            {/* Notes Header */}
+            <div className="px-6 py-4 border-b border-gray-200 dark:border-gray-700 flex items-center justify-between">
+              <h3 className="text-lg font-semibold text-gray-900 dark:text-white flex items-center">
+                <span className="mr-2">📝</span>
+                Notes
+              </h3>
+              {!showNoteForm && (
+                <button
+                  onClick={() => setShowNoteForm(true)}
+                  className="inline-flex items-center px-3 py-2 text-sm font-medium text-white bg-blue-600 hover:bg-blue-700 rounded-lg"
+                >
+                  <svg className="w-4 h-4 mr-1.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 4v16m8-8H4" />
+                  </svg>
+                  Add Note
+                </button>
+              )}
+            </div>
+
+            {/* Add/Edit Note Form */}
+            {showNoteForm && (
+              <div className="px-6 py-4 border-b border-gray-200 dark:border-gray-700 bg-gray-50 dark:bg-slate-700">
+                <textarea
+                  value={noteText}
+                  onChange={(e) => setNoteText(e.target.value)}
+                  placeholder="Enter your note..."
+                  rows={4}
+                  className="w-full px-3 py-2 border border-gray-300 dark:border-gray-600 rounded-lg bg-white dark:bg-slate-800 text-gray-900 dark:text-white placeholder-gray-400 focus:ring-2 focus:ring-blue-500 focus:border-transparent"
+                />
+                <div className="mt-3 flex justify-end space-x-3">
+                  <button
+                    onClick={handleCancelNote}
+                    className="px-4 py-2 text-sm font-medium text-gray-700 dark:text-gray-300 hover:bg-gray-100 dark:hover:bg-slate-600 rounded-lg"
+                  >
+                    Cancel
+                  </button>
+                  <button
+                    onClick={handleSaveNote}
+                    disabled={!noteText.trim() || savingNote}
+                    className="px-4 py-2 text-sm font-medium text-white bg-blue-600 hover:bg-blue-700 disabled:opacity-50 rounded-lg"
+                  >
+                    {savingNote ? 'Saving...' : editingNote ? 'Update Note' : 'Save Note'}
+                  </button>
+                </div>
+              </div>
+            )}
+
+            {/* Notes List */}
+            <div className="p-6">
+              {notesLoading ? (
+                <div className="flex justify-center py-8">
+                  <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-blue-600"></div>
+                </div>
+              ) : notes.length === 0 ? (
+                <div className="text-center py-12">
+                  <svg className="mx-auto h-12 w-12 text-gray-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" />
+                  </svg>
+                  <p className="mt-2 text-gray-500 dark:text-gray-400">No notes yet.</p>
+                  <p className="text-sm text-gray-400 dark:text-gray-500">Add a note to keep track of client communications.</p>
+                </div>
+              ) : (
+                <div className="space-y-4">
+                  {notes.map((note) => (
+                    <div
+                      key={note.id}
+                      className="bg-gray-50 dark:bg-slate-700 rounded-lg p-4"
+                    >
+                      <div className="flex items-start justify-between">
+                        <div className="flex-1">
+                          <div className="flex items-center space-x-2 text-sm text-gray-500 dark:text-gray-400">
+                            <span className="font-medium text-gray-900 dark:text-white">
+                              {note.staff_name || 'Staff'}
+                            </span>
+                            <span>·</span>
+                            <span>
+                              {new Date(note.created_at).toLocaleDateString('en-GB', {
+                                day: 'numeric',
+                                month: 'short',
+                                year: 'numeric',
+                              })}{' '}
+                              {new Date(note.created_at).toLocaleTimeString('en-GB', {
+                                hour: '2-digit',
+                                minute: '2-digit',
+                              })}
+                            </span>
+                          </div>
+                          <p className="mt-2 text-gray-700 dark:text-gray-300 whitespace-pre-wrap">
+                            {note.note}
+                          </p>
+                        </div>
+                        <div className="flex items-center space-x-2 ml-4">
+                          <button
+                            onClick={() => handleEditNote(note)}
+                            className="text-gray-400 hover:text-gray-600 dark:hover:text-gray-200"
+                            title="Edit"
+                          >
+                            <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15.232 5.232l3.536 3.536m-2.036-5.036a2.5 2.5 0 113.536 3.536L6.5 21.036H3v-3.572L16.732 3.732z" />
+                            </svg>
+                          </button>
+                          <button
+                            onClick={() => handleDeleteNote(note.id)}
+                            className="text-gray-400 hover:text-red-600 dark:hover:text-red-400"
+                            title="Delete"
+                          >
+                            <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" />
+                            </svg>
+                          </button>
+                        </div>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
           </div>
         )}
 

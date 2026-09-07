@@ -105,11 +105,13 @@ export async function aiExtractDocument(data: {
 
 export async function aiClassifyDocument(data: {
   file_key: string;
+  text: string;
 }): Promise<{
-  document_type_id?: string;
-  document_type_name: string;
+  document_type: string;
   confidence: number;
-  alternatives?: Array<{ name: string; confidence: number }>;
+  subcategory?: string;
+  key_entities?: string[];
+  summary?: string;
 }> {
   const res = await authFetch('/api/v1/ai/documents/classify', {
     method: 'POST',
@@ -123,8 +125,14 @@ export async function aiClassifyDocument(data: {
 }
 
 export async function aiSummarizeDocument(data: {
-  file_key: string;
-}): Promise<{ summary: string }> {
+  text: string;
+  file_key?: string;
+}): Promise<{
+  summary: string;
+  key_points?: string[];
+  financial_data?: unknown;
+  action_items?: string[];
+}> {
   const res = await authFetch('/api/v1/ai/documents/summarize', {
     method: 'POST',
     body: JSON.stringify(data),

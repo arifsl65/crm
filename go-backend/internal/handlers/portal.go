@@ -154,7 +154,7 @@ func (h *PortalHandler) Dashboard(c *gin.Context) {
 		SELECT
 			c.company_name,
 			c.contact_name,
-			u.name as accountant_name,
+			COALESCE(u.first_name || ' ' || u.last_name, u.first_name, u.last_name, '') as accountant_name,
 			u.email as accountant_email
 		FROM clients c
 		LEFT JOIN staff_clients sc ON c.id = sc.client_id AND sc.is_primary = true

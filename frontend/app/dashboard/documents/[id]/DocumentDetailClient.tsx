@@ -1,7 +1,7 @@
 'use client';
 
 import { useEffect, useState, useCallback } from 'react';
-import { useRouter } from 'next/navigation';
+import { useRouter, useParams } from 'next/navigation';
 import Link from 'next/link';
 import { useAuth } from '@/components/auth-guard';
 import {
@@ -12,15 +12,19 @@ import {
   approveDocument,
   rejectDocument,
   restoreDocumentVersion,
+  updateDocument,
+  downloadDocument,
+  aiExtractDocument,
+  aiClassifyDocument,
+  aiSummarizeDocument,
+  aiRenameDocument,
 } from '@/lib/api';
 import { getStatusBadgeClass, formatStatus } from '@/lib/status';
 import { useToast } from '@/components';
 
-interface DocumentDetailClientProps {
-  documentId: string;
-}
-
-export default function DocumentDetailClient({ documentId }: DocumentDetailClientProps) {
+export default function DocumentDetailClient() {
+  const params = useParams();
+  const documentId = params.id as string;
   const router = useRouter();
   const { user } = useAuth();
   const toast = useToast();
@@ -33,6 +37,14 @@ export default function DocumentDetailClient({ documentId }: DocumentDetailClien
   const [showRejectModal, setShowRejectModal] = useState(false);
   const [rejectReason, setRejectReason] = useState('');
   const [rejecting, setRejecting] = useState(false);
+
+  // AI Analysis state
+  const [aiAnalyzing, setAiAnalyzing] = useState(false);
+  const [aiResult, setAiResult] = useState<{
+    classification?: { document_type: string; confidence: number; subcategory?: string };
+    summary?: { summary: string; key_points?: string[] };
+    suggestedName?: string;
+  } | null>(null);
 
   const fetchDocument = useCallback(async () => {
     try {
@@ -105,6 +117,100 @@ export default function DocumentDetailClient({ documentId }: DocumentDetailClien
       fetchDocument();
     } catch (err) {
       toast.error(err instanceof Error ? err.message : 'Failed to restore version');
+    }
+  };
+
+  const handleAIAnalyze = async () => {
+    if (!document || !document.file_path) {
+      toast.error('No file available for analysis');
+      return;
+    }
+
+    setAiAnalyzing(true);
+    setAiResult(null);
+
+    try {
+      // Step 1: Extract text
+      const extractResult = await aiExtractDocument({ file_key: document.file_path });
+
+      // Handle async job response vs immediate result
+      if ('job_id' in extractResult) {
+        toast.error('Document extraction is processing. Please try again later.');
+        setAiAnalyzing(false);
+        return;
+      }
+
+      const text = (extractResult.extracted_data?.text as string) || '';
+
+      if (!text) {
+        toast.error('Could not extract text from document');
+        setAiAnalyzing(false);
+        return;
+      }
+
+      // Step 2: Run all AI operations in parallel
+      const [classifyResult, summaryResult, renameResult] = await Promise.all([
+        aiClassifyDocument({ file_key: document.file_path, text }),
+        aiSummarizeDocument({ text, file_key: document.file_path }),
+        aiRenameDocument({
+          text,
+          original_filename: document.original_name,
+          client_name: document.client_name,
+          file_key: document.file_path,
+        }),
+      ]);
+
+      setAiResult({
+        classification: {
+          document_type: classifyResult.document_type,
+          confidence: classifyResult.confidence,
+          subcategory: classifyResult.subcategory,
+        },
+        summary: {
+          summary: summaryResult.summary,
+          key_points: summaryResult.key_points,
+        },
+        suggestedName: renameResult.suggested_name,
+      });
+
+      toast.success('AI analysis complete');
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : 'AI analysis failed');
+    } finally {
+      setAiAnalyzing(false);
+    }
+  };
+
+  const handleAcceptAISuggestions = async () => {
+    if (!document || !aiResult) return;
+
+    try {
+      const updates: { name?: string; ai_summary?: string } = {};
+
+      if (aiResult.suggestedName) {
+        updates.name = aiResult.suggestedName;
+      }
+      if (aiResult.summary?.summary) {
+        updates.ai_summary = aiResult.summary.summary;
+      }
+
+      if (Object.keys(updates).length > 0) {
+        await updateDocument(document.id, updates);
+        setDocument({ ...document, ...updates });
+        toast.success('Document updated with AI suggestions');
+      }
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : 'Failed to update document');
+    }
+  };
+
+  const handleDownload = async () => {
+    if (!document) return;
+    try {
+      const { download_url } = await downloadDocument(document.id);
+      window.open(download_url, '_blank');
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : 'Failed to download document');
     }
   };
 
@@ -231,6 +337,86 @@ export default function DocumentDetailClient({ documentId }: DocumentDetailClien
               </dl>
             </div>
 
+            {/* AI Summary Section */}
+            {(document.ai_summary || aiResult) && (
+              <div className="bg-white dark:bg-slate-800 rounded-lg shadow p-6">
+                <div className="flex items-center mb-4">
+                  <span className="px-2 py-1 text-xs font-medium bg-purple-100 text-purple-700 dark:bg-purple-900/30 dark:text-purple-400 rounded mr-2">
+                    AI
+                  </span>
+                  <h2 className="text-lg font-semibold text-gray-900 dark:text-white">AI Analysis</h2>
+                </div>
+
+                {/* Existing AI Summary */}
+                {document.ai_summary && !aiResult && (
+                  <div className="prose dark:prose-invert max-w-none">
+                    <p className="text-sm text-gray-700 dark:text-gray-300">{document.ai_summary}</p>
+                  </div>
+                )}
+
+                {/* New AI Result */}
+                {aiResult && (
+                  <div className="space-y-4">
+                    {/* Classification */}
+                    {aiResult.classification && (
+                      <div>
+                        <h3 className="text-sm font-medium text-gray-500 dark:text-gray-400 mb-1">Document Type</h3>
+                        <div className="flex items-center">
+                          <span className="text-gray-900 dark:text-white font-medium">
+                            {aiResult.classification.document_type}
+                          </span>
+                          <span className="ml-2 text-xs text-gray-500">
+                            ({Math.round(aiResult.classification.confidence * 100)}% confidence)
+                          </span>
+                        </div>
+                        {aiResult.classification.subcategory && (
+                          <p className="text-sm text-gray-500 dark:text-gray-400 mt-1">
+                            Subcategory: {aiResult.classification.subcategory}
+                          </p>
+                        )}
+                      </div>
+                    )}
+
+                    {/* Suggested Name */}
+                    {aiResult.suggestedName && (
+                      <div>
+                        <h3 className="text-sm font-medium text-gray-500 dark:text-gray-400 mb-1">Suggested Name</h3>
+                        <p className="text-gray-900 dark:text-white">{aiResult.suggestedName}</p>
+                      </div>
+                    )}
+
+                    {/* Summary */}
+                    {aiResult.summary && (
+                      <div>
+                        <h3 className="text-sm font-medium text-gray-500 dark:text-gray-400 mb-1">Summary</h3>
+                        <p className="text-sm text-gray-700 dark:text-gray-300">{aiResult.summary.summary}</p>
+                        {aiResult.summary.key_points && aiResult.summary.key_points.length > 0 && (
+                          <div className="mt-2">
+                            <h4 className="text-xs font-medium text-gray-500 dark:text-gray-400 mb-1">Key Points</h4>
+                            <ul className="list-disc list-inside text-sm text-gray-600 dark:text-gray-400">
+                              {aiResult.summary.key_points.map((point, i) => (
+                                <li key={i}>{point}</li>
+                              ))}
+                            </ul>
+                          </div>
+                        )}
+                      </div>
+                    )}
+
+                    {/* Accept Button */}
+                    <div className="pt-2 border-t border-gray-200 dark:border-gray-700">
+                      <button
+                        onClick={handleAcceptAISuggestions}
+                        className="px-4 py-2 bg-purple-600 text-white text-sm font-medium rounded-md hover:bg-purple-700"
+                      >
+                        Apply AI Suggestions
+                      </button>
+                    </div>
+                  </div>
+                )}
+              </div>
+            )}
+
             {/* Version History */}
             <div className="bg-white dark:bg-slate-800 rounded-lg shadow">
               <button
@@ -291,15 +477,39 @@ export default function DocumentDetailClient({ documentId }: DocumentDetailClien
               <h2 className="text-lg font-semibold text-gray-900 dark:text-white mb-4">Actions</h2>
               <div className="space-y-3">
                 {document.file_path && (
-                  <a
-                    href={`${process.env.NEXT_PUBLIC_API_URL || ''}/api/v1/documents/${document.id}/download`}
+                  <button
+                    onClick={handleDownload}
                     className="w-full flex items-center justify-center px-4 py-2 border border-gray-300 dark:border-gray-600 rounded-md text-sm font-medium text-gray-700 dark:text-gray-300 bg-white dark:bg-slate-700 hover:bg-gray-50 dark:hover:bg-slate-600"
                   >
                     <svg className="w-5 h-5 mr-2" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                       <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4" />
                     </svg>
                     Download
-                  </a>
+                  </button>
+                )}
+
+                {/* AI Analyze Button */}
+                {document.file_path && (
+                  <button
+                    onClick={handleAIAnalyze}
+                    disabled={aiAnalyzing}
+                    className="w-full flex items-center justify-center px-4 py-2 border border-purple-300 dark:border-purple-700 rounded-md text-sm font-medium text-purple-700 dark:text-purple-400 bg-purple-50 dark:bg-purple-900/20 hover:bg-purple-100 dark:hover:bg-purple-900/30 disabled:opacity-50"
+                  >
+                    {aiAnalyzing ? (
+                      <>
+                        <svg className="animate-spin w-5 h-5 mr-2" fill="none" viewBox="0 0 24 24">
+                          <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"></circle>
+                          <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
+                        </svg>
+                        Analyzing...
+                      </>
+                    ) : (
+                      <>
+                        <span className="mr-2">AI</span>
+                        Analyze Document
+                      </>
+                    )}
+                  </button>
                 )}
 
                 {canReview && document.status === 'pending_review' && (

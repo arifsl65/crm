@@ -1107,15 +1107,15 @@ func (h *UserHandler) GetWorkload(c *gin.Context) {
 
 	workload := []WorkloadItem{}
 	err := tenantDB.Query(c, `
-		SELECT u.id, u.name, u.email,
+		SELECT u.id, COALESCE(u.first_name || ' ' || u.last_name, u.first_name, u.last_name, ''), u.email,
 		       COUNT(sc.client_id) AS client_count,
 		       COUNT(sc.client_id) FILTER (WHERE sc.is_primary = true) AS primary_count
 		FROM users u
 		LEFT JOIN staff_clients sc ON u.id = sc.staff_id
 		LEFT JOIN clients c ON sc.client_id = c.id AND c.deleted_at IS NULL
 		WHERE u.role = 'staff' AND u.deleted_at IS NULL
-		GROUP BY u.id, u.name, u.email
-		ORDER BY client_count DESC, u.name ASC
+		GROUP BY u.id, COALESCE(u.first_name || ' ' || u.last_name, u.first_name, u.last_name, ''), u.email
+		ORDER BY client_count DESC, COALESCE(u.first_name || ' ' || u.last_name, u.first_name, u.last_name, '') ASC
 	`, nil, func(rows pgx.Rows) error {
 		for rows.Next() {
 			var item WorkloadItem

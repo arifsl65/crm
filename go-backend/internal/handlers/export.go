@@ -46,7 +46,7 @@ func (h *ExportHandler) ExportClients(c *gin.Context) {
 			c.address, c.year_end, c.utr, c.company_number, c.company_type,
 			c.vat_number, c.vat_quarter, c.status, c.risk_score,
 			c.last_contact_at, c.created_at,
-			COALESCE(u.name, '') as assigned_staff
+			COALESCE(u.first_name || ' ' || u.last_name, u.first_name, u.last_name, '') as assigned_staff
 		FROM clients c
 		LEFT JOIN staff_clients sc ON c.id = sc.client_id AND sc.is_primary = true
 		LEFT JOIN users u ON sc.staff_id = u.id
@@ -166,7 +166,7 @@ func (h *ExportHandler) ExportServices(c *gin.Context) {
 			s.hmrc_reference, s.filed_at, s.completed_at,
 			s.created_at, s.updated_at,
 			COALESCE(c.company_name, '') as client_name,
-			COALESCE(u.name, '') as staff_name,
+			COALESCE(u.first_name || ' ' || u.last_name, u.first_name, u.last_name, '') as staff_name,
 			COALESCE(st.name, '') as service_type
 		FROM services s
 		LEFT JOIN clients c ON s.client_id = c.id
@@ -292,7 +292,7 @@ func (h *ExportHandler) ExportChase(c *gin.Context) {
 		SELECT
 			cl.id, cl.total_sent, cl.delivered, cl.opened, cl.bounced,
 			cl.created_at,
-			COALESCE(u.name, '') as initiated_by_name,
+			COALESCE(u.first_name || ' ' || u.last_name, u.first_name, u.last_name, '') as initiated_by_name,
 			(
 				SELECT STRING_AGG(c.company_name, ', ')
 				FROM chase_log_clients clc

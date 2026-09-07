@@ -559,8 +559,8 @@ func (h *AuthHandler) getUserByEmail(ctx context.Context, email string, tenantID
 		if tenantID != nil {
 			// Tenant-scoped lookup
 			query := `
-				SELECT id, tenant_id, email, password,
-				       COALESCE(name, '') as name,
+				SELECT id, tenant_id, email, password_hash,
+				       COALESCE(first_name || ' ' || last_name, first_name, last_name, '') as name,
 				       role, status, failed_login_attempts, locked_until
 				FROM users
 				WHERE email = $1 AND tenant_id = $2 AND deleted_at IS NULL
@@ -592,8 +592,8 @@ func (h *AuthHandler) getUserByEmail(ctx context.Context, email string, tenantID
 
 		// Single tenant or super_admin - proceed with lookup
 		query := `
-			SELECT id, tenant_id, email, password,
-			       COALESCE(name, '') as name,
+			SELECT id, tenant_id, email, password_hash,
+			       COALESCE(first_name || ' ' || last_name, first_name, last_name, '') as name,
 			       role, status, failed_login_attempts, locked_until
 			FROM users
 			WHERE email = $1 AND deleted_at IS NULL
@@ -847,7 +847,7 @@ type userRecordForReset struct {
 }
 
 func (h *AuthHandler) getUserByEmailForReset(ctx context.Context, email string) (*userRecordForReset, error) {
-	query := `SELECT id, email, COALESCE(name, '') as name FROM users WHERE email = $1 AND deleted_at IS NULL`
+	query := `SELECT id, email, COALESCE(first_name || ' ' || last_name, first_name, last_name, '') as name FROM users WHERE email = $1 AND deleted_at IS NULL`
 	var user userRecordForReset
 	var qErr error
 	if err := h.db.SuperAdminTransaction(ctx, func(tx pgx.Tx) error {
@@ -921,7 +921,7 @@ func (h *AuthHandler) GetMe(c *gin.Context) {
 	}
 
 	query := `
-		SELECT id, tenant_id, email, COALESCE(name, '') as name, role, phone, avatar_url, preferences,
+		SELECT id, tenant_id, email, COALESCE(first_name || ' ' || last_name, first_name, last_name, '') as name, role, phone, avatar_url, settings,
 		       last_login_at, created_at
 		FROM users WHERE id = $1 AND deleted_at IS NULL
 	`
@@ -1297,7 +1297,7 @@ func (h *AuthHandler) VerifyMagicLink(c *gin.Context) {
 	var user userRecord
 	err = h.db.SuperAdminTransaction(ctx, func(tx pgx.Tx) error {
 		return tx.QueryRow(ctx, `
-			SELECT id, tenant_id, email, COALESCE(name, '') as name, role FROM users WHERE id = $1 AND deleted_at IS NULL
+			SELECT id, tenant_id, email, COALESCE(first_name || ' ' || last_name, first_name, last_name, '') as name, role FROM users WHERE id = $1 AND deleted_at IS NULL
 		`, userID).Scan(&user.ID, &user.TenantID, &user.Email, &user.Name, &user.Role)
 	})
 	if err != nil {

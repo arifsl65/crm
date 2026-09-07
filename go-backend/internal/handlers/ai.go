@@ -160,6 +160,7 @@ func (h *AIHandler) ExtractDocument(c *gin.Context) {
 // ClassifyDocumentRequest is the request for document classification.
 type ClassifyDocumentRequest struct {
 	FileKey string `json:"file_key" binding:"required"`
+	Text    string `json:"text" binding:"required"`
 }
 
 // ClassifyDocument classifies a document using AI.
@@ -169,7 +170,7 @@ func (h *AIHandler) ClassifyDocument(c *gin.Context) {
 	if err := c.ShouldBindJSON(&req); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{
 			"error":   "validation_error",
-			"message": "file_key is required",
+			"message": "file_key and text are required",
 		})
 		return
 	}
@@ -186,7 +187,7 @@ func (h *AIHandler) ClassifyDocument(c *gin.Context) {
 
 	ctx := h.contextWithRequestID(c)
 
-	result, err := h.client.ClassifyDocument(ctx, req.FileKey)
+	result, err := h.client.ClassifyDocument(ctx, req.FileKey, req.Text)
 	if err != nil {
 		h.circuit.RecordFailure()
 		log.Error().Err(err).Str("file_key", req.FileKey).Msg("Failed to classify document")
@@ -465,7 +466,8 @@ func (h *AIHandler) GetJobStatus(c *gin.Context) {
 
 // SummarizeDocumentRequest is the request for document summarization.
 type SummarizeDocumentRequest struct {
-	FileKey string `json:"file_key" binding:"required"`
+	Text    string `json:"text" binding:"required"`
+	FileKey string `json:"file_key"`
 }
 
 // SummarizeDocument summarizes a document using AI.
@@ -475,19 +477,26 @@ func (h *AIHandler) SummarizeDocument(c *gin.Context) {
 	if err := c.ShouldBindJSON(&req); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{
 			"error":   "validation_error",
-			"message": "file_key is required",
+			"message": "text is required",
+		})
+		return
+	}
+
+	// Check circuit breaker
+	if !h.circuit.Allow() {
+		log.Warn().Msg("AI service circuit breaker is open")
+		c.JSON(http.StatusServiceUnavailable, gin.H{
+			"error":   "service_unavailable",
+			"message": "AI service is temporarily unavailable, please try again later",
 		})
 		return
 	}
 
 	ctx := h.contextWithRequestID(c)
 
-	// Use extract endpoint with summarization option
-	// The Python service should handle this
-	result, err := h.proxyAIRequest(ctx, "POST", "/api/v1/ai/documents/summarize", map[string]string{
-		"file_key": req.FileKey,
-	})
+	result, err := h.client.SummarizeDocument(ctx, req.Text, req.FileKey)
 	if err != nil {
+		h.circuit.RecordFailure()
 		log.Error().Err(err).Str("file_key", req.FileKey).Msg("Failed to summarize document")
 		c.JSON(http.StatusBadGateway, gin.H{
 			"error":   "ai_service_error",
@@ -496,14 +505,17 @@ func (h *AIHandler) SummarizeDocument(c *gin.Context) {
 		return
 	}
 
-	c.JSON(http.StatusOK, result)
-}
+	h.circuit.RecordSuccess()
 
-// proxyAIRequest is a helper to proxy requests to the AI service.
-func (h *AIHandler) proxyAIRequest(ctx context.Context, method, path string, body interface{}) (map[string]interface{}, error) {
-	// This is a placeholder - actual implementation would use http client
-	// For now, return an error indicating this endpoint needs direct Python access
-	return nil, fmt.Errorf("endpoint %s not yet implemented in Go - use Python service directly", path)
+	if result.Error != "" {
+		c.JSON(http.StatusUnprocessableEntity, gin.H{
+			"error":   "summarization_failed",
+			"message": result.Error,
+		})
+		return
+	}
+
+	c.JSON(http.StatusOK, result)
 }
 
 // RenameDocumentRequest is the request for AI document renaming.

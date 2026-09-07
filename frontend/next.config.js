@@ -3,7 +3,8 @@ const nextConfig = {
   // Static export for nginx serving (no Node.js server required)
   // Dynamic routes like /dashboard/clients/[id] work client-side with
   // fallback pages. Builds to out/ directory.
-  output: 'export',
+  // NOTE: Commented out for development - enable for production build
+  // output: 'export',
 
   // Trailing slashes for static hosting compatibility
   trailingSlash: true,

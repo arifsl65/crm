@@ -162,21 +162,26 @@ func (c *Client) ExtractText(ctx context.Context, fileKey string) (*OCRExtractRe
 // ClassifyRequest is the request body for document classification.
 type ClassifyRequest struct {
 	FileKey string `json:"file_key"`
+	Text    string `json:"text"`
 }
 
 // ClassifyResponse is the response from document classification.
 type ClassifyResponse struct {
-	Status         string  `json:"status"`
-	Message        string  `json:"message"`
-	FileKey        string  `json:"file_key"`
-	Classification string  `json:"classification,omitempty"`
-	Confidence     float64 `json:"confidence,omitempty"`
-	Error          string  `json:"error,omitempty"`
+	Status       string   `json:"status"`
+	Message      string   `json:"message"`
+	FileKey      string   `json:"file_key"`
+	DocumentType string   `json:"document_type,omitempty"`
+	Confidence   float64  `json:"confidence,omitempty"`
+	Subcategory  string   `json:"subcategory,omitempty"`
+	KeyEntities  []string `json:"key_entities,omitempty"`
+	Summary      string   `json:"summary,omitempty"`
+	Error        string   `json:"error,omitempty"`
 }
 
 // ClassifyDocument calls the Python AI service to classify a document.
-func (c *Client) ClassifyDocument(ctx context.Context, fileKey string) (*ClassifyResponse, error) {
-	path := fmt.Sprintf("/api/v1/ai/documents/classify?file_key=%s", url.QueryEscape(fileKey))
+func (c *Client) ClassifyDocument(ctx context.Context, fileKey, text string) (*ClassifyResponse, error) {
+	path := fmt.Sprintf("/api/v1/ai/documents/classify?file_key=%s&text=%s",
+		url.QueryEscape(fileKey), url.QueryEscape(text))
 
 	resp, err := c.post(ctx, path, nil)
 	if err != nil {
@@ -185,6 +190,41 @@ func (c *Client) ClassifyDocument(ctx context.Context, fileKey string) (*Classif
 	defer drainAndClose(resp.Body)
 
 	var result ClassifyResponse
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		return nil, fmt.Errorf("failed to decode response: %w", err)
+	}
+
+	return &result, nil
+}
+
+// SummarizeRequest is the request body for document summarization.
+type SummarizeRequest struct {
+	Text    string `json:"text"`
+	FileKey string `json:"file_key,omitempty"`
+}
+
+// SummarizeResponse is the response from document summarization.
+type SummarizeResponse struct {
+	Summary         string   `json:"summary"`
+	KeyPoints       []string `json:"key_points,omitempty"`
+	FinancialData   any      `json:"financial_data,omitempty"`
+	ActionItems     []string `json:"action_items,omitempty"`
+	FileKey         string   `json:"file_key,omitempty"`
+	Error           string   `json:"error,omitempty"`
+}
+
+// SummarizeDocument calls the Python AI service to summarize a document.
+func (c *Client) SummarizeDocument(ctx context.Context, text, fileKey string) (*SummarizeResponse, error) {
+	path := fmt.Sprintf("/api/v1/ai/documents/summarize?text=%s&file_key=%s",
+		url.QueryEscape(text), url.QueryEscape(fileKey))
+
+	resp, err := c.post(ctx, path, nil)
+	if err != nil {
+		return nil, err
+	}
+	defer drainAndClose(resp.Body)
+
+	var result SummarizeResponse
 	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
 		return nil, fmt.Errorf("failed to decode response: %w", err)
 	}
