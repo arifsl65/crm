@@ -10,6 +10,8 @@ import sys
 from contextlib import asynccontextmanager
 import json
 from typing import Any, Dict, List, Optional
+import hashlib
+import hmac
 
 import structlog
 import re
@@ -97,6 +99,58 @@ class RequestIDMiddleware(BaseHTTPMiddleware):
         response.headers["X-Request-ID"] = request_id
 
         return response
+
+
+# =============================================================================
+# Internal API Authentication Middleware
+# =============================================================================
+
+class InternalAuthMiddleware(BaseHTTPMiddleware):
+    """
+    Validate shared secret for internal API endpoints.
+    
+    Protects all /api/v1/ endpoints from unauthorized access.
+    Health endpoints (/health, /ready) are excluded.
+    """
+
+    async def dispatch(self, request: Request, call_next):
+        # Skip auth for health endpoints
+        if request.url.path in ["/health", "/ready", "/docs", "/openapi.json"]:
+            return await call_next(request)
+        
+        # Only protect /api/v1/ endpoints
+        if not request.url.path.startswith("/api/v1/"):
+            return await call_next(request)
+        
+        # Get the shared secret from config
+        settings = get_settings()
+        if not settings.internal_api_secret:
+            # If no secret configured, allow access (backward compatibility)
+            logger.warning("INTERNAL_API_SECRET not configured, allowing unauthenticated access")
+            return await call_next(request)
+        
+        # Check for Authorization header
+        auth_header = request.headers.get("Authorization", "")
+        if not auth_header.startswith("Bearer "):
+            logger.warning("Missing or invalid Authorization header", path=request.url.path)
+            return JSONResponse(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                content={"detail": "Missing or invalid Authorization header"}
+            )
+        
+        # Extract token and validate
+        token = auth_header[7:]  # Remove "Bearer " prefix
+        
+        # Use constant-time comparison to prevent timing attacks
+        expected = settings.internal_api_secret
+        if not hmac.compare_digest(token, expected):
+            logger.warning("Invalid API secret", path=request.url.path)
+            return JSONResponse(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                content={"detail": "Invalid authentication credentials"}
+            )
+        
+        return await call_next(request)
 
 
 # =============================================================================
@@ -246,6 +300,9 @@ app.add_middleware(
 
 # Add security headers middleware
 app.add_middleware(SecurityHeadersMiddleware)
+
+# Add internal API authentication middleware (Fix #1: Python AI auth)
+app.add_middleware(InternalAuthMiddleware)
 
 # Add request ID middleware (Fix #20: X-Request-ID propagation)
 app.add_middleware(RequestIDMiddleware)

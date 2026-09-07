@@ -13,15 +13,44 @@ import (
 	"github.com/accountant-crm/go-backend/internal/middleware"
 )
 
-var upgrader = websocket.Upgrader{
-	ReadBufferSize:  1024,
-	WriteBufferSize: 1024,
-	CheckOrigin: func(r *http.Request) bool {
-		// Origin check is handled by CORS middleware
-		// In production, implement proper origin validation
-		return true
-	},
+// allowedOrigins for WebSocket connections (same as CORS)
+var allowedOrigins = map[string]bool{
+	"https://crm.irislondonshoes.com": true,
+	"http://localhost:3000":           true, // Development
+	"http://localhost:8080":           true, // Development
 }
+
+// createUpgrader creates a WebSocket upgrader with origin validation.
+// Fix #3: Validate Origin header to prevent CSWSH attacks.
+func createUpgrader() websocket.Upgrader {
+	return websocket.Upgrader{
+		ReadBufferSize:  1024,
+		WriteBufferSize: 1024,
+		CheckOrigin: func(r *http.Request) bool {
+			origin := r.Header.Get("Origin")
+			if origin == "" {
+				// Allow connections with no Origin header (e.g., Postman, curl)
+				return true
+			}
+
+			// Check if origin is in allowed list
+			if allowedOrigins[origin] {
+				return true
+			}
+
+			// For production: also check against tenant domains from database
+			// This would require passing the DB pool to the upgrader
+			// For now, we log and reject unknown origins
+			log.Warn().
+				Str("origin", origin).
+				Str("host", r.Host).
+				Msg("WebSocket connection rejected: origin not allowed")
+			return false
+		},
+	}
+}
+
+var upgrader = createUpgrader()
 
 // Handler handles WebSocket connections.
 type Handler struct {

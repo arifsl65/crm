@@ -3,6 +3,7 @@
 import { useState, useEffect } from 'react';
 import { useRouter } from 'next/navigation';
 import Link from 'next/link';
+import { authFetch } from '@/lib/api/core';
 
 const API_URL = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8080';
 
@@ -30,24 +31,13 @@ export default function SecuritySettingsPage() {
     fetchSecurityStatus();
   }, []);
 
-  const getAuthToken = () => {
-    if (typeof window !== 'undefined') {
-      return localStorage.getItem('access_token');
-    }
-    return null;
-  };
+  // Fix #7: Removed getAuthToken() - now using authFetch which automatically includes httpOnly cookies
+  // No need to manually get token from localStorage or set Authorization header
 
   const fetchSecurityStatus = async () => {
     try {
-      const token = getAuthToken();
-      if (!token) {
-        router.push('/login');
-        return;
-      }
-
-      const res = await fetch(`${API_URL}/api/v1/auth/me`, {
-        headers: { 'Authorization': `Bearer ${token}` },
-      });
+      // Fix #7: Use authFetch which automatically includes httpOnly cookies
+      const res = await authFetch(`${API_URL}/api/v1/auth/me`);
 
       if (!res.ok) {
         if (res.status === 401) {
@@ -71,11 +61,10 @@ export default function SecuritySettingsPage() {
     setLoading(true);
 
     try {
-      const token = getAuthToken();
-      const res = await fetch(`${API_URL}/api/v1/auth/2fa/setup`, {
+      // Fix #7: Use authFetch which automatically includes httpOnly cookies
+      const res = await authFetch(`${API_URL}/api/v1/auth/2fa/setup`, {
         method: 'POST',
         headers: {
-          'Authorization': `Bearer ${token}`,
           'Content-Type': 'application/json',
         },
       });
@@ -102,11 +91,10 @@ export default function SecuritySettingsPage() {
     setVerifying(true);
 
     try {
-      const token = getAuthToken();
-      const res = await fetch(`${API_URL}/api/v1/auth/2fa/verify`, {
+      // Fix #7: Use authFetch which automatically includes httpOnly cookies
+      const res = await authFetch(`${API_URL}/api/v1/auth/2fa/verify`, {
         method: 'POST',
         headers: {
-          'Authorization': `Bearer ${token}`,
           'Content-Type': 'application/json',
         },
         body: JSON.stringify({ code: verifyCode }),
@@ -150,11 +138,10 @@ export default function SecuritySettingsPage() {
     setLoading(true);
 
     try {
-      const token = getAuthToken();
-      const res = await fetch(`${API_URL}/api/v1/auth/2fa`, {
+      // Fix #7: Use authFetch which automatically includes httpOnly cookies
+      const res = await authFetch(`${API_URL}/api/v1/auth/2fa`, {
         method: 'DELETE',
         headers: {
-          'Authorization': `Bearer ${token}`,
           'Content-Type': 'application/json',
         },
         body: JSON.stringify({ password: disablePassword }),
@@ -194,11 +181,10 @@ export default function SecuritySettingsPage() {
     setChangingPassword(true);
 
     try {
-      const token = getAuthToken();
-      const res = await fetch(`${API_URL}/api/v1/auth/password`, {
+      // Fix #7: Use authFetch which automatically includes httpOnly cookies
+      const res = await authFetch(`${API_URL}/api/v1/auth/password`, {
         method: 'PATCH',
         headers: {
-          'Authorization': `Bearer ${token}`,
           'Content-Type': 'application/json',
         },
         body: JSON.stringify({

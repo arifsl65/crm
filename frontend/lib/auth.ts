@@ -106,7 +106,10 @@ export async function refreshToken(refresh_token: string): Promise<AuthResponse>
 
 export function saveAuth(auth: AuthResponse): void {
   if (typeof window !== 'undefined') {
-    localStorage.setItem('access_token', auth.access_token);
+    // Fix #7: Removed access_token from localStorage to prevent XSS attacks
+    // Access token is now stored solely in httpOnly cookie (set by backend)
+    // This prevents JavaScript access to the token, mitigating XSS risks
+    
     // Note: refresh_token is stored in httpOnly cookie by backend, not localStorage
     // This prevents XSS attacks from stealing the refresh token
     if (auth.user) {
@@ -116,9 +119,9 @@ export function saveAuth(auth: AuthResponse): void {
 }
 
 export function getAccessToken(): string | null {
-  if (typeof window !== 'undefined') {
-    return localStorage.getItem('access_token');
-  }
+  // Fix #7: Access token is now stored solely in httpOnly cookie
+  // This function is kept for backward compatibility but returns null
+  // Authentication is handled by httpOnly cookies sent automatically with requests
   return null;
 }
 
@@ -141,8 +144,8 @@ export function getUser(): User | null {
 
 export function clearAuth(): void {
   if (typeof window !== 'undefined') {
-    localStorage.removeItem('access_token');
-    // Note: refresh_token cookie is cleared by backend on logout
+    // Fix #7: Removed access_token removal from localStorage (no longer stored there)
+    // httpOnly cookies are cleared by backend on logout via Set-Cookie
     localStorage.removeItem('user');
   }
 }

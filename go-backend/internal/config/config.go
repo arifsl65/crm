@@ -185,8 +185,9 @@ func (m *MTLSConfig) CleanupTempFiles() {
 
 // PythonAIConfig holds Python AI service connection settings.
 type PythonAIConfig struct {
-	BaseURL string
-	Timeout time.Duration
+	BaseURL   string
+	APISecret string
+	Timeout   time.Duration
 }
 
 // CompaniesHouseConfig holds UK Companies House API settings.
@@ -344,8 +345,9 @@ func Load() (*Config, error) {
 
 	// Python AI service config
 	cfg.PythonAI = PythonAIConfig{
-		BaseURL: getEnv("PYTHON_AI_URL", "https://python-ai.fzco.local:8000"),
-		Timeout: getEnvDuration("PYTHON_AI_TIMEOUT", 30*time.Second),
+		BaseURL:   getEnv("PYTHON_AI_URL", "https://python-ai.fzco.local:8000"),
+		APISecret: getEnv("PYTHON_AI_API_SECRET", ""),
+		Timeout:   getEnvDuration("PYTHON_AI_TIMEOUT", 30*time.Second),
 	}
 
 	// Rate limiting config

@@ -44,6 +44,7 @@ func DefaultRetryConfig() RetryConfig {
 // Client provides methods to call the Python AI service.
 type Client struct {
 	baseURL     string
+	apiSecret   string
 	httpClient  *http.Client
 	retryConfig RetryConfig
 }
@@ -68,6 +69,7 @@ func NewClient(pythonCfg config.PythonAIConfig, mtlsCfg config.MTLSConfig) (*Cli
 
 	client := &Client{
 		baseURL: pythonCfg.BaseURL,
+		apiSecret: pythonCfg.APISecret,
 		httpClient: &http.Client{
 			Transport: transport,
 			Timeout:   pythonCfg.Timeout,
@@ -374,6 +376,10 @@ func (c *Client) get(ctx context.Context, path string) (*http.Response, error) {
 		}
 
 		req.Header.Set("Content-Type", "application/json")
+		// Add internal API authentication (Fix #1: Python AI auth)
+		if c.apiSecret != "" {
+			req.Header.Set("Authorization", "Bearer "+c.apiSecret)
+		}
 		// Propagate request ID for distributed tracing
 		if requestID != "" {
 			req.Header.Set(requestIDHeader, requestID)
@@ -455,6 +461,10 @@ func (c *Client) post(ctx context.Context, path string, body interface{}) (*http
 		}
 
 		req.Header.Set("Content-Type", "application/json")
+		// Add internal API authentication (Fix #1: Python AI auth)
+		if c.apiSecret != "" {
+			req.Header.Set("Authorization", "Bearer "+c.apiSecret)
+		}
 		// Propagate request ID for distributed tracing
 		if requestID != "" {
 			req.Header.Set(requestIDHeader, requestID)
@@ -1553,6 +1563,10 @@ func (c *Client) delete(ctx context.Context, path string) (*http.Response, error
 		}
 
 		req.Header.Set("Content-Type", "application/json")
+		// Add internal API authentication (Fix #1: Python AI auth)
+		if c.apiSecret != "" {
+			req.Header.Set("Authorization", "Bearer "+c.apiSecret)
+		}
 		if requestID != "" {
 			req.Header.Set(requestIDHeader, requestID)
 		}

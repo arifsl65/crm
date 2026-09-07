@@ -469,11 +469,17 @@ func (h *ESignHandler) GetSigningPage(c *gin.Context) {
 	}
 	defer tx.Rollback(ctx)
 
-	// Set super_admin role and dummy tenant_id to bypass RLS for this public query
-	// TODO: Remove hardcoded UUID when RLS policy is updated to handle empty tenant_id
-	_, err = tx.Exec(ctx, "SET LOCAL app.role = 'super_admin'; SET LOCAL app.tenant_id = '00000000-0000-0000-0000-000000000000'")
+	// Fix #5: Use set_config() with parameterized queries instead of SET LOCAL with string concatenation
+	// This is consistent with the secure pattern used in postgres.go TenantTransaction()
+	_, err = tx.Exec(ctx, "SELECT set_config('app.role', 'super_admin', true)")
 	if err != nil {
-		log.Error().Err(err).Msg("Failed to set session role")
+		log.Error().Err(err).Msg("Failed to set app.role")
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to load signing page"})
+		return
+	}
+	_, err = tx.Exec(ctx, "SELECT set_config('app.tenant_id', '00000000-0000-0000-0000-000000000000', true)")
+	if err != nil {
+		log.Error().Err(err).Msg("Failed to set app.tenant_id")
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to load signing page"})
 		return
 	}
@@ -592,11 +598,17 @@ func (h *ESignHandler) SubmitSignature(c *gin.Context) {
 	}
 	defer tx.Rollback(ctx)
 
-	// Set super_admin role and dummy tenant_id to bypass RLS for this public query
-	// TODO: Remove hardcoded UUID when RLS policy is updated to handle empty tenant_id
-	_, err = tx.Exec(ctx, "SET LOCAL app.role = 'super_admin'; SET LOCAL app.tenant_id = '00000000-0000-0000-0000-000000000000'")
+	// Fix #5: Use set_config() with parameterized queries instead of SET LOCAL with string concatenation
+	// This is consistent with the secure pattern used in postgres.go TenantTransaction()
+	_, err = tx.Exec(ctx, "SELECT set_config('app.role', 'super_admin', true)")
 	if err != nil {
-		log.Error().Err(err).Msg("Failed to set session role")
+		log.Error().Err(err).Msg("Failed to set app.role")
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to process signature"})
+		return
+	}
+	_, err = tx.Exec(ctx, "SELECT set_config('app.tenant_id', '00000000-0000-0000-0000-000000000000', true)")
+	if err != nil {
+		log.Error().Err(err).Msg("Failed to set app.tenant_id")
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to process signature"})
 		return
 	}

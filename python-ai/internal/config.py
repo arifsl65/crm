@@ -48,6 +48,9 @@ class Settings(BaseSettings):
     postgres_pool_min: int = Field(default=2, ge=1, le=20, description="Minimum pool connections (1-20)")
     postgres_pool_max: int = Field(default=5, ge=1, le=100, description="Maximum pool connections (1-100)")
 
+    # Internal API authentication (shared secret with Go backend)
+    internal_api_secret: str = Field(default="", description="Shared secret for authenticating requests from Go backend")
+
     # Fix #32: Validate pool_min <= pool_max
     @model_validator(mode='after')
     def validate_pool_sizes(self) -> 'Settings':

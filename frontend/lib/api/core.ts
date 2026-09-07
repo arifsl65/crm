@@ -14,12 +14,11 @@ let refreshPromise: Promise<boolean> | null = null;
  * The backend sets new httpOnly cookies on success - no localStorage needed.
  */
 export async function tryRefreshToken(): Promise<boolean> {
+  // Fix #7: Removed localStorage access_token check
+  // Authentication is now handled solely via httpOnly cookies
   // Skip refresh if no prior session exists (incognito/fresh browser)
-  // This prevents 400 errors when there's no refresh cookie to send
-  if (typeof window !== 'undefined' && !localStorage.getItem('access_token')) {
-    return false;
-  }
-
+  // We'll let the refresh attempt fail naturally if no cookies exist
+  
   // If already refreshing, wait for the existing refresh to complete
   if (isRefreshing && refreshPromise) {
     return refreshPromise;
@@ -59,13 +58,12 @@ export const AUTH_EXPIRED_EVENT = 'auth-expired';
 /**
  * Clear auth state and trigger redirect to login.
  * Note: httpOnly cookies are cleared by the backend on logout via Set-Cookie.
- * We clear client-side tokens and user data here.
+ * We clear client-side user data here.
  */
 export function clearAuthAndRedirect(): void {
   if (typeof window !== 'undefined') {
-    // Clear tokens and user data from localStorage
-    // This prevents redirect loops when access_token is stale but still present
-    localStorage.removeItem('access_token');
+    // Fix #7: Removed access_token removal from localStorage (no longer stored there)
+    // Clear user data from localStorage
     localStorage.removeItem('user');
 
     // Dispatch custom event for React components to handle

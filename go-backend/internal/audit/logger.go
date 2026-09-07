@@ -7,6 +7,7 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgtype"
 	"github.com/rs/zerolog/log"
 
 	"github.com/accountant-crm/go-backend/internal/database"
@@ -114,12 +115,21 @@ type LogEntry struct {
 	Severity   Severity
 }
 
+// uuidToPgtype converts a nullable uuid.UUID to pgtype.UUID for proper NULL handling in pgx.
+// This is necessary because QueryExecModeSimpleProtocol encodes nil *uuid.UUID as empty string
+// instead of SQL NULL, causing "invalid input syntax for type uuid" errors.
+func uuidToPgtype(u *uuid.UUID) pgtype.UUID {
+	if u == nil {
+		return pgtype.UUID{Valid: false}
+	}
+	return pgtype.UUID{Bytes: *u, Valid: true}
+}
+
 // Log writes an audit entry to the database.
 func (l *Logger) Log(ctx context.Context, entry LogEntry) error {
 	// Marshal JSON fields
 	metadataJSON := []byte("{}")
-	oldValueJSON := []byte(nil)
-	newValueJSON := []byte(nil)
+	var oldValueJSON, newValueJSON interface{}
 	var err error
 
 	if entry.Metadata != nil {
@@ -152,16 +162,26 @@ func (l *Logger) Log(ctx context.Context, entry LogEntry) error {
 	// Audit logs must bypass RLS because they may be written from unauthenticated
 	// contexts (e.g., failed login) or across tenants.
 	err = l.db.SuperAdminTransaction(ctx, func(tx pgx.Tx) error {
+		// Convert JSON byte slices to strings for pgx SimpleProtocol compatibility
+		var oldVal, newVal, metaVal interface{}
+		if oldValueJSON != nil {
+			oldVal = string(oldValueJSON.([]byte))
+		}
+		if newValueJSON != nil {
+			newVal = string(newValueJSON.([]byte))
+		}
+		metaVal = string(metadataJSON)
+		
 		_, err = tx.Exec(ctx, query,
 			uuid.New(), // id
-			entry.TenantID,
-			entry.UserID,
+			uuidToPgtype(entry.TenantID),
+			uuidToPgtype(entry.UserID),
 			string(entry.Action),
 			entry.EntityType,
-			entry.EntityID,
-			oldValueJSON,
-			newValueJSON,
-			metadataJSON,
+			uuidToPgtype(entry.EntityID),
+			oldVal,
+			newVal,
+			metaVal,
 			entry.IPAddress,
 			entry.UserAgent,
 			string(severity),
