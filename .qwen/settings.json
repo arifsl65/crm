@@ -1,0 +1,14 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(sudo *)",
+      "Bash(docker build *)",
+      "Bash(docker save *)",
+      "Bash(gzip)",
+      "Bash(scp *)",
+      "Bash(rsync *)",
+      "Bash(ssh *)"
+    ]
+  },
+  "$version": 4
+}
