@@ -106,10 +106,12 @@ services:
       - AI_CHAT_ENABLED=true
       - AI_FORMS_ENABLED=true
       - AI_CLASSIFICATION_ENABLED=true
+      # Internal API Secret (Go backend -> Python AI authentication)
+      - INTERNAL_API_SECRET=${INTERNAL_API_SECRET}
       # OpenRouter AI (primary provider - replaces Groq)
       - OPENROUTER_API_KEY=${OPENROUTER_API_KEY}
-      - OPENROUTER_MODEL=${OPENROUTER_MODEL:-minimax/minimax-m3:free}
-      - OPENROUTER_VISION_MODEL=${OPENROUTER_VISION_MODEL:-minimax/minimax-m3:free}
+      - OPENROUTER_MODEL=${OPENROUTER_MODEL:-minimax/minimax-m3}
+      - OPENROUTER_VISION_MODEL=${OPENROUTER_VISION_MODEL:-minimax/minimax-m3}
       # Alibaba Cloud OSS Storage
       - OSS_ENABLED=${OSS_ENABLED:-true}
       - ALIBABA_ACCESS_KEY_ID=${ALIBABA_ACCESS_KEY_ID}
