@@ -2,39 +2,26 @@
 
 import { useState, useCallback, useEffect } from 'react';
 import { useRouter } from 'next/navigation';
-import { useAuth } from '@/components/auth-guard';
 import {
   getClients,
   getDocumentTypes,
   getDocumentUploadUrl,
   confirmDocumentUpload,
-  updateDocument,
   Client,
   DocumentType,
-  aiExtractDocument,
-  aiClassifyDocument,
-  aiRenameDocument,
 } from '@/lib/api';
 import { useToast } from '@/components';
 
-interface FileWithAI {
+interface UploadedFile {
   file: File;
+  preview?: string;
+  progress: number;
+  status: 'pending' | 'uploading' | 'complete' | 'error';
   documentId?: string;
-  filePath?: string;
-  aiProcessing: boolean;
-  aiClassification?: {
-    document_type: string;
-    confidence: number;
-    subcategory?: string;
-  };
-  aiSuggestedName?: string;
-  aiAlternativeNames?: string[];
-  acceptedName?: string;
-  acceptedType?: string;
+  error?: string;
 }
 
 export default function DocumentUploadPage() {
-  const { user } = useAuth();
   const router = useRouter();
   const toast = useToast();
 
@@ -42,15 +29,12 @@ export default function DocumentUploadPage() {
   const [documentTypes, setDocumentTypes] = useState<DocumentType[]>([]);
   const [loading, setLoading] = useState(true);
   const [uploading, setUploading] = useState(false);
-  const [uploadComplete, setUploadComplete] = useState(false);
   const [dragActive, setDragActive] = useState(false);
 
   // Form state
   const [selectedClient, setSelectedClient] = useState('');
   const [selectedType, setSelectedType] = useState('');
-  const [documentName, setDocumentName] = useState('');
-  const [files, setFiles] = useState<FileWithAI[]>([]);
-  const [enableAI, setEnableAI] = useState(true);
+  const [files, setFiles] = useState<UploadedFile[]>([]);
 
   useEffect(() => {
     async function loadData() {
@@ -62,13 +46,13 @@ export default function DocumentUploadPage() {
         setClients(clientsRes.clients || []);
         setDocumentTypes(typesRes.document_types || []);
       } catch (err) {
-        toast.error('Failed to load data');
+        console.error('Failed to load data:', err);
       } finally {
         setLoading(false);
       }
     }
     loadData();
-  }, [toast]);
+  }, []);
 
   const handleDrag = useCallback((e: React.DragEvent) => {
     e.preventDefault();
@@ -88,27 +72,21 @@ export default function DocumentUploadPage() {
     if (e.dataTransfer.files && e.dataTransfer.files.length > 0) {
       const newFiles = Array.from(e.dataTransfer.files).map(file => ({
         file,
-        aiProcessing: false,
+        progress: 0,
+        status: 'pending' as const,
       }));
       setFiles(prev => [...prev, ...newFiles]);
-      // Auto-fill document name from first file
-      if (!documentName && newFiles[0]) {
-        setDocumentName(newFiles[0].file.name.replace(/\.[^/.]+$/, ''));
-      }
     }
-  }, [documentName]);
+  }, []);
 
   const handleFileSelect = (e: React.ChangeEvent<HTMLInputElement>) => {
     if (e.target.files && e.target.files.length > 0) {
       const newFiles = Array.from(e.target.files).map(file => ({
         file,
-        aiProcessing: false,
+        progress: 0,
+        status: 'pending' as const,
       }));
       setFiles(prev => [...prev, ...newFiles]);
-      // Auto-fill document name from first file
-      if (!documentName && newFiles[0]) {
-        setDocumentName(newFiles[0].file.name.replace(/\.[^/.]+$/, ''));
-      }
     }
   };
 
@@ -116,182 +94,81 @@ export default function DocumentUploadPage() {
     setFiles(prev => prev.filter((_, i) => i !== index));
   };
 
-  // Process AI for a specific file after upload
-  const processAI = async (index: number, filePath: string, documentId: string) => {
-    const fileInfo = files[index];
-    if (!fileInfo || !enableAI) return;
-
-    // Update to show AI is processing
-    setFiles(prev => prev.map((f, i) =>
-      i === index ? { ...f, aiProcessing: true } : f
-    ));
-
-    try {
-      // Step 1: Extract text from document
-      const extractResult = await aiExtractDocument({ file_key: filePath });
-
-      // Handle async job response vs immediate result
-      if ('job_id' in extractResult) {
-        setFiles(prev => prev.map((f, i) =>
-          i === index ? { ...f, aiProcessing: false } : f
-        ));
-        return;
-      }
-
-      const text = (extractResult.extracted_data?.text as string) || '';
-
-      if (!text) {
-        setFiles(prev => prev.map((f, i) =>
-          i === index ? { ...f, aiProcessing: false } : f
-        ));
-        return;
-      }
-
-      // Step 2: Classify document
-      const classifyResult = await aiClassifyDocument({
-        file_key: filePath,
-        text,
-      });
-
-      // Step 3: Get suggested name
-      const selectedClientObj = clients.find(c => c.id === selectedClient);
-      const renameResult = await aiRenameDocument({
-        text,
-        original_filename: fileInfo.file.name,
-        document_type: classifyResult.document_type,
-        client_name: selectedClientObj?.company_name,
-        file_key: filePath,
-      });
-
-      // Update file with AI results
-      setFiles(prev => prev.map((f, i) =>
-        i === index ? {
-          ...f,
-          aiProcessing: false,
-          aiClassification: {
-            document_type: classifyResult.document_type,
-            confidence: classifyResult.confidence,
-            subcategory: classifyResult.subcategory,
-          },
-          aiSuggestedName: renameResult.suggested_name,
-          aiAlternativeNames: renameResult.alternatives,
-        } : f
-      ));
-    } catch (err) {
-      console.error('AI processing failed:', err);
-      setFiles(prev => prev.map((f, i) =>
-        i === index ? { ...f, aiProcessing: false } : f
-      ));
-    }
-  };
-
-  const acceptAISuggestion = (index: number) => {
-    const fileInfo = files[index];
-    if (!fileInfo) return;
-
-    setFiles(prev => prev.map((f, i) =>
-      i === index ? {
-        ...f,
-        acceptedName: f.aiSuggestedName,
-        acceptedType: f.aiClassification?.document_type,
-      } : f
-    ));
-
-    // Update document with AI suggestions
-    if (fileInfo.documentId && fileInfo.aiSuggestedName) {
-      updateDocument(fileInfo.documentId, {
-        name: fileInfo.aiSuggestedName,
-      }).catch(err => console.error('Failed to update document:', err));
-    }
-  };
-
-  const useAlternativeName = (index: number, name: string) => {
-    const fileInfo = files[index];
-    if (!fileInfo) return;
-
-    setFiles(prev => prev.map((f, i) =>
-      i === index ? { ...f, acceptedName: name } : f
-    ));
-
-    if (fileInfo.documentId) {
-      updateDocument(fileInfo.documentId, { name }).catch(err =>
-        console.error('Failed to update document:', err)
-      );
-    }
-  };
-
   const handleUpload = async () => {
     if (files.length === 0) {
       toast.error('Please select at least one file');
       return;
     }
-    if (!documentName.trim()) {
-      toast.error('Please enter a document name');
-      return;
-    }
 
     setUploading(true);
-    try {
-      const uploadedFiles: { index: number; filePath: string; documentId: string }[] = [];
+    let successCount = 0;
 
-      for (let i = 0; i < files.length; i++) {
-        const fileInfo = files[i];
-        // Get signed upload URL
+    for (let i = 0; i < files.length; i++) {
+      const fileInfo = files[i];
+
+      // Update status to uploading
+      setFiles(prev => prev.map((f, idx) =>
+        idx === i ? { ...f, status: 'uploading' as const, progress: 10 } : f
+      ));
+
+      try {
+        // Get upload URL (creates pending document record)
         const { upload_url, document_id } = await getDocumentUploadUrl({
-          name: documentName || fileInfo.file.name.replace(/\.[^/.]+$/, ''),
+          name: fileInfo.file.name.replace(/\.[^/.]+$/, ''),
           client_id: selectedClient || undefined,
-        });
-
-        // Extract file path from upload URL (OSS path pattern)
-        const urlObj = new URL(upload_url);
-        const filePath = urlObj.pathname.slice(1); // Remove leading slash
-
-        // Upload file directly to storage
-        const uploadRes = await fetch(upload_url, {
-          method: 'PUT',
-          body: fileInfo.file,
-          headers: {
-            'Content-Type': fileInfo.file.type || 'application/octet-stream',
-          },
-        });
-
-        if (!uploadRes.ok) {
-          throw new Error(`Failed to upload ${fileInfo.file.name}`);
-        }
-
-        // Confirm upload with metadata
-        await confirmDocumentUpload(document_id, {
-          name: documentName || fileInfo.file.name.replace(/\.[^/.]+$/, ''),
-          original_name: fileInfo.file.name,
-          file_size: fileInfo.file.size,
-          mime_type: fileInfo.file.type || 'application/octet-stream',
           type_id: selectedType || undefined,
         });
 
-        // Store for AI processing
-        uploadedFiles.push({ index: i, filePath, documentId: document_id });
-
-        // Update file state with document info
         setFiles(prev => prev.map((f, idx) =>
-          idx === i ? { ...f, documentId: document_id, filePath } : f
+          idx === i ? { ...f, progress: 30 } : f
+        ));
+
+        // Upload file via multipart POST to backend endpoint
+        const formData = new FormData();
+        formData.append('file', fileInfo.file);
+
+        const uploadRes = await fetch(upload_url, {
+          method: 'POST',
+          credentials: 'include',
+          body: formData,
+        });
+
+        if (!uploadRes.ok) {
+          const errorData = await uploadRes.json().catch(() => ({}));
+          throw new Error(errorData.message || `Upload failed: ${uploadRes.statusText}`);
+        }
+
+        setFiles(prev => prev.map((f, idx) =>
+          idx === i ? { ...f, progress: 70 } : f
+        ));
+
+        // Update to complete
+        setFiles(prev => prev.map((f, idx) =>
+          idx === i ? { ...f, status: 'complete' as const, progress: 100, documentId: document_id } : f
+        ));
+        successCount++;
+
+      } catch (err) {
+        setFiles(prev => prev.map((f, idx) =>
+          idx === i ? {
+            ...f,
+            status: 'error' as const,
+            error: err instanceof Error ? err.message : 'Upload failed'
+          } : f
         ));
       }
+    }
 
-      toast.success(`Successfully uploaded ${files.length} document(s)`);
+    setUploading(false);
 
-      if (enableAI && uploadedFiles.length > 0) {
-        setUploadComplete(true);
-        // Process AI for each file in background
-        for (const { index, filePath, documentId } of uploadedFiles) {
-          processAI(index, filePath, documentId);
-        }
-      } else {
+    if (successCount > 0) {
+      toast.success(`Successfully uploaded ${successCount} document${successCount > 1 ? 's' : ''}`);
+      // Navigate after short delay
+      setTimeout(() => {
         router.push('/dashboard/documents');
-      }
-    } catch (err) {
-      toast.error(err instanceof Error ? err.message : 'Upload failed');
-    } finally {
-      setUploading(false);
+      }, 1500);
+    } else {
+      toast.error('All uploads failed');
     }
   };
 
@@ -301,207 +178,139 @@ export default function DocumentUploadPage() {
     return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
   };
 
+  const handleClose = () => {
+    router.push('/dashboard/documents');
+  };
+
   if (loading) {
     return (
-      <div className="p-6 flex items-center justify-center">
+      <div className="h-full flex items-center justify-center p-4 bg-gray-100 dark:bg-slate-900">
         <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-blue-600"></div>
       </div>
     );
   }
 
   return (
-    <div className="p-6 max-w-4xl mx-auto">
-      <div className="mb-6">
-        <h1 className="text-2xl font-bold text-gray-900 dark:text-white">Upload Document</h1>
-        <p className="text-gray-500 dark:text-gray-400 mt-1">
-          Upload documents for clients or firm use
-        </p>
-      </div>
-
-      <div className="bg-white dark:bg-slate-800 rounded-lg shadow p-6 space-y-6">
-        {/* Drag & Drop Zone */}
-        <div
-          onDragEnter={handleDrag}
-          onDragLeave={handleDrag}
-          onDragOver={handleDrag}
-          onDrop={handleDrop}
-          className={`
-            border-2 border-dashed rounded-lg p-8 text-center transition-colors cursor-pointer
-            ${dragActive
-              ? 'border-blue-500 bg-blue-50 dark:bg-blue-900/20'
-              : 'border-gray-300 dark:border-gray-600 hover:border-blue-400 dark:hover:border-blue-500'
-            }
-          `}
-          onClick={() => document.getElementById('file-input')?.click()}
-        >
-          <svg className="mx-auto h-12 w-12 text-gray-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M7 16a4 4 0 01-.88-7.903A5 5 0 1115.9 6L16 6a5 5 0 011 9.9M15 13l-3-3m0 0l-3 3m3-3v12" />
-          </svg>
-          <p className="mt-2 text-sm text-gray-600 dark:text-gray-400">
-            <span className="font-medium text-blue-600 dark:text-blue-400">Click to upload</span> or drag and drop
-          </p>
-          <p className="text-xs text-gray-500 dark:text-gray-500 mt-1">
-            PDF, DOC, DOCX, XLS, XLSX, PNG, JPG up to 50MB
-          </p>
-          <input
-            id="file-input"
-            type="file"
-            multiple
-            onChange={handleFileSelect}
-            className="hidden"
-            accept=".pdf,.doc,.docx,.xls,.xlsx,.png,.jpg,.jpeg"
-          />
+    <div className="h-full flex items-center justify-center p-4 bg-gray-100 dark:bg-slate-900">
+      {/* Overlay Panel */}
+      <div className="w-full max-w-lg bg-white dark:bg-slate-800 rounded-lg shadow-xl overflow-hidden flex flex-col max-h-[90vh]">
+        {/* Header */}
+        <div className="flex items-center justify-between px-6 py-4 border-b border-gray-200 dark:border-gray-700">
+          <h1 className="text-lg font-semibold text-gray-900 dark:text-white flex items-center">
+            <span className="mr-2">⬆️</span>
+            UPLOAD DOCUMENT
+          </h1>
+          <button
+            onClick={handleClose}
+            className="text-gray-400 hover:text-gray-600 dark:hover:text-gray-300 text-2xl font-light"
+            data-testid="close-upload"
+          >
+            ✕
+          </button>
         </div>
 
-        {/* Selected Files */}
-        {files.length > 0 && (
-          <div className="space-y-2">
-            <h3 className="text-sm font-medium text-gray-700 dark:text-gray-300">
-              {uploadComplete ? 'Uploaded Files' : 'Selected Files'}
-            </h3>
-            <ul className="divide-y divide-gray-200 dark:divide-gray-700 border border-gray-200 dark:border-gray-700 rounded-lg">
-              {files.map((fileInfo, index) => (
-                <li key={index} className="p-4">
-                  <div className="flex items-start justify-between">
-                    <div className="flex items-start space-x-3 flex-1">
-                      <svg className="h-8 w-8 text-gray-400 flex-shrink-0 mt-1" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" />
-                      </svg>
-                      <div className="flex-1 min-w-0">
-                        <p className="text-sm font-medium text-gray-900 dark:text-white">{fileInfo.file.name}</p>
-                        <p className="text-xs text-gray-500">{formatFileSize(fileInfo.file.size)}</p>
-
-                        {/* AI Processing Indicator */}
-                        {fileInfo.aiProcessing && (
-                          <div className="mt-2 flex items-center text-purple-600 dark:text-purple-400">
-                            <svg className="animate-spin h-4 w-4 mr-2" fill="none" viewBox="0 0 24 24">
-                              <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"></circle>
-                              <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
-                            </svg>
-                            <span className="text-sm">AI analyzing document...</span>
-                          </div>
-                        )}
-
-                        {/* AI Classification Result */}
-                        {fileInfo.aiClassification && !fileInfo.aiProcessing && (
-                          <div className="mt-2 p-3 bg-purple-50 dark:bg-purple-900/20 rounded-lg border border-purple-200 dark:border-purple-800">
-                            <div className="flex items-center mb-2">
-                              <span className="text-purple-600 dark:text-purple-400 mr-2">AI</span>
-                              <span className="text-sm font-medium text-gray-900 dark:text-white">
-                                Classified as: {fileInfo.aiClassification.document_type}
-                              </span>
-                              <span className="ml-2 text-xs text-gray-500">
-                                ({Math.round(fileInfo.aiClassification.confidence * 100)}% confidence)
-                              </span>
-                            </div>
-
-                            {fileInfo.aiSuggestedName && (
-                              <div className="mt-2">
-                                <p className="text-xs text-gray-600 dark:text-gray-400 mb-1">Suggested name:</p>
-                                <div className="flex items-center gap-2 flex-wrap">
-                                  <span className="px-2 py-1 bg-white dark:bg-slate-700 rounded text-sm font-medium text-gray-900 dark:text-white">
-                                    {fileInfo.aiSuggestedName}
-                                  </span>
-                                  {!fileInfo.acceptedName && (
-                                    <button
-                                      onClick={() => acceptAISuggestion(index)}
-                                      className="px-2 py-1 text-xs bg-green-100 text-green-700 dark:bg-green-900/30 dark:text-green-400 rounded hover:bg-green-200 dark:hover:bg-green-900/50"
-                                    >
-                                      Accept
-                                    </button>
-                                  )}
-                                  {fileInfo.acceptedName && (
-                                    <span className="text-xs text-green-600 dark:text-green-400 flex items-center">
-                                      <svg className="w-4 h-4 mr-1" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 13l4 4L19 7" />
-                                      </svg>
-                                      Accepted
-                                    </span>
-                                  )}
-                                </div>
-
-                                {/* Alternative names */}
-                                {fileInfo.aiAlternativeNames && fileInfo.aiAlternativeNames.length > 0 && !fileInfo.acceptedName && (
-                                  <div className="mt-2">
-                                    <p className="text-xs text-gray-500 dark:text-gray-400 mb-1">Alternatives:</p>
-                                    <div className="flex flex-wrap gap-1">
-                                      {fileInfo.aiAlternativeNames.map((altName, altIdx) => (
-                                        <button
-                                          key={altIdx}
-                                          onClick={() => useAlternativeName(index, altName)}
-                                          className="px-2 py-0.5 text-xs bg-gray-100 dark:bg-slate-600 text-gray-700 dark:text-gray-300 rounded hover:bg-gray-200 dark:hover:bg-slate-500"
-                                        >
-                                          {altName}
-                                        </button>
-                                      ))}
-                                    </div>
-                                  </div>
-                                )}
-                              </div>
-                            )}
-                          </div>
-                        )}
-                      </div>
-                    </div>
-                    {!uploadComplete && (
-                      <button
-                        onClick={() => removeFile(index)}
-                        className="text-red-500 hover:text-red-700 ml-3"
-                      >
-                        <svg className="h-5 w-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
-                        </svg>
-                      </button>
-                    )}
-                  </div>
-                </li>
-              ))}
-            </ul>
-          </div>
-        )}
-
-        {/* Form Fields */}
-        <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-          <div>
-            <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1">
-              Document Name
-            </label>
+        {/* Content */}
+        <div className="flex-1 overflow-y-auto px-6 py-4 space-y-4">
+          {/* Drag & Drop Zone */}
+          <div
+            onDragEnter={handleDrag}
+            onDragLeave={handleDrag}
+            onDragOver={handleDrag}
+            onDrop={handleDrop}
+            onClick={() => document.getElementById('file-input')?.click()}
+            className={`
+              border-2 border-dashed rounded-lg p-6 text-center transition-colors cursor-pointer
+              ${dragActive
+                ? 'border-blue-500 bg-blue-50 dark:bg-blue-900/20'
+                : 'border-gray-300 dark:border-gray-600 hover:border-blue-400 dark:hover:border-blue-500'
+              }
+            `}
+            data-testid="drop-zone"
+          >
+            <div className="text-3xl mb-2">📁</div>
+            <p className="text-sm text-gray-600 dark:text-gray-400">
+              <span className="font-medium text-blue-600 dark:text-blue-400">Drop file here</span>
+              <br />or click to browse
+            </p>
+            <p className="text-xs text-gray-500 dark:text-gray-500 mt-2">
+              PDF, DOC, XLS, PNG, JPG up to 50MB
+            </p>
             <input
-              type="text"
-              value={documentName}
-              onChange={(e) => setDocumentName(e.target.value)}
-              disabled={uploadComplete}
-              className="w-full px-3 py-2 border border-gray-300 dark:border-gray-600 rounded-md bg-white dark:bg-slate-700 text-gray-900 dark:text-white disabled:opacity-50"
-              placeholder="Enter document name"
+              id="file-input"
+              type="file"
+              multiple
+              onChange={handleFileSelect}
+              className="hidden"
+              accept=".pdf,.doc,.docx,.xls,.xlsx,.png,.jpg,.jpeg"
+              data-testid="file-input"
             />
           </div>
 
-          <div>
-            <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1">
-              Document Type
-            </label>
-            <select
-              value={selectedType}
-              onChange={(e) => setSelectedType(e.target.value)}
-              disabled={uploadComplete}
-              className="w-full px-3 py-2 border border-gray-300 dark:border-gray-600 rounded-md bg-white dark:bg-slate-700 text-gray-900 dark:text-white disabled:opacity-50"
-            >
-              <option value="">Select type (optional)</option>
-              {documentTypes.map((type) => (
-                <option key={type.id} value={type.id}>{type.name}</option>
+          {/* Selected Files */}
+          {files.length > 0 && (
+            <div className="space-y-2">
+              {files.map((fileInfo, index) => (
+                <div
+                  key={index}
+                  className={`
+                    flex items-center justify-between p-3 rounded-lg border
+                    ${fileInfo.status === 'complete'
+                      ? 'bg-green-50 dark:bg-green-900/20 border-green-200 dark:border-green-800'
+                      : fileInfo.status === 'error'
+                      ? 'bg-red-50 dark:bg-red-900/20 border-red-200 dark:border-red-800'
+                      : 'bg-gray-50 dark:bg-slate-700/50 border-gray-200 dark:border-gray-600'
+                    }
+                  `}
+                  data-testid={`file-item-${index}`}
+                >
+                  <div className="flex items-center space-x-3 flex-1 min-w-0">
+                    <span className="text-xl">
+                      {fileInfo.status === 'complete' ? '✅' : fileInfo.status === 'error' ? '❌' : '📄'}
+                    </span>
+                    <div className="flex-1 min-w-0">
+                      <p className="text-sm font-medium text-gray-900 dark:text-white truncate">
+                        {fileInfo.file.name}
+                      </p>
+                      <p className="text-xs text-gray-500">
+                        {formatFileSize(fileInfo.file.size)}
+                        {fileInfo.status === 'uploading' && ` · ${fileInfo.progress}%`}
+                        {fileInfo.status === 'error' && ` · ${fileInfo.error}`}
+                      </p>
+                      {fileInfo.status === 'uploading' && (
+                        <div className="mt-1 w-full bg-gray-200 dark:bg-gray-600 rounded-full h-1">
+                          <div
+                            className="bg-blue-600 h-1 rounded-full transition-all duration-300"
+                            style={{ width: `${fileInfo.progress}%` }}
+                          />
+                        </div>
+                      )}
+                    </div>
+                  </div>
+                  {fileInfo.status === 'pending' && (
+                    <button
+                      onClick={(e) => { e.stopPropagation(); removeFile(index); }}
+                      className="text-gray-400 hover:text-red-500 ml-2"
+                      data-testid={`remove-file-${index}`}
+                    >
+                      ✕
+                    </button>
+                  )}
+                </div>
               ))}
-            </select>
-          </div>
+            </div>
+          )}
 
+          {/* Client Selection */}
           <div>
             <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1">
-              Client (Optional)
+              Client
             </label>
             <select
               value={selectedClient}
               onChange={(e) => setSelectedClient(e.target.value)}
-              disabled={uploadComplete}
+              disabled={uploading}
               className="w-full px-3 py-2 border border-gray-300 dark:border-gray-600 rounded-md bg-white dark:bg-slate-700 text-gray-900 dark:text-white disabled:opacity-50"
+              data-testid="client-select"
             >
               <option value="">No client (Firm Document)</option>
               {clients.map((client) => (
@@ -510,95 +319,54 @@ export default function DocumentUploadPage() {
             </select>
           </div>
 
-          {/* AI Toggle */}
-          <div className="flex items-center">
-            <label className="flex items-center cursor-pointer">
-              <input
-                type="checkbox"
-                checked={enableAI}
-                onChange={(e) => setEnableAI(e.target.checked)}
-                disabled={uploadComplete}
-                className="w-4 h-4 text-purple-600 border-gray-300 rounded focus:ring-purple-500"
-              />
-              <span className="ml-2 text-sm text-gray-700 dark:text-gray-300">
-                Enable AI classification
-              </span>
+          {/* Category Selection */}
+          <div>
+            <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1">
+              Category
             </label>
-            <span className="ml-2 px-2 py-0.5 text-xs bg-purple-100 text-purple-700 dark:bg-purple-900/30 dark:text-purple-400 rounded">
-              AI
-            </span>
+            <select
+              value={selectedType}
+              onChange={(e) => setSelectedType(e.target.value)}
+              disabled={uploading}
+              className="w-full px-3 py-2 border border-gray-300 dark:border-gray-600 rounded-md bg-white dark:bg-slate-700 text-gray-900 dark:text-white disabled:opacity-50"
+              data-testid="type-select"
+            >
+              <option value="">Select category (optional)</option>
+              {documentTypes.map((type) => (
+                <option key={type.id} value={type.id}>{type.name}</option>
+              ))}
+            </select>
           </div>
         </div>
 
-        {/* Actions */}
-        <div className="flex justify-end space-x-3 pt-4 border-t border-gray-200 dark:border-gray-700">
-          {uploadComplete ? (
-            <>
-              <button
-                onClick={() => {
-                  setFiles([]);
-                  setUploadComplete(false);
-                  setDocumentName('');
-                }}
-                className="px-4 py-2 text-gray-700 dark:text-gray-300 hover:bg-gray-100 dark:hover:bg-slate-700 rounded-md"
-              >
-                Upload More
-              </button>
-              <button
-                onClick={() => router.push('/dashboard/documents')}
-                disabled={files.some(f => f.aiProcessing)}
-                className="px-4 py-2 bg-green-600 text-white rounded-md hover:bg-green-700 disabled:opacity-50 disabled:cursor-not-allowed flex items-center"
-              >
-                {files.some(f => f.aiProcessing) ? (
-                  <>
-                    <svg className="animate-spin -ml-1 mr-2 h-4 w-4" fill="none" viewBox="0 0 24 24">
-                      <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"></circle>
-                      <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
-                    </svg>
-                    AI Processing...
-                  </>
-                ) : (
-                  <>
-                    <svg className="w-4 h-4 mr-2" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 13l4 4L19 7" />
-                    </svg>
-                    Done
-                  </>
-                )}
-              </button>
-            </>
-          ) : (
-            <>
-              <button
-                onClick={() => router.push('/dashboard/documents')}
-                className="px-4 py-2 text-gray-700 dark:text-gray-300 hover:bg-gray-100 dark:hover:bg-slate-700 rounded-md"
-              >
-                Cancel
-              </button>
-              <button
-                onClick={handleUpload}
-                disabled={uploading || files.length === 0}
-                className="px-4 py-2 bg-blue-600 text-white rounded-md hover:bg-blue-700 disabled:opacity-50 disabled:cursor-not-allowed flex items-center"
-              >
-                {uploading ? (
-                  <>
-                    <svg className="animate-spin -ml-1 mr-2 h-4 w-4" fill="none" viewBox="0 0 24 24">
-                      <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"></circle>
-                      <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
-                    </svg>
-                    Uploading...
-                  </>
-                ) : (
-                  <>
-                    <svg className="w-4 h-4 mr-2" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M7 16a4 4 0 01-.88-7.903A5 5 0 1115.9 6L16 6a5 5 0 011 9.9M15 13l-3-3m0 0l-3 3m3-3v12" />
-                    </svg>
-                    Upload {enableAI && '& Analyze'}
-                  </>
-                )}
-              </button>
-            </>
-          )}
+        {/* Footer Actions */}
+        <div className="px-6 py-4 border-t border-gray-200 dark:border-gray-700 flex justify-end space-x-3">
+          <button
+            onClick={handleClose}
+            disabled={uploading}
+            className="px-4 py-2 text-gray-700 dark:text-gray-300 hover:bg-gray-100 dark:hover:bg-slate-700 rounded-md disabled:opacity-50"
+            data-testid="cancel-btn"
+          >
+            Cancel
+          </button>
+          <button
+            onClick={handleUpload}
+            disabled={uploading || files.length === 0 || files.every(f => f.status === 'complete')}
+            className="px-4 py-2 bg-blue-600 text-white rounded-md hover:bg-blue-700 disabled:opacity-50 disabled:cursor-not-allowed flex items-center"
+            data-testid="upload-btn"
+          >
+            {uploading ? (
+              <>
+                <svg className="animate-spin -ml-1 mr-2 h-4 w-4" fill="none" viewBox="0 0 24 24">
+                  <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"></circle>
+                  <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
+                </svg>
+                Uploading...
+              </>
+            ) : (
+              'Upload'
+            )}
+          </button>
         </div>
       </div>
     </div>
