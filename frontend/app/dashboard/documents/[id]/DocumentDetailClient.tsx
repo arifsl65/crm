@@ -20,7 +20,7 @@ import {
   aiRenameDocument,
 } from '@/lib/api';
 import { getStatusBadgeClass, formatStatus } from '@/lib/status';
-import { useToast } from '@/components';
+import { useToast, DocumentPreviewModal } from '@/components';
 
 export default function DocumentDetailClient() {
   const params = useParams();
@@ -37,6 +37,11 @@ export default function DocumentDetailClient() {
   const [showRejectModal, setShowRejectModal] = useState(false);
   const [rejectReason, setRejectReason] = useState('');
   const [rejecting, setRejecting] = useState(false);
+
+  // Preview modal state
+  const [showPreview, setShowPreview] = useState(false);
+  const [previewUrl, setPreviewUrl] = useState<string | null>(null);
+  const [previewLoading, setPreviewLoading] = useState(false);
 
   // AI Analysis state
   const [aiAnalyzing, setAiAnalyzing] = useState(false);
@@ -212,6 +217,26 @@ export default function DocumentDetailClient() {
     } catch (err) {
       toast.error(err instanceof Error ? err.message : 'Failed to download document');
     }
+  };
+
+  const handlePreview = async () => {
+    if (!document) return;
+    try {
+      setPreviewLoading(true);
+      setShowPreview(true);
+      const { download_url } = await downloadDocument(document.id);
+      setPreviewUrl(download_url);
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : 'Failed to load preview');
+      setShowPreview(false);
+    } finally {
+      setPreviewLoading(false);
+    }
+  };
+
+  const handleClosePreview = () => {
+    setShowPreview(false);
+    setPreviewUrl(null);
   };
 
   const formatFileSize = (bytes?: number) => {
@@ -477,15 +502,28 @@ export default function DocumentDetailClient() {
               <h2 className="text-lg font-semibold text-gray-900 dark:text-white mb-4">Actions</h2>
               <div className="space-y-3">
                 {document.file_path && (
-                  <button
-                    onClick={handleDownload}
-                    className="w-full flex items-center justify-center px-4 py-2 border border-gray-300 dark:border-gray-600 rounded-md text-sm font-medium text-gray-700 dark:text-gray-300 bg-white dark:bg-slate-700 hover:bg-gray-50 dark:hover:bg-slate-600"
-                  >
-                    <svg className="w-5 h-5 mr-2" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4" />
-                    </svg>
-                    Download
-                  </button>
+                  <>
+                    <button
+                      onClick={handlePreview}
+                      disabled={previewLoading}
+                      className="w-full flex items-center justify-center px-4 py-2 border border-blue-300 dark:border-blue-600 rounded-md text-sm font-medium text-blue-700 dark:text-blue-300 bg-blue-50 dark:bg-blue-900/20 hover:bg-blue-100 dark:hover:bg-blue-900/30 disabled:opacity-50"
+                    >
+                      <svg className="w-5 h-5 mr-2" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 12a3 3 0 11-6 0 3 3 0 016 0z" />
+                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M2.458 12C3.732 7.943 7.523 5 12 5c4.478 0 8.268 2.943 9.542 7-1.274 4.057-5.064 7-9.542 7-4.477 0-8.268-2.943-9.542-7z" />
+                      </svg>
+                      {previewLoading ? 'Loading...' : 'Preview'}
+                    </button>
+                    <button
+                      onClick={handleDownload}
+                      className="w-full flex items-center justify-center px-4 py-2 border border-gray-300 dark:border-gray-600 rounded-md text-sm font-medium text-gray-700 dark:text-gray-300 bg-white dark:bg-slate-700 hover:bg-gray-50 dark:hover:bg-slate-600"
+                    >
+                      <svg className="w-5 h-5 mr-2" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4" />
+                      </svg>
+                      Download
+                    </button>
+                  </>
                 )}
 
                 {/* AI Analyze Button */}
@@ -651,6 +689,20 @@ export default function DocumentDetailClient() {
           </div>
         </div>
       )}
+
+      {/* Document Preview Modal */}
+      <DocumentPreviewModal
+        isOpen={showPreview}
+        document={document}
+        previewUrl={previewUrl}
+        loading={previewLoading}
+        onClose={handleClosePreview}
+        onApprove={handleApprove}
+        onReject={() => {
+          handleClosePreview();
+          setShowRejectModal(true);
+        }}
+      />
     </div>
   );
 }

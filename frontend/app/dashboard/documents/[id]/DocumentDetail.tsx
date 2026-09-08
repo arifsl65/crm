@@ -12,6 +12,7 @@ import {
   rejectDocument,
 } from '@/lib/api';
 import { getStatusBadgeClass, formatStatus } from '@/lib/status';
+import { DocumentPreviewModal } from '@/components';
 
 type Tab = 'info' | 'versions';
 
@@ -32,6 +33,9 @@ export default function DocumentDetail() {
   const [reviewNote, setReviewNote] = useState('');
   const [actionLoading, setActionLoading] = useState(false);
   const [downloadLoading, setDownloadLoading] = useState(false);
+  const [showPreview, setShowPreview] = useState(false);
+  const [previewUrl, setPreviewUrl] = useState<string | null>(null);
+  const [previewLoading, setPreviewLoading] = useState(false);
 
   const fetchDocument = useCallback(async () => {
     try {
@@ -110,14 +114,21 @@ export default function DocumentDetail() {
 
   const handlePreview = async () => {
     try {
-      setDownloadLoading(true);
+      setPreviewLoading(true);
+      setShowPreview(true);
       const { download_url } = await downloadDocument(documentId);
-      window.open(download_url, '_blank');
+      setPreviewUrl(download_url);
     } catch (err) {
       alert(err instanceof Error ? err.message : 'Failed to preview');
+      setShowPreview(false);
     } finally {
-      setDownloadLoading(false);
+      setPreviewLoading(false);
     }
+  };
+
+  const handleClosePreview = () => {
+    setShowPreview(false);
+    setPreviewUrl(null);
   };
 
   const handleApprove = async () => {
@@ -192,7 +203,7 @@ export default function DocumentDetail() {
                 </div>
                 <div className="flex justify-end gap-3 mt-4">
                   <button onClick={handleDownload} disabled={downloadLoading} className="px-4 py-2 text-sm bg-gray-100 dark:bg-slate-700 text-gray-700 dark:text-gray-300 rounded-md hover:bg-gray-200 dark:hover:bg-slate-600 transition-colors disabled:opacity-50">{downloadLoading ? '...' : '⬇️ Download'}</button>
-                  <button onClick={handlePreview} disabled={downloadLoading} className="px-4 py-2 text-sm bg-gray-100 dark:bg-slate-700 text-gray-700 dark:text-gray-300 rounded-md hover:bg-gray-200 dark:hover:bg-slate-600 transition-colors disabled:opacity-50">{downloadLoading ? '...' : '👁️ Preview'}</button>
+                  <button onClick={handlePreview} disabled={previewLoading} className="px-4 py-2 text-sm bg-gray-100 dark:bg-slate-700 text-gray-700 dark:text-gray-300 rounded-md hover:bg-gray-200 dark:hover:bg-slate-600 transition-colors disabled:opacity-50">{previewLoading ? '...' : '👁️ Preview'}</button>
                 </div>
               </div>
 
@@ -252,6 +263,24 @@ export default function DocumentDetail() {
           ) : null}
         </div>
       </div>
+
+      {/* Document Preview Modal */}
+      <DocumentPreviewModal
+        isOpen={showPreview}
+        document={document}
+        previewUrl={previewUrl}
+        loading={previewLoading}
+        onClose={handleClosePreview}
+        onApprove={handleApprove}
+        onReject={() => {
+          handleClosePreview();
+          if (!reviewNote.trim()) {
+            alert('Please provide a reason for rejection');
+            return;
+          }
+          handleReject();
+        }}
+      />
     </div>
   );
 }
